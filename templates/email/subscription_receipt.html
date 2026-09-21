@@ -1,0 +1,182 @@
+{#
+  The RECEIPT template — ``renewal_paid`` only.
+
+  This is the markup every billing email used before the 2026-09 redesign, kept because a
+  receipt is a document rather than a notice: it has to itemise what was charged, over
+  what period, and for which modules. The new centered design in
+  ``subscription_notice.html`` is prose-only and has nowhere to put a line-item table, so
+  collapsing the two would mean a customer's only record of a payment stopped saying what
+  the payment was for.
+
+  Temporary by intent. Once the invoice-styled mockup for ``renewal_paid`` exists, that
+  design absorbs this one and this file goes away — see ``notify.TEMPLATES``.
+
+  Table layout and inline styles are not a stylistic choice: Outlook and most webmail
+  clients strip <style> blocks and ignore flex/grid, so anything laid out the way the
+  rest of the app is laid out arrives as a stack of unstyled paragraphs.
+
+  ``tone`` drives the accent only. The words carry the urgency.
+#}
+{% set accent = {'neutral': '#3BB8BF', 'warn': '#D97706', 'alert': '#DC2626'}.get(tone, '#3BB8BF') %}
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  {# Webfonts are PROGRESSIVE ENHANCEMENT here, never a dependency.
+
+     Apple Mail (macOS and iOS) honours this link; Outlook.com mostly does. Gmail strips
+     @font-face and <link> on every platform it runs on, and Outlook's Windows desktop
+     client cannot load a webfont at all — so the majority of business recipients read
+     these in the fallback stack, and the design has to survive that. It does: the
+     fallbacks below are the fonts the emails shipped in before this was added.
+
+     The MSO block underneath is not optional. Outlook/Windows, handed a font-family list
+     whose first entry it cannot resolve, does not walk the list — it drops to Times New
+     Roman. Naming a web-safe font explicitly for MSO is what stops a serif email. #}
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@700;800&family=Inter:wght@400;500;600&display=swap"
+        rel="stylesheet">
+  <!--[if mso]>
+  <style>
+    * { font-family: 'Trebuchet MS', Verdana, Arial, Helvetica, sans-serif !important; }
+  </style>
+  <![endif]-->
+  {# iOS Mail scans body text for anything that parses as a date, time, phone number or
+     address and injects its OWN <a> around it. "in 7 days" and "16 Sep 2026" both trip
+     it, so the heading and the deadline arrive as tappable iOS-blue underlined links to
+     the calendar — in the middle of a teal design, on the one email whose job is to be
+     read rather than clicked.
+
+     This asks it not to. Some iOS builds honour the meta and some ignore it, so the rule
+     below undoes the styling for the ones that inject the anchor regardless. #}
+  <meta name="format-detection"
+        content="telephone=no,date=no,address=no,email=no,url=no">
+  <style>
+    /* The one exception to "style blocks are worthless in email" in the note below: the
+       only client this has to reach is iOS Mail, which is also the only client doing the
+       injecting — and it supports <style> perfectly well. Everywhere else this is inert.
+
+       !important throughout because the styles being overridden are the client's own,
+       applied after ours. */
+    a[x-apple-data-detectors],
+    a[x-apple-data-detectors] span,
+    .x-gmail-data-detectors,
+    .x-gmail-data-detectors *,
+    .aBn {
+      color: inherit !important;
+      text-decoration: none !important;
+      font-size: inherit !important;
+      font-family: inherit !important;
+      font-weight: inherit !important;
+      line-height: inherit !important;
+      border-bottom: 0 !important;
+    }
+  </style>
+</head>
+  <body style="margin:0;padding:32px 12px;font-family:Arial,Helvetica,sans-serif;background:#f0f4f8;">
+    <table width="100%" cellpadding="0" cellspacing="0" role="presentation">
+      <tr>
+        <td align="center">
+          <table width="520" cellpadding="0" cellspacing="0" role="presentation"
+                 style="max-width:520px;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,.08);">
+
+            <tr><td style="height:5px;background:{{ accent }};font-size:0;line-height:0;">&nbsp;</td></tr>
+
+            <tr>
+              <td style="padding:36px 40px 8px;">
+                {# ``logo_src`` is a cid: reference to a part attached to this very
+                   message — see notify.logo_bytes. A remote <img> is a broken box
+                   whenever the client blocks images (Gmail and Outlook both do, by
+                   default) or PUBLIC_URL isn't publicly reachable, which is worse than
+                   no logo at all. Left unset there is no <img> whatsoever, never a
+                   dangling reference. Kept as a plain src rather than a bare CID so a
+                   preview harness can hand it a data: URI instead. #}
+                {% if logo_src %}
+                  <img src="{{ logo_src }}" alt="Minty" height="30"
+                       style="display:block;border:0;height:30px;margin:0 0 24px;">
+                {% endif %}
+                <h1 style="margin:0 0 12px;font-size:21px;line-height:1.3;color:#2d3748;font-weight:700;">
+                  {{ heading }}
+                </h1>
+                <p style="margin:0 0 20px;font-size:15px;line-height:1.6;color:#4a5568;">
+                  {% if first_name %}Hi {{ first_name }},<br>{% endif %}
+                  {{ lede }}
+                </p>
+              </td>
+            </tr>
+
+            {% set shown_facts = facts | rejectattr('1', 'equalto', '') | list if facts else [] %}
+            {% if shown_facts %}
+              <tr>
+                <td style="padding:0 40px;">
+                  <table width="100%" cellpadding="0" cellspacing="0" role="presentation"
+                         style="background:#f7fafc;border-radius:10px;">
+                    {% for label, value in shown_facts %}
+                      <tr>
+                        <td style="padding:10px 16px;font-size:13px;color:#718096;{% if not loop.first %}border-top:1px solid #edf2f7;{% endif %}">
+                          {{ label }}
+                        </td>
+                        <td align="right" style="padding:10px 16px;font-size:13px;color:#2d3748;font-weight:700;{% if not loop.first %}border-top:1px solid #edf2f7;{% endif %}">
+                          {{ value }}
+                        </td>
+                      </tr>
+                    {% endfor %}
+                  </table>
+                </td>
+              </tr>
+            {% endif %}
+
+            {# Receipt line items. Only ``renewal_paid`` supplies these. #}
+            {% if lines %}
+              <tr>
+                <td style="padding:16px 40px 0;">
+                  <p style="margin:0 0 6px;font-size:12px;color:#a0aec0;text-transform:uppercase;letter-spacing:.5px;">
+                    What you were charged for
+                  </p>
+                  {% for line in lines %}
+                    <p style="margin:0 0 4px;font-size:13px;line-height:1.5;color:#4a5568;">• {{ line }}</p>
+                  {% endfor %}
+                </td>
+              </tr>
+            {% endif %}
+
+            {% if body %}
+              <tr>
+                <td style="padding:20px 40px 0;">
+                  {% for paragraph in body %}
+                    <p style="margin:0 0 12px;font-size:14px;line-height:1.6;color:#4a5568;">{{ paragraph }}</p>
+                  {% endfor %}
+                </td>
+              </tr>
+            {% endif %}
+
+            {# No URL means PUBLIC_URL is unset — drop the button rather than ship a
+               link to localhost. See notify.base_url. #}
+            {% if cta_url and cta_label %}
+              <tr>
+                <td style="padding:16px 40px 0;">
+                  <a href="{{ cta_url }}"
+                     style="display:inline-block;background:{{ accent }};color:#ffffff;text-decoration:none;font-size:15px;font-weight:700;padding:13px 28px;border-radius:9px;">
+                    {{ cta_label }}
+                  </a>
+                </td>
+              </tr>
+            {% endif %}
+
+            <tr>
+              <td style="padding:28px 40px 34px;">
+                <p style="margin:0;padding-top:20px;border-top:1px solid #edf2f7;font-size:12px;line-height:1.6;color:#a0aec0;">
+                  You're receiving this because you're the billing contact for this Minty
+                  account. Subscription and payment settings are on your company's
+                  Module &amp; Subscription page.
+                </p>
+              </td>
+            </tr>
+
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

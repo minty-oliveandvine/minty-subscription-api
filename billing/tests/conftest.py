@@ -58,7 +58,7 @@ def client():
 @pytest.fixture
 def user(db):
     return User.objects.create(
-        id=uuid.uuid4(),
+        id=str(uuid.uuid4()),
         email="payer@example.com",
         password="not-checked-here",
         first_name="Pay",
@@ -73,7 +73,7 @@ def user(db):
 def other_user(db):
     """Somebody with no role on the entity under test - the 401 case on company routes."""
     return User.objects.create(
-        id=uuid.uuid4(),
+        id=str(uuid.uuid4()),
         email="stranger@example.com",
         password="not-checked-here",
         first_name="No",
@@ -96,7 +96,7 @@ def countries(db):
 def entity(db, user, countries):
     """A live company the ``user`` fixture administers."""
     e = Entity.objects.create(
-        id=uuid.uuid4(), name="Payer Trading Co", country_code="HK", status="connected",
+        id=str(uuid.uuid4()), name="Payer Trading Co", country_code="HK", status="connected",
     )
     UserEntity.objects.create(user_id=user.id, entity_id=e.id, role="admin", approved=True)
     return e
@@ -149,3 +149,5 @@ def _no_network(monkeypatch):
     monkeypatch.setattr(requests, "request", _refuse)
     monkeypatch.setattr(requests, "post", _refuse)
     monkeypatch.setattr(requests, "get", _refuse)
+    # The Stripe SDK uses its own requests.Session, which the module-level names do not cover.
+    monkeypatch.setattr(requests.Session, "request", _refuse)

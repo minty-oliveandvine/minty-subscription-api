@@ -65,3 +65,19 @@ class SubscriptionsDarkMiddleware:
         if request.path in self.OPEN_PATHS or request.path.rstrip("/") in self.OPEN_PATHS:
             return self.get_response(request)
         return JsonResponse({"error": "not_found"}, status=404)
+
+
+class ServiceScopeMiddleware:
+    """Open one ``billing.services._context`` scope per request - what Flask's app context
+    was to ``g``. The engine memoises the trusted clock, a currency's decimal places, the
+    billing policy row, the plan catalogue and a customer's default card on it, for the life
+    of the request and no longer. Sits after the dark middleware: a 404 needs no scope."""
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        from billing.services import _context
+
+        with _context.scope():
+            return self.get_response(request)

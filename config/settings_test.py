@@ -59,6 +59,6 @@ SHARED_MODELS_MANAGED_FOR_TESTING = not _PG_URI  # tables come from the schema f
 # transport; these values exist so an un-stubbed call fails fast against an obviously fake
 # host instead of quietly hitting a developer localhost or a live account.
 FLASK_APP_URL = "http://flask.invalid"
-STRIPE_SECRET_KEY = "sk_test_invalid"
-STRIPE_PUBLISHABLE_KEY = "pk_test_invalid"
+STRIPE_SECRET_KEY = ""  # empty, like Flask's test env: an unstubbed get_stripe() raises
+STRIPE_PUBLISHABLE_KEY = ""
 EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"

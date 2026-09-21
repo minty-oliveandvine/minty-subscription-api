@@ -5,7 +5,7 @@ in-process until Terraform arrives").
 TWO JOBS, ONE FUNCTION. The FULL pass runs once a day and does everything, including the
 unscoped access sweep. The LIGHT pass runs every OTHER hour and does only the two jobs a
 customer feels the lateness of - closing trials and raising renewals - then sweeps just
-the payers it touched. See ``billing/services/daily.py`` (Part 2 step 2) for the reasoning.
+the payers it touched. See ``billing/services/daily.py`` for the reasoning.
 
 Everything below is about the ways an in-process timer gets this wrong.
 
@@ -14,6 +14,11 @@ both fire at the same minute. The pass takes a Postgres advisory lock and the lo
 ``daily.daily_lock``. The lock lives with the jobs rather than here because it is what makes
 the pass safe from ANY caller, including a human running ``manage.py subscriptions
 run-daily`` while the timer is mid-flight.
+
+**A scope per pass.** The engine's per-request memos (``billing.services._context``: the
+clock, the policy row, the catalog, the Stripe default-card answer) are what Flask's
+``app.app_context()`` gave the timer; ``run_pass_now`` opens one around each pass, on the
+job thread, and closes stale database connections either side of it.
 
 **Off unless asked, twice.** ``SUBSCRIPTION_ENABLED`` outranks everything: dark, there is
 nothing to convert, renew or retry, and a timer that charged anyway would be the one thing
@@ -61,25 +66,31 @@ def run_pass_now(*, mode: str) -> dict | None:
     if not settings.SUBSCRIPTION_ENABLED:
         logger.info("subscriptions: dark - the %s pass does nothing", mode)
         return None
+    from django.db import close_old_connections
+
+    from billing.services import _context, clock, daily
+
+    # This runs on APScheduler's worker thread, which has its own ContextVar context (so
+    # the request scope below is fresh, not a leftover) and its own thread-local database
+    # connection - one that has sat idle since the last pass and may have been closed by
+    # the server in the meantime. ``close_old_connections`` at entry drops a dead one
+    # before the first query; at exit it releases what the pass opened rather than
+    # holding a connection for the next hour.
+    close_old_connections()
     try:
-        from billing.services import daily  # Part 2 step 2 fills it
-    except ImportError:
-        logger.warning("subscriptions: the engine is not ported yet; %s pass skipped", mode)
-        return None
-    try:
-        with daily.daily_lock() as acquired:
+        with _context.scope(), daily.daily_lock() as acquired:
             if not acquired:
                 logger.info(
                     "subscriptions: another pass is already running; skipping the %s pass", mode
                 )
                 return None
-            from billing.services import clock
-
             # Read inside the lock: ``clock.now`` is the DATABASE's time, never this host's.
             return daily.run_daily(clock.now(), issue=True, mode=mode)
     except Exception:
         logger.exception("subscriptions: the %s pass raised", mode)
         return None
+    finally:
+        close_old_connections()
 
 
 def start_scheduler():

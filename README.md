@@ -89,17 +89,24 @@ In the docker stack (`Minty/docker/stack`) it is the `billing-api` service on ho
 ## Test it
 
 ```bash
-pytest                                        # unit suite on SQLite (tables from the models)
+set MINTY_TEST_PG_URI=
+pytest                                        # unit suite on SQLite (tables from the models); ~940 tests, 00:07
 set MINTY_TEST_PG_URI=postgresql://postgres:***@localhost:5432/postgres
 set MINTY_REPO=C:\Github\Minty
-pytest                                        # the same suite on a Postgres built from 01_schema_rebased.sql
+pytest                                        # the same suite on a Postgres built from 01_schema_rebased.sql; 00:10
 set MINTY_DB_SCHEMA=pettycash_alt && pytest billing/tests/test_schema_name.py   # the name is a setting
 ruff check .
 pytest e2e                                    # HTTP smoke against a RUNNING service - e2e/README.md
 ```
 
-Report the run time (mm:ss) of every suite with its result. `billing/tests/conftest.py`
-blocks the network: a test that needs Flask or Stripe stubs the transport.
+`settings.py` loads `.env`, so a `.env` that carries `MINTY_TEST_PG_URI` (the dev one does)
+makes the harness the default for every `pytest`; the blank `set MINTY_TEST_PG_URI=` is what
+gets the SQLite run back. Report the run time (mm:ss) of every suite with its result.
+`billing/tests/conftest.py` blocks the network and `billing/tests/engine/conftest.py` makes an
+unstubbed `stripe_client.get_stripe()` an assertion: a test that needs Flask or Stripe stubs
+the transport. `billing/tests/engine/` is the ported `Minty/tests/test_subscription_*` family
+(51 files, 762 tests, same names) - `docs/features/subscriptions-api.md` §8 says how they
+differ and which halves wait for step 3.
 
 ## Layout
 
@@ -107,21 +114,51 @@ blocks the network: a test that needs Flask or Stripe stubs the transport.
 config/          settings (the two switches, CORS, DB, Stripe keys, mail, logging) · settings_test · urls (the four routers, /healthz)
 core/            auth (BearerAuth, SelfBearerAuth, EntityBearerAuth) · exceptions ({"error"} shape) · middleware (dark gate, request log) · policy (roles/permissions) · flask_client (the ONLY caller of Flask) · log_formatters
 shared_models/   the 21 mirrors, managed = False · enums (the Postgres enums) · fields (PgEnumField, CharNField)
-billing/         api/ (me, modules, notice, onboarding - stubs) · services/ (the engine, step 2) · scheduler.py · management/commands/{subscriptions,plans}.py · tests/
-templates/email/ subscription_{notice,receipt}.html arrive in step 2 (Jinja2, verbatim from Flask)
+billing/         api/ (me, modules, notice, onboarding - stubs until step 3) · services/ (THE ENGINE: the 24 modules of Minty's blueprints/subscription/services ported 1:1, plus entity_modules.py, _context.py, _log.py) · static/email/ (the 9 inline images) · scheduler.py · management/commands/{subscriptions,plans,replay_scenarios}.py · tests/ (+ tests/engine/, the ported suite)
+scripts/         replay_diff.py (Flask report vs Django report, normalised)
+templates/email/ subscription_{notice,receipt}.html - Minty's, verbatim (Jinja2 backend; a render from either side is byte-identical)
 e2e/             HTTP smoke tests against a live service
 docker/          entrypoint (waits for DB + schema; no migrate)
 docs/features/   README · authentication.md · subscriptions-api.md (the route-by-route map and what each step fills)
 ```
 
-## Verifying the skeleton (done 2026-09-21; rerun after any change)
+## Verifying it (skeleton 2026-09-21; the engine port the same day; rerun after any change)
 
-`pytest` green on SQLite; `MINTY_TEST_PG_URI=… MINTY_REPO=C:\Github\Minty pytest` green (the
-harness builds `01_schema_rebased.sql`; a mirror column the schema lacks fails on the
-SELECT); `MINTY_DB_SCHEMA=pettycash_alt pytest billing/tests/test_schema_name.py` passes;
-`ruff check .` clean; `manage.py runserver 8004` → `/healthz` 200 and `/api/me/subscriptions`
-404 with `Access-Control-Allow-Origin`; `AUDIT_REPOS=minty-billing-api python
-Minty/docs/schema/generators/audit_models.py` reports 0.
+`MINTY_TEST_PG_URI= pytest` green on SQLite (938 passed, 2 Postgres-only lock tests skipped,
+00:07); `MINTY_TEST_PG_URI=… MINTY_REPO=C:\Github\Minty pytest` green (940 passed, 00:10; the
+harness builds `01_schema_rebased.sql`; a mirror column the schema lacks fails on the SELECT);
+`MINTY_DB_SCHEMA=pettycash_alt pytest billing/tests/test_schema_name.py` passes; `ruff check .`
+clean; `manage.py runserver 8004` → `/healthz` 200 and `/api/me/subscriptions` 404 with
+`Access-Control-Allow-Origin`; `python Minty/docs/schema/generators/audit_models.py` reports 0
+for all four repos. Live against the dev database with `SUBSCRIPTION_ENABLED=1`:
+`manage.py subscriptions revoke-ungranted` (dry) and `run-renewals` (dry) answer the same as
+`flask subscriptions revoke-ungranted` / `run-renewals` on the same database.
+
+## The engine (Part 2 step 2)
+
+`billing/services/` is `Minty/blueprints/subscription/services/` on the Django ORM, module for
+module and function for function - same names, same signatures, same `(payload, status)`
+return shapes - so step 3 fills each router by porting its Flask view one for one and step 5
+deletes the Flask copies. The translation is mechanical and the exceptions are few:
+`Model.query` → `Model.objects`, `db.session.get` → `store._by_pk`, per-helper commits →
+autocommit with `transaction.atomic()` in exactly three kinds of place (`docs/features/
+subscriptions-api.md` §6 - never around a Stripe call), `flask.g` → `billing.services._context`
+(a ContextVar scope: opened by `core.middleware.ServiceScopeMiddleware` per request, by every
+`manage.py subscriptions` job and by the scheduler's pass), `loguru` → `billing.services._log`
+(the same `{}` messages), uuid columns hand back hyphenated **str** (`shared_models.fields.
+MintyUUIDField`) because the services compare ids with `==`. `test_no_flask_imports.py` keeps
+the Flask world out; the memory of what the port found is in `docs/features/subscriptions-api.md`.
+
+**The second golden** is the replay harness: `manage.py replay_scenarios` is Minty's
+`scripts/subscription/replay_scenarios.py` on this engine (same runs, same Stripe test clocks,
+same report), and `scripts/replay_diff.py` compares its `--report` with the Flask script's after
+normalising Stripe ids, the clone's entity tag, the anchor's timezone rendering and the order of
+same-day invoices. On 2026-09-21 the eight Angelika runs were run on both sides against the dev
+database (the Django runs cloned to fresh payers with `--as angelika.tardaguela+django-<key>@…
+--tag <a tag of the same length>`, since Stripe remembers an idempotency key for 24 h) and every report diffed
+IDENTICAL, and again after the `_needs_stripe_clock` fix in both scripts. The logs are not kept
+(by decision) - `docs/features/subscriptions-api.md` §8 says how to regenerate a run. Mail from a
+replay is skipped (console backend) unless `--notify-to` names a recipient.
 
 ## Cross-cutting rules (from the plan; every repo carries them)
 

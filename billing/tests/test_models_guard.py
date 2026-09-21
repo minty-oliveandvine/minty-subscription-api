@@ -59,11 +59,14 @@ def test_every_model_is_unmanaged_in_production():
     for cls in classes:
         metas = [n for n in cls.body if isinstance(n, ast.ClassDef) and n.name == "Meta"]
         assert metas, f"{cls.name} has no Meta"
-        managed = [
-            n.value.value for n in metas[0].body
-            if isinstance(n, ast.Assign) and n.targets[0].id == "managed"
-        ]
-        assert managed == [False], f"{cls.name} must be managed = False"
+        meta = {
+            n.targets[0].id: n.value.value
+            for n in metas[0].body
+            if isinstance(n, ast.Assign) and isinstance(n.value, ast.Constant)
+        }
+        if meta.get("abstract") is True:
+            continue  # a mixin, not a table
+        assert meta.get("managed") is False, f"{cls.name} must be managed = False"
 
 
 def test_no_migrations_directory_anywhere():

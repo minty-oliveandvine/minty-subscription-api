@@ -43,6 +43,7 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     "core.middleware.SubscriptionsDarkMiddleware",
+    "core.middleware.ServiceScopeMiddleware",
     "core.middleware.RequestLoggingMiddleware",
     "django.middleware.common.CommonMiddleware",
 ]
@@ -191,6 +192,10 @@ SUBSCRIPTION_EMAIL = os.environ.get("SUBSCRIPTION_EMAIL", DEFAULT_FROM_EMAIL)
 # login-gated re-handoff (``{FLASK_APP_URL}/handoff/minty-web?next=...``).
 # ---------------------------------------------------------------------------
 FLASK_APP_URL = os.environ.get("FLASK_APP_URL", "http://localhost:5001").rstrip("/")
+# The address a PERSON reaches Minty at - the links in emails (Flask's PUBLIC_URL). Distinct
+# from FLASK_APP_URL, which in the docker stack is the internal service name; defaults to it
+# so a single-host setup needs one variable.
+MINTY_PUBLIC_URL = os.environ.get("MINTY_PUBLIC_URL", FLASK_APP_URL).rstrip("/")
 FLASK_PROXY_TIMEOUT = int(os.environ.get("FLASK_PROXY_TIMEOUT", "20"))
 
 # ---------------------------------------------------------------------------

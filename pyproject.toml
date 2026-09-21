@@ -20,3 +20,10 @@ ignore = [
 
 [tool.ruff.lint.isort]
 known-first-party = ["billing", "config", "core", "shared_models", "e2e"]
+
+[tool.ruff.lint.per-file-ignores]
+# The engine is a 1:1 port of Flask's blueprints/subscription/services (Part 2 step 2): its code
+# and its tests are kept byte-close to the originals, which predate these bugbear rules. Lifted
+# once parity is proven and the golden replays agree.
+"billing/services/**" = ["B"]
+"billing/tests/engine/**" = ["B"]
