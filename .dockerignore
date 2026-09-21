@@ -1,0 +1,35 @@
+# Docker reads .dockerignore only from the build context root (the repo root).
+# Keep the context small and avoid baking local state into the image.
+
+# Virtualenvs — dependencies are reinstalled inside the image from requirements.txt
+.venv
+venv
+
+# Python bytecode & tool caches
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.ruff_cache
+.coverage
+htmlcov
+*.egg-info
+
+# Env files — never bake secrets into the image; they're injected at runtime.
+.env
+.env.*
+!.env.example
+
+# Runtime output
+logs
+uploads
+db.sqlite3
+
+# VCS & tooling
+.git
+.gitignore
+.claude
+
+# OS / editor cruft
+.DS_Store
+*.pem

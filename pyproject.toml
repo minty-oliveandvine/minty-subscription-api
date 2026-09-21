@@ -1,0 +1,22 @@
+[project]
+name = "minty-billing-api"
+version = "0.1.0"
+description = "Minty's subscription engine and payer portal API (Django + django-ninja)."
+requires-python = ">=3.13"
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+exclude = [".venv", "logs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = [
+  # long docstrings and comments are the house style (see the other two Django services)
+  "E501",
+  # core/policy.py is a verbatim port (str, Enum); StrEnum would be a behaviour change to review
+  "UP042",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["billing", "config", "core", "shared_models", "e2e"]

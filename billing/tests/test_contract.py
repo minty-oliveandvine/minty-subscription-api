@@ -1,0 +1,92 @@
+"""The API surface, pinned before it is filled.
+
+The route tables in ``billing/api/*`` are the contract Part 2 step 3 implements and the
+frontends are written against; this test keeps them from drifting silently, and checks the
+OpenAPI document actually carries every path (the document is what ``docs/openapi.json``
+is generated from, and what a reader gets while dark).
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from billing.api.me import ROUTES as ME_ROUTES
+from billing.api.modules import ACTIONS
+from billing.api.onboarding import ROUTES as ONBOARDING_ROUTES
+
+pytestmark = pytest.mark.django_db
+
+#: The fifteen ``/api/me/*`` paths of Flask's routes/portal.py (entity-payment-method
+#: answers GET and POST, hence sixteen operations on fifteen paths).
+FLASK_PORTAL_PATHS = {
+    "/subscriptions",
+    "/subscriptions/subscriber-options",
+    "/subscriptions/invite-admin",
+    "/subscriptions/transfer",
+    "/subscriptions/transfer/respond",
+    "/subscriptions/transfer/cancel",
+    "/subscriptions/transfers",
+    "/invoices",
+    "/billing/payment-methods",
+    "/billing/payment-methods/setup-intent",
+    "/billing/payment-methods/confirm",
+    "/billing/payment-methods/default",
+    "/billing/entity-payment-method",
+    "/billing/payment-methods/update",
+    "/billing/payment-methods/remove",
+}
+
+#: The nineteen ``POST /entity/settings/module/<org_id>/<action>`` routes of Flask's
+#: entity/routes/settings.py (lines 1419-2431).
+FLASK_MODULE_ACTIONS = {
+    "authorize-billing", "cancel", "cancel-preview", "checkout", "checkout-complete",
+    "confirm-billing", "manage-billing", "payment-method", "payment-methods",
+    "payment-methods/confirm", "payment-methods/default", "payment-methods/setup-intent",
+    "renew", "restart-billing", "restart-quote", "resume-preview", "retry-payment",
+    "start-trial", "subscribe-preview",
+}
+
+#: The nine card / billing-account routes of Flask's entity/routes/create.py (757-1247)
+#: plus the one new route.
+FLASK_ONBOARDING_PATHS = {
+    "/payment-method", "/payment-method/setup", "/payment-method/complete",
+    "/billing/payment-methods", "/billing/payment-methods/setup-intent",
+    "/billing/payment-methods/confirm", "/billing/payment-methods/default",
+    "/billing/accounts", "/billing/authorize",
+}
+
+
+def test_the_portal_carries_flasks_fifteen_paths():
+    assert {p for _, p in ME_ROUTES} == FLASK_PORTAL_PATHS
+    assert len(ME_ROUTES) == 16
+    assert ("GET", "/billing/entity-payment-method") in ME_ROUTES
+    assert ("POST", "/billing/entity-payment-method") in ME_ROUTES
+
+
+def test_the_module_page_carries_flasks_nineteen_actions():
+    assert set(ACTIONS) == FLASK_MODULE_ACTIONS
+    assert len(ACTIONS) == 19
+
+
+def test_the_onboarding_router_carries_the_nine_plus_trials_start():
+    paths = {p for _, p in ONBOARDING_ROUTES}
+    assert paths == FLASK_ONBOARDING_PATHS | {"/trials/start"}
+    assert ("GET", "/billing/accounts") in ONBOARDING_ROUTES
+    assert ("POST", "/billing/accounts") in ONBOARDING_ROUTES
+    assert ("POST", "/trials/start") in ONBOARDING_ROUTES
+
+
+def test_openapi_lists_every_path(client):
+    doc = client.get("/api/openapi.json").json()
+    paths = set(doc["paths"])
+    for _, p in ME_ROUTES:
+        assert f"/api/me{p}" in paths, p
+    for _, p in ONBOARDING_ROUTES:
+        assert f"/api/onboarding{p}" in paths, p
+    assert "/api/entities/{entity_id}/modules" in paths
+    assert "/api/entities/{entity_id}/modules/{action}" in paths
+    assert "/api/entities/{entity_id}/subscription-notice" in paths
+    # Every operation is behind the bearer scheme - nothing is public but /healthz.
+    for path, ops in doc["paths"].items():
+        for method, op in ops.items():
+            assert op.get("security"), (method, path)

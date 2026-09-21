@@ -1,0 +1,24 @@
+# Runtime - Python 3.13 (the Part 3 toolchain; billing-backend and onboarding-backend stay on 3.11).
+django>=5.2,<6.0
+django-ninja>=1.3,<2.0
+django-cors-headers>=4.4,<5.0
+psycopg[binary]>=3.2,<4.0
+PyJWT>=2.8,<3.0
+python-dotenv>=1.0,<2.0
+gunicorn>=23.0,<24.0
+requests>=2.28,<3.0
+Jinja2>=3.1,<4.0
+# The single Stripe writer (billing/services/stripe_client.py). Pinned to what Minty runs
+# (Minty/requirements.txt) so the port behaves identically; bump both together.
+stripe==11.4.1
+# The in-process scheduler (billing/scheduler.py) - Minty's pin, same reason.
+APScheduler==3.11.0
+pytz>=2024.1
+
+# Dev / testing
+pytest>=8.0
+pytest-django>=4.8
+ruff>=0.3
+# The Postgres test mode loads Minty/tests/pg_harness.py, which speaks psycopg2. Test-only:
+# the service itself talks to Postgres through psycopg 3 above.
+psycopg2-binary>=2.9,<3.0
