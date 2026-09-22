@@ -30,6 +30,8 @@ import requests
 # on IPv4 only, and every request stalls ~2 s before falling back (a 0.2 s suite took 18 s).
 BASE_URL = os.environ.get("E2E_BASE_URL", "http://127.0.0.1:8004").rstrip("/")
 WEB_ORIGIN = os.environ.get("E2E_WEB_ORIGIN", "http://localhost:3002").rstrip("/")
+# The payment-request UI (billing-frontend), the notice's caller.
+PAYMENTS_ORIGIN = os.environ.get("E2E_PAYMENTS_ORIGIN", "http://localhost:3000").rstrip("/")
 
 
 def subscriptions_dark() -> bool:

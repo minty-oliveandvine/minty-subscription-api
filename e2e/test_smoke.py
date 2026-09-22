@@ -7,7 +7,7 @@ from __future__ import annotations
 import pytest
 import requests
 
-from e2e.conftest import WEB_ORIGIN, mint, subscriptions_dark
+from e2e.conftest import PAYMENTS_ORIGIN, WEB_ORIGIN, mint, subscriptions_dark
 
 PORTAL = "/api/me/subscriptions"
 NOBODY = "00000000-0000-0000-0000-000000000000"
@@ -82,15 +82,16 @@ class TestLive:
         assert res.status_code == 401
 
     def test_flask_shaped_token_is_accepted(self, base_url, credentials):
-        # Accepted = past the door. 501 while the routes are stubs (Part 2 step 1), 200 once
-        # step 3 fills them; never 401/403/404.
+        # Past the door and answered: the portal's table for this payer (step 3), with CORS.
         token = mint(credentials["secret"], credentials["user_id"])
         res = requests.get(
             f"{base_url}{PORTAL}",
             headers={"Authorization": f"Bearer {token}", "Origin": WEB_ORIGIN},
             timeout=10,
         )
-        assert res.status_code not in (401, 403, 404), res.text
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert isinstance(body["entities"], list) and "total" in body
         assert res.headers.get("Access-Control-Allow-Origin") == WEB_ORIGIN
 
     def test_module_page_needs_a_company_the_caller_belongs_to(self, base_url, credentials):
@@ -110,4 +111,23 @@ class TestLive:
             headers={"Authorization": f"Bearer {token}", "X-Entity-Id": eid},
             timeout=10,
         )
-        assert scoped.status_code not in (401, 403, 404), scoped.text
+        assert scoped.status_code == 200, scoped.text
+        page = scoped.json()
+        assert page["entity_id"] == eid and isinstance(page["cards"], list)
+        assert "can_manage_modules" in page and "viewer" in page
+
+    def test_the_notice_answers_for_a_member(self, base_url, credentials):
+        if not credentials["entity_id"]:
+            pytest.skip("set E2E_MINTY_ENTITY for the notice check")
+        eid = credentials["entity_id"]
+        token = mint(credentials["secret"], credentials["user_id"], entity_id=eid)
+        res = requests.get(
+            f"{base_url}/api/entities/{eid}/subscription-notice",
+            headers={"Authorization": f"Bearer {token}", "Origin": PAYMENTS_ORIGIN},
+            timeout=10,
+        )
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert isinstance(body["items"], list)
+        assert body["settings_path"] == f"/entity/settings/module/{eid}"
+        assert res.headers.get("Access-Control-Allow-Origin") == PAYMENTS_ORIGIN

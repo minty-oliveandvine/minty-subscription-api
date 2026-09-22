@@ -51,6 +51,23 @@ already done, 5xx upstream. `billing/tests/test_contract.py` pins every table be
 | POST | `/billing/payment-methods/update` | `my_payment_method_update_api` | expiry, name, address |
 | POST | `/billing/payment-methods/remove` | `my_payment_method_remove_api` | detach a card |
 
+**Live since step 3 slice A (2026-09-21)** — `billing/api/me.py`, each view the port of its Flask
+twin. What the views keep is Flask's shell: `400 {"error": "<field> is required"}` for a missing
+routing id, `404 "That company isn't on your billing account."` when the read model answers
+None (not-the-payer and no-such-company are the same answer), `422 {"error": <the service's
+sentence>}` for a stated refusal (handovers, the invitation - 422 not 403 because the client
+shows the server's words only when they read as prose), each route's own 500 copy for a
+surprise, and `payment_methods.run`'s 200/409/422/500 for the wallet. What the framework does
+instead: CORS on every answer including errors (`corsheaders`; a preflight is 200 where
+Flask-CORS said 204, and `Vary: origin`), the OPTIONS answer, the dark 404, the bearer check.
+`billing/api/_json.py` is `jsonify`: a `datetime`/`date` in a payload renders RFC 822 (`Thu, 06
+Aug 2026 12:00:00 GMT` - `transfers._as_dict`'s `expires_at`, the subscriber screen's `since`;
+the clients parse that form), `Decimal` as a string, and a body that is missing, not JSON or
+not an object is `{}` (Flask's `get_json(silent=True) or {}`), so the answer is the
+missing-field 400 and never a parse error. The invitation is the one forward: `send=lambda
+invite: flask_client.forward(request, "/api/onboarding/invite", json=invite)` - the caller's own
+bearer, Flask's non-2xx sentence back as the 422, Flask unreachable as the route's 500.
+
 ### `modules` — the module settings page (`/api/entities`, `EntityBearerAuth`)
 
 | Method | Path | Flask origin | Answers |
@@ -65,10 +82,45 @@ Actions (`billing/api/modules.py::ACTIONS`): `checkout`, `authorize-billing`, `p
 `payment-method`, `renew`, `manage-billing`. Reading needs `MODULE_VIEW`, acting needs
 `MODULE_MANAGE` **and** the payer rule (`store.may_manage_subscription`).
 
-### `notice` (`/api/entities`, `EntityBearerAuth`)
+**Live since step 3 slice B (2026-09-21)** — `billing/api/modules.py`. The gate is one function
+every request runs through (`_gate`): the path's company must be the one the token was checked
+against (`X-Entity-Id`, else the claim; a mismatch is 403 "That token is for a different
+company."), then the permission (403 with Flask's sentence), then for every action but
+`checkout-complete` the payer rule (403 "Only the person who pays for this company can change
+its subscription."). `checkout-complete` is Stripe's return leg and carries the permission
+only — refusing it would strand a payment that has already happened. Flask pinned these rules
+by reading the decorator stack with regexes (`test_subscription_payer_permission`,
+`test_restart_billing_guard`); here every action is called as the wrong person
+(`billing/tests/api/test_module_settings_api.py`). `payment-methods` and `restart-quote` also
+answer GET, as Flask served them.
+
+The page model (`GET /{entity_id}/modules`): `entity_id`, `entity_name`, `cards` (Flask's card
+dicts key for key — minty-web's `ModuleCard` type — with `period_end` ISO and `access_end_date`
+re-shaped to `YYYY-MM-DD` because the client counts days from them; `IsoJSONEncoder` for this
+router, since Flask never served this page as JSON), `summary` and `panel` (opaque to the client
+until its screens read them), `next_payment_date` (read off the panel), `can_manage_modules`
+(admin AND payer, or no payer yet), `payer` (`{user_id, name, email}` when it is somebody
+else, else null), `viewer` (`{name, initials}`), `consent_takeover`. Three deliberate
+differences from Flask, each written where it happens: the Stripe return URLs point at
+minty-web's page (`{MINTY_WEB_URL}/subscription/entities/{id}/modules`, `?session_id=
+{CHECKOUT_SESSION_ID}` on the return, `&purpose=payment_method` for a card-only session);
+`checkout-complete` takes `{session_id, purpose?}` and answers JSON (`{"ok": true, "created"}`;
+400 no session, 409 nothing created, the service's own status, 500) where Flask redirected with
+`?checkout_error=`; dates render ISO.
+
+### `notice` (`/api/entities`, `NoticeBearerAuth`)
 
 `GET /{entity_id}/subscription-notice` — Flask's `/api/entity/<id>/subscription-notice`
 (`entity/routes/modules.py`), the plural being the one path change; keeps `settings_path`.
+
+**Live since step 3 slice C (2026-09-22)** — `billing/api/notice.py`. Its auth class is
+`EntityBearerAuth` plus Flask's one fallback: a token that names NO company (billing-frontend's
+refresh path mints through billing-backend and sends only the bearer, never `X-Entity-Id`) is
+held to the caller's membership of the company in the PATH, which is what authorises the read
+in any case. A token that names another company is 403 `entity_mismatch`; a stranger is refused
+at the door (401 where Flask said 403 `not_a_member` — billing-frontend treats every non-200 as
+"no notice"). A builder failure is `{"items": []}` with 200: a notice never takes the landing
+page down. Stateless: the "show once per session" claim stays Flask's.
 
 ### `onboarding` (`/api/onboarding`, `BearerAuth`; the company is in the body)
 
@@ -89,6 +141,20 @@ Actions (`billing/api/modules.py::ACTIONS`): `checkout`, `authorize-billing`, `p
 `finalize` flips the company live and then calls this; a failure here fails finalize, the All
 Set screen offers *Try again*, and both halves are idempotent — a company already live stays
 live, a trial already started is returned, never duplicated.
+
+**Live since step 3 slice C (2026-09-22)** — `billing/api/onboarding.py`, plain `BearerAuth`.
+The company routes read the company from the query or body and check the caller's MEMBERSHIP
+(`_entity_for_member`: 400 without an id, 403 for a stranger, 404 for no such company — Flask's
+rule and sentences); the four billing-sheet card routes act on the payer and check no company.
+`/billing/authorize` nominates the card it was given BEFORE recording consent, with
+`establish_payer=True` (during the wizard no company has a payer yet). `trials/start` runs
+`checkout.start_trials_for_enabled_modules` (idempotent: modules already holding a trial or a
+subscription are skipped) and reads `trial_end` BACK from the rows (the earliest); a
+`CheckoutError` answers with its status, anything else 502 "The trial could not be started.
+Please try again." — never swallowed, as Flask's finalize did. The setup Checkout returns the
+browser to `ONBOARDING_WEB_URL` (`/?pm_session_id=…`, `/?pm_cancelled=1`). Flask's
+`/api/onboarding/plans` is NOT here: onboarding-backend serves the catalogue natively
+(`onboarding/api_reference.py`).
 
 ### Everything else
 
@@ -223,8 +289,11 @@ travels in a link from here — Flask stays the only minter. **Until step 5 land
 `FLASK_APP_URL` (the forwarded call); `MINTY_PUBLIC_URL` (the address a PERSON reaches Minty
 at — every link in an email; defaults to `FLASK_APP_URL`, which in the docker stack is the
 internal service name, so set it there); `MINTY_WEB_URL` / `PAYMENTS_WEB_URL` /
-`CORS_ALLOWED_ORIGINS` (the two browser origins; `x-entity-id` is allowed). In the docker stack
-it is the `billing-api` service on 8004.
+`CORS_ALLOWED_ORIGINS` (the two browser origins; `x-entity-id` is allowed); `ONBOARDING_WEB_URL`
+(the wizard — where a setup Checkout opened from it returns the browser; not a CORS origin,
+onboarding-backend proxies server-side; Flask's `ONBOARDING_APP_URL` under Part 3's name). In
+the docker stack it is the `billing-api` service on 8004. `MINTY_WEB_URL` also builds the
+Stripe return URLs of the module page's actions.
 
 ## 8. Where it is tested
 
@@ -233,11 +302,17 @@ it is the `billing-api` service on 8004.
 `test_no_flask_imports.py` (no `flask` / `sqlalchemy` / `loguru` / `blueprints` / `models.db`
 import anywhere under `billing`, `core`, `shared_models`, `config`) — and
 `billing/tests/engine/`, the ported `Minty/tests/test_subscription_*` family: 51 files, 762
-test functions, named as in Minty so a failure can be read against the original. Run on SQLite
-(`MINTY_TEST_PG_URI= pytest` — the blank prefix matters once a `.env` names the harness; 938
-passed + 2 Postgres-only lock tests skipped, 00:07 on 2026-09-21) and on the Postgres built from
-`01` (`MINTY_TEST_PG_URI=… MINTY_REPO=C:\Github\Minty pytest`; 940 passed, 00:10).
-`e2e/test_smoke.py` against a running service, dark and live (`e2e/README.md`).
+test functions, named as in Minty so a failure can be read against the original — and
+`billing/tests/api/`, the HTTP halves of those files driven through Django's test client against
+the routers (step 3; same names again, the service fixtures imported from their engine twins so
+both halves stub the same seams; `conftest.py` there lists the three ways Django's client differs
+from Flask's). Run on SQLite (`MINTY_TEST_PG_URI= pytest` — the blank prefix matters once a
+`.env` names the harness; 983 passed + 2 Postgres-only lock tests skipped, 00:07 on 2026-09-21
+after slice A) and on the Postgres built from `01` (`MINTY_TEST_PG_URI=… MINTY_REPO=C:\Github\Minty
+pytest`; 985 passed, 00:10). `e2e/test_smoke.py` against a running service, dark and live
+(`e2e/README.md`). After step 3 (2026-09-22): 1122 + 2 skipped on SQLite (00:09), 1124 on
+Postgres (00:14); `pytest e2e` live against `runserver` on the dev database with a replay
+payer: 8 passed, 3 dark-only skipped (00:05).
 
 How the ported tests differ from Minty's, by rule: DB tests use pytest-django's `db` (a
 transaction per test) where Flask's `db_session` DELETEd tables afterwards — which is why the
@@ -278,20 +353,22 @@ partials (`test_consent_takeover`, `test_subscription_templates`, `test_past_due
 `test_settings_users_subscriber_tag`, `test_csrf_exemptions`, `test_restart_billing_guard`,
 the SRC/TPL halves of `test_purchase_card_choice` / `test_module_card_lapsed` /
 `test_entity_list_trial_badge`, the `_is_module_enabled` half of `test_module_access_gate`,
-the session half of `test_subscription_notice`). **The HTTP halves wait for step 3**, which
-ports them against the ninja routers:
+the session half of `test_subscription_notice`). **The HTTP halves were ported in step 3**
+against the ninja routers, into `billing/tests/api/`:
 
-- `tests/test_payer_portal_api.py` (22): the bearer/preflight/404 cases, the handover routes (`test_initiating_a_handover_*`, `test_a_refused_handover_is_a_422_with_the_reason_in_words`, `test_a_successful_offer_returns_it`, `test_an_unexpected_failure_is_a_500_not_a_stack_trace`, `test_responding_needs_a_transfer_id`, `test_accepting_passes_the_flag_through`, `test_declining_is_the_same_route_with_the_flag_off`, `test_cancelling_*`), the inbox routes, `test_internal_sort_keys_never_reach_the_response`, `test_the_subscriber_options_route_needs_an_entity`, `test_a_company_you_do_not_pay_for_is_a_404_and_not_a_403`
-- `tests/test_billing_payment_methods.py` (6): `test_the_wallet_needs_a_token`, `test_preflight_answers_without_a_token`, `test_the_list_comes_back_for_the_tokens_own_account`, `test_a_refusal_reaches_the_page_with_its_reason`, `test_a_card_companies_are_billed_to_cannot_be_removed`, `test_a_method_that_is_not_yours_is_a_404_from_the_endpoint_too`
-- `tests/test_onboarding_payment_method.py` (14): the token/membership cases, `test_buy_now_card_routes_answer_the_onboarding_origin`, `test_buy_now_card_route_reports_the_service_error_verbatim`, `test_confirm_makes_the_new_card_the_default_when_asked`, the five `test_authorize_*`, `test_status_reports_card_and_consent_separately`, `test_status_still_reports_consent_when_stripe_is_down`
-- `tests/test_onboarding_plans.py` (4): `test_catalog_matches_server_summary_math`, `test_plans_endpoint_requires_a_token`, `test_plans_endpoint_returns_the_catalog`, `test_plans_endpoint_degrades_when_the_catalog_fails`
-- `tests/test_purchase_card_choice.py` (2 route tests): `test_the_purchase_routes_nominate_before_they_charge`, `test_nominating_goes_through_the_ownership_proof`
-- `tests/test_subscription_notice.py` (10): `test_notice_api_returns_the_items_and_a_minty_settings_path` and the nine `test_notice_api_*` / token-scope cases
+- `tests/test_payer_portal_api.py` (22) — **PORTED, slice A**: `billing/tests/api/test_payer_portal_api.py`, all 22 plus the empty-table 200, the not-JSON body, the read model's 500, the RFC 822 rendering and five invitation-forward tests (no Flask twin: Flask's view sent the invite in-process)
+- `tests/test_billing_payment_methods.py` (6) — **PORTED, slice A**: `billing/tests/api/test_billing_payment_methods.py`, all 6 plus the shell's 500-with-CORS
+- `tests/test_onboarding_payment_method.py` (14) — **PORTED, slice C**: `billing/tests/api/test_onboarding_payment_method.py`, 13 of the 14 (not `test_buy_now_card_routes_answer_the_onboarding_origin`: the wizard's browser never calls this API, onboarding-backend proxies server-side) plus the account routes, the wallet-described card, the setup return URLs, and six `trials/start` tests (the real trial over the seeded catalogue, idempotent, no-module null, the loud failure) — 38 tests
+- `tests/test_onboarding_plans.py` (4) — **not applicable**: `/api/onboarding/plans` is onboarding-backend's own (`onboarding/api_reference.py`, read from `billing_plan`); this API has no plans route
+- `tests/test_purchase_card_choice.py` (2 route tests) — **PORTED, slice B** into `billing/tests/api/test_module_settings_api.py`, together with the behaviour versions of `test_subscription_payer_permission`'s and `test_restart_billing_guard`'s route-source checks (every action as a co-admin, as a cashier who holds the card, the return leg as a co-admin; the restart route's four refusals in order) and the page model's wire shape — 84 tests
+- `tests/test_subscription_notice.py` (10) — **PORTED, slice C**: `billing/tests/api/test_subscription_notice.py`, all 10 (the stranger cases answer 401 at the door, see §2) plus the superadmin read and the real builder over an empty company — 12 tests
 - `tests/test_char_subscription.py`: the report-page gate check (Flask's gate); the rest is `billing/tests/engine/test_char_subscription.py` through the services
 - `tests/test_char_subscription_dark.py`: the HTTP and CLI-runner halves (`test_dark.py` and `test_subscriptions_command.py` pin the same contracts here)
 
-Step 3 must also render the raw datetimes the services return in dicts (`transfers._as_dict`,
-the portal's `since`) as RFC 822, which Flask's `jsonify` did for free.
+Step 3 also renders the raw datetimes the services return in dicts (`transfers._as_dict`,
+the portal's `since`) as RFC 822, which Flask's `jsonify` did for free (`billing/api/_json.py`).
+`billing/tests/test_contract.py` also holds `docs/openapi.json` to what the API serves;
+`manage.py export_openapi` regenerates it (`--check` for CI).
 
 Two things the port found in Minty. Left for step 5 (Flask's tests are frozen during step 2):
 `test_a_trial_that_ends_without_a_card_expires_and_lapses` makes a REAL Stripe `Customer.search`
@@ -310,6 +387,6 @@ about twice as long, which is the clock doing its job.
 | Step | Lands here |
 |---|---|
 | 2 | DONE 2026-09-21: `billing/services/` — the 1:1 port of all 24 modules of `blueprints/subscription/services/` plus `entity_modules.py` (from `entity/services/modules.py`), `_context.py` (the request scope that replaced `flask.g`) and `_log.py`; the templates and images; 51 ported test files; the job bodies behind `manage.py subscriptions`; the scoped scheduler pass; `manage.py replay_scenarios` + `scripts/replay_diff.py`, the eight Angelika runs identical on both sides |
-| 3 | the routers filled (each stub replaced by the port of its Flask view — `portal.invite_admin_to_entity` takes the forward as its `send`), `docs/openapi.json` committed, Flask's server-side notice fetch, the HTTP-half tests listed in §8 |
+| 3 | DONE 2026-09-22: all four routers filled from Flask's views — `me` (`billing/api/me.py`, `_json.py` = `jsonify`; the invitation forwarded with the caller's bearer), `modules` (the page model minty-web renders + the 19 actions behind one gate), `notice` (`NoticeBearerAuth`, Flask's claimless fallback), `onboarding` (the nine + `trials/start`, which fails loudly); `docs/openapi.json` committed and held current by `test_contract.py` / `manage.py export_openapi`; 173 route tests in `billing/tests/api/` (32 portal + 7 wallet, 84 module page, 12 notice, 38 onboarding); e2e smoke asserts the live shapes |
 | 5 | Flask's copies deleted; onboarding-backend proxies here; the Stripe keys leave Flask |
 | 7 | deployed dark beside the phase-C builds at the cutover; 8b switches it on |

@@ -30,7 +30,8 @@ person-scoped variant):
 | Router | Auth | The door |
 |---|---|---|
 | `me` (`/api/me/*`) | `SelfBearerAuth` | identity only. Every row is found by the caller's `user_id` — their subscriptions, invoices, cards, transfers — so a company the caller has no role on is irrelevant and the request continues without one. Flask's `routes/portal.py` applied the same rule (`_user_id_from_bearer`). |
-| `modules`, `notice` | `EntityBearerAuth` | the caller must hold a `user_entity` row on the resolved company, or be a system `superadmin` (a virtual `super_admin` role, read-only through `core/policy.is_superuser_readonly`). No company anywhere (no claim, no header), or no role → 401 - billing-backend's `BearerAuth` would let a company-less token through as an unscoped person, because it has person-level routes on the same router; this service has `SelfBearerAuth` for those, so a company route with no company is refused at the door. |
+| `modules` | `EntityBearerAuth` | the caller must hold a `user_entity` row on the resolved company, or be a system `superadmin` (a virtual `super_admin` role, read-only through `core/policy.is_superuser_readonly`). No company anywhere (no claim, no header), or no role → 401 - billing-backend's `BearerAuth` would let a company-less token through as an unscoped person, because it has person-level routes on the same router; this service has `SelfBearerAuth` for those, so a company route with no company is refused at the door. Inside, the path's company must be the resolved one (403 otherwise). |
+| `notice` | `NoticeBearerAuth` (`billing/api/notice.py`) | `EntityBearerAuth` plus Flask's one fallback: a token that names NO company - billing-frontend sends only the bearer, and its refresh through billing-backend need not preserve the claim - is held to the caller's membership of the company in the PATH, which is what authorises the read in any case. A token naming another company than the path → 403 `entity_mismatch`; a stranger → 401. |
 | `onboarding` | `BearerAuth` | the wizard's token is unscoped and names its company in the body, as with onboarding-backend; the handler checks membership itself. |
 
 Inside the door the module page applies Flask's two permissions from `core/policy.py` (a
@@ -39,7 +40,8 @@ verbatim copy of onboarding-backend's port of Minty's `services/permission_polic
 every action — **and** the subscription's own rule, `store.may_manage_subscription` (the
 `@require_subscription_payer` port, step 2): only the payer, or a member with billing consent
 on a company that has no payer yet, may act. A role is not enough to touch somebody else's
-card.
+card. The one action without the payer rule is `checkout-complete`, Stripe's return leg:
+refusing it would strand a payment that has already happened.
 
 ## Refresh
 

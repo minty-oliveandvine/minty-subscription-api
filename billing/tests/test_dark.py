@@ -11,7 +11,7 @@ While ``SUBSCRIPTION_ENABLED`` is off (the state production cuts over in, Part 2
 * the scheduler does not start whatever its own switch says, ``tick`` exits 0 having done
   nothing, and ``revoke-ungranted`` refuses.
 
-Live, the same paths reach their handlers (a 501 stub today; the port in step 3).
+Live, the same paths reach their handlers - all four routers are filled (step 3).
 """
 
 from __future__ import annotations
@@ -76,11 +76,26 @@ def test_healthz_and_openapi_answer_while_dark(client, dark):
 
 
 def test_live_paths_reach_their_handlers(client, auth):
-    # Live (the suite default), the same paths are answered by the API - by the 501 stubs
-    # until Part 2 step 3 fills them, never by the dark gate.
+    # Live (the suite default), the same path is answered by the portal - a payer with
+    # nothing gets the empty table, never the dark gate's 404.
     res = client.get("/api/me/subscriptions", HTTP_ORIGIN=ORIGIN, **auth)
-    assert res.status_code == 501
-    assert res.json() == {"error": "not_implemented"}
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload["entities"] == [] and payload["total"] == 0
+    assert res["Access-Control-Allow-Origin"] == ORIGIN
+
+
+def test_live_company_paths_reach_their_handlers(client, auth_scoped, entity):
+    # The company-scoped routers, live: the notice for a company with nothing is an empty
+    # list, the module page its page model - never the dark gate's 404.
+    res = client.get(
+        f"/api/entities/{entity.id}/subscription-notice", HTTP_ORIGIN=ORIGIN, **auth_scoped
+    )
+    assert res.status_code == 200
+    assert res.json()["items"] == []
+    assert res["Access-Control-Allow-Origin"] == ORIGIN
+    res = client.get(f"/api/entities/{entity.id}/modules", HTTP_ORIGIN=ORIGIN, **auth_scoped)
+    assert res.status_code == 200
     assert res["Access-Control-Allow-Origin"] == ORIGIN
 
 

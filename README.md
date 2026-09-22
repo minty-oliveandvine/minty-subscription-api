@@ -8,10 +8,17 @@ wizard's card and billing-account routes, the daily pass, the notification email
 Stripe writer. Flask keeps identity and the company until Part 3 and reads five subscription
 facts through a read-only module; onboarding-backend proxies its money routes here.
 
-**Status: step 1 of Part 2 — the skeleton.** Every route exists, is authenticated and answers
-`501 {"error": "not_implemented"}`; the mirrors of all 21 tables are declared; the dark
-contract, the auth rules and the guard tests are in place. Steps 2–3 port the engine
-(`billing/services/`) and fill the routes. Verified 2026-09-21 on this workstation (Python 3.13.15
+**Status: Part 2 step 3 done (2026-09-22) — the engine is ported and every router is live.**
+Step 2 (2026-09-21) put the whole engine in `billing/services/`; step 3 filled the four routers
+from Flask's views: `me` (the fifteen `/api/me/*` portal routes, Flask's shell and status codes
+kept, `billing/api/_json.py` standing in for `jsonify`), `modules` (the page model minty-web
+renders and the nineteen actions behind one gate), `notice` (with Flask's claimless-token
+fallback) and `onboarding` (the nine wizard routes and the new `trials/start`, which fails
+loudly). `docs/openapi.json` is the committed contract, held current by `test_contract.py`
+(`manage.py export_openapi` regenerates it). Next: step 4 finishes minty-web's screens against
+the live API, step 5 cuts Flask's copies. The mirrors of all 21 tables are declared; the dark
+contract, the auth rules and the guard tests are in place. Skeleton verified 2026-09-21 on this
+workstation (Python 3.13.15
 via `uv`, PostgreSQL 18): `pytest` 35 passed on SQLite (00:02) and on the Postgres built from
 `01_schema_rebased.sql` (00:04); `ruff check .` clean; the `MINTY_DB_SCHEMA=pettycash_alt` guard
 passes; Minty's `audit_models.py` reports 0 for this repo (a planted bogus column is found);
@@ -82,6 +89,7 @@ curl http://localhost:8004/healthz                      # {"status":"ok","servic
 curl -i http://localhost:8004/api/me/subscriptions      # 404 not_found while dark; 401 when live
 python manage.py plans list                             # the catalog - proves DB + schema
 python manage.py subscriptions tick                     # no-op while dark
+python manage.py export_openapi                         # rewrite docs/openapi.json (--check in CI)
 ```
 
 In the docker stack (`Minty/docker/stack`) it is the `billing-api` service on host port 8004.
@@ -90,7 +98,7 @@ In the docker stack (`Minty/docker/stack`) it is the `billing-api` service on ho
 
 ```bash
 set MINTY_TEST_PG_URI=
-pytest                                        # unit suite on SQLite (tables from the models); ~940 tests, 00:07
+pytest                                        # unit suite on SQLite (tables from the models); ~1120 tests, 00:10
 set MINTY_TEST_PG_URI=postgresql://postgres:***@localhost:5432/postgres
 set MINTY_REPO=C:\Github\Minty
 pytest                                        # the same suite on a Postgres built from 01_schema_rebased.sql; 00:10
@@ -105,8 +113,9 @@ gets the SQLite run back. Report the run time (mm:ss) of every suite with its re
 `billing/tests/conftest.py` blocks the network and `billing/tests/engine/conftest.py` makes an
 unstubbed `stripe_client.get_stripe()` an assertion: a test that needs Flask or Stripe stubs
 the transport. `billing/tests/engine/` is the ported `Minty/tests/test_subscription_*` family
-(51 files, 762 tests, same names) - `docs/features/subscriptions-api.md` §8 says how they
-differ and which halves wait for step 3.
+(51 files, 762 tests, same names) and `billing/tests/api/` the HTTP halves of the same files
+against the routers (step 3, importing the engine's stubs) - `docs/features/subscriptions-api.md`
+§8 says how they differ and which halves are still to come.
 
 ## Layout
 
@@ -114,18 +123,19 @@ differ and which halves wait for step 3.
 config/          settings (the two switches, CORS, DB, Stripe keys, mail, logging) · settings_test · urls (the four routers, /healthz)
 core/            auth (BearerAuth, SelfBearerAuth, EntityBearerAuth) · exceptions ({"error"} shape) · middleware (dark gate, request log) · policy (roles/permissions) · flask_client (the ONLY caller of Flask) · log_formatters
 shared_models/   the 21 mirrors, managed = False · enums (the Postgres enums) · fields (PgEnumField, CharNField)
-billing/         api/ (me, modules, notice, onboarding - stubs until step 3) · services/ (THE ENGINE: the 24 modules of Minty's blueprints/subscription/services ported 1:1, plus entity_modules.py, _context.py, _log.py) · static/email/ (the 9 inline images) · scheduler.py · management/commands/{subscriptions,plans,replay_scenarios}.py · tests/ (+ tests/engine/, the ported suite)
+billing/         api/ (me, modules, notice, onboarding - the four routers, live; _json.py = Flask's jsonify) · services/ (THE ENGINE: the 24 modules of Minty's blueprints/subscription/services ported 1:1, plus entity_modules.py, _context.py, _log.py) · static/email/ (the 9 inline images) · scheduler.py · management/commands/{subscriptions,plans,replay_scenarios,export_openapi}.py · tests/ (+ tests/engine/, the ported suite; tests/api/, the route tests)
 scripts/         replay_diff.py (Flask report vs Django report, normalised)
 templates/email/ subscription_{notice,receipt}.html - Minty's, verbatim (Jinja2 backend; a render from either side is byte-identical)
 e2e/             HTTP smoke tests against a live service
 docker/          entrypoint (waits for DB + schema; no migrate)
 docs/features/   README · authentication.md · subscriptions-api.md (the route-by-route map and what each step fills)
+docs/openapi.json  the committed contract (= /api/openapi.json; manage.py export_openapi)
 ```
 
 ## Verifying it (skeleton 2026-09-21; the engine port the same day; rerun after any change)
 
-`MINTY_TEST_PG_URI= pytest` green on SQLite (938 passed, 2 Postgres-only lock tests skipped,
-00:07); `MINTY_TEST_PG_URI=… MINTY_REPO=C:\Github\Minty pytest` green (940 passed, 00:10; the
+`MINTY_TEST_PG_URI= pytest` green on SQLite (1122 passed, 2 Postgres-only lock tests skipped,
+00:09); `MINTY_TEST_PG_URI=… MINTY_REPO=C:\Github\Minty pytest` green (1124 passed, 00:14; the
 harness builds `01_schema_rebased.sql`; a mirror column the schema lacks fails on the SELECT);
 `MINTY_DB_SCHEMA=pettycash_alt pytest billing/tests/test_schema_name.py` passes; `ruff check .`
 clean; `manage.py runserver 8004` → `/healthz` 200 and `/api/me/subscriptions` 404 with

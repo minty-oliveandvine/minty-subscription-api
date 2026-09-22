@@ -408,6 +408,10 @@ def build_payer_subscriptions(
                 # user on the login form. Same contract as the notice endpoint's
                 # ``settings_path``.
                 "settings_path": f"/entity/settings/module/{entity.id}",
+                # Step 3 addition over Flask's answer (minty-web's Manage Subscriptions list
+                # is "newest company first" by design and sorts on this; ISO like
+                # ``date_iso``, since it is for computing on, not reading).
+                "created_at": _iso(getattr(entity, "created_at", None)),
                 "_next_date": None,
             }
         )
@@ -657,10 +661,12 @@ def invite_admin_to_entity(user_id, entity_id, email: str, *, send) -> tuple[boo
     THE INVITATION ITSELF IS FLASK'S. Membership, the invite row, its token, expiry and
     the email are the identity system's until Part 3, so the write is delegated to
     ``send`` — ``send(body) -> (payload, status)`` — which the route supplies as a forward
-    to Flask's ``POST /minty/api/invitation/send`` (``core.flask_client``); a test passes a
-    lambda. Flask's payload shape is read here: ``status`` 201 with
-    ``invitation.email_sent``, or an error ``message`` that is already customer-facing
-    ("already a member", "an invitation is already pending") and passes through.
+    of the caller's bearer to Flask's ``POST /api/onboarding/invite`` (``core.flask_client``;
+    the session-cookie ``/minty/api/invitation/send`` cannot take a bearer); a test passes a
+    lambda. Flask's answer is read here: a 2xx with ``email_sent`` (top level, as the
+    onboarding endpoint puts it, or under ``invitation`` as the session one does), or an
+    error sentence under ``error`` / ``message`` that is already customer-facing ("already
+    a member", "an invitation is already pending") and passes through.
     """
     from billing.services import store as sub_store
     from core.policy import Permission, has_permission
@@ -686,13 +692,18 @@ def invite_admin_to_entity(user_id, entity_id, email: str, *, send) -> tuple[boo
     payload, status = send({"entity_id": str(entity.id), "email": address, "role": "admin"})
     payload = payload if isinstance(payload, dict) else {}
     if not 200 <= int(status or 0) < 300:
-        return False, payload.get("message") or "That invitation couldn't be created."
+        return False, (
+            payload.get("error") or payload.get("message") or "That invitation couldn't be created."
+        )
 
     # The row is the invitation; the email is how it is delivered. A send failure leaves a
     # valid pending invite that can be resent from the entity's Users page, so it is
     # reported rather than undone — deleting it would throw away a good record because
     # SMTP hiccuped.
-    if not (payload.get("invitation") or {}).get("email_sent", True):
+    email_sent = payload.get("email_sent")
+    if email_sent is None:
+        email_sent = (payload.get("invitation") or {}).get("email_sent", True)
+    if not email_sent:
         return True, (
             f"Invited {address} as an admin, but the email didn't send. "
             "You can resend it from the company's Users page."

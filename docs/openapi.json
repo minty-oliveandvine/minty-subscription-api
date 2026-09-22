@@ -1,0 +1,810 @@
+{
+  "components": {
+    "schemas": {},
+    "securitySchemes": {
+      "BearerAuth": {
+        "scheme": "bearer",
+        "type": "http"
+      },
+      "EntityBearerAuth": {
+        "scheme": "bearer",
+        "type": "http"
+      },
+      "NoticeBearerAuth": {
+        "scheme": "bearer",
+        "type": "http"
+      },
+      "SelfBearerAuth": {
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "The subscription engine, extracted from Minty (Part 2 of the modernisation plan).",
+    "title": "Minty Billing API",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/entities/{entity_id}/modules": {
+      "get": {
+        "description": "What Flask's ``entity_settings_module`` handed its template, as JSON: the cards, the\nsummary and panel, the date on the card at the top (READ OFF THE PANEL rather than\ncomputed beside it - the two were once two answers to one question), whether the\nviewer may act (admin AND payer, or no payer yet), who pays when it is somebody else,\nand the lapsed-trial restart screen when there is one.",
+        "operationId": "billing_api_modules_module_page",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "entity_id",
+            "required": true,
+            "schema": {
+              "title": "Entity Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "EntityBearerAuth": []
+          }
+        ],
+        "summary": "The module settings page model",
+        "tags": [
+          "Module settings"
+        ]
+      }
+    },
+    "/api/entities/{entity_id}/modules/payment-methods": {
+      "get": {
+        "operationId": "billing_api_modules_module_payment_methods",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "entity_id",
+            "required": true,
+            "schema": {
+              "title": "Entity Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "EntityBearerAuth": []
+          }
+        ],
+        "summary": "The payer's cards",
+        "tags": [
+          "Module settings"
+        ]
+      },
+      "post": {
+        "operationId": "billing_api_modules_module_payment_methods",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "entity_id",
+            "required": true,
+            "schema": {
+              "title": "Entity Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "EntityBearerAuth": []
+          }
+        ],
+        "summary": "The payer's cards",
+        "tags": [
+          "Module settings"
+        ]
+      }
+    },
+    "/api/entities/{entity_id}/modules/restart-quote": {
+      "get": {
+        "operationId": "billing_api_modules_module_restart_quote",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "entity_id",
+            "required": true,
+            "schema": {
+              "title": "Entity Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "EntityBearerAuth": []
+          }
+        ],
+        "summary": "Price a restart (?codes= on GET)",
+        "tags": [
+          "Module settings"
+        ]
+      },
+      "post": {
+        "operationId": "billing_api_modules_module_restart_quote",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "entity_id",
+            "required": true,
+            "schema": {
+              "title": "Entity Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "EntityBearerAuth": []
+          }
+        ],
+        "summary": "Price a restart (?codes= on GET)",
+        "tags": [
+          "Module settings"
+        ]
+      }
+    },
+    "/api/entities/{entity_id}/modules/{action}": {
+      "post": {
+        "operationId": "billing_api_modules_module_action",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "entity_id",
+            "required": true,
+            "schema": {
+              "title": "Entity Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "action",
+            "required": true,
+            "schema": {
+              "title": "Action",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "EntityBearerAuth": []
+          }
+        ],
+        "summary": "One of ACTIONS",
+        "tags": [
+          "Module settings"
+        ]
+      }
+    },
+    "/api/entities/{entity_id}/subscription-notice": {
+      "get": {
+        "description": "``{\"items\": [...], \"can_manage\", \"payer\", \"severity\", \"settings_path\"}``. A notice must\nnever break the landing page: a builder failure answers ``{\"items\": []}`` with 200.",
+        "operationId": "billing_api_notice_subscription_notice",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "entity_id",
+            "required": true,
+            "schema": {
+              "title": "Entity Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "NoticeBearerAuth": []
+          }
+        ],
+        "summary": "The dashboard notice",
+        "tags": [
+          "Notice"
+        ]
+      }
+    },
+    "/api/me/billing/entity-payment-method": {
+      "get": {
+        "description": "``?entity=<id>`` -> the saved methods, plus ``nominated_id``.",
+        "operationId": "billing_api_me_my_entity_payment_method",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "SelfBearerAuth": []
+          }
+        ],
+        "summary": "The card one company is billed on",
+        "tags": [
+          "Payer portal"
+        ]
+      },
+      "post": {
+        "description": "Body: ``{entity, payment_method}``. THE ONE WRITE ON THIS SURFACE WITH BILLING\nCONSEQUENCES, and they stop at the company named. Two proofs inside the service: the\nmethod is the caller's (``_owned``) and the caller is the company's payer (``_payer_of``).",
+        "operationId": "billing_api_me_my_entity_payment_method_set",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "SelfBearerAuth": []
+          }
+        ],
+        "summary": "Put one company on a card",
+        "tags": [
+          "Payer portal"
+        ]
+      }
+    },
+    "/api/me/billing/payment-methods": {
+      "get": {
+        "operationId": "billing_api_me_my_payment_methods",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "SelfBearerAuth": []
+          }
+        ],
+        "summary": "Every saved payment method, default first",
+        "tags": [
+          "Payer portal"
+        ]
+      }
+    },
+    "/api/me/billing/payment-methods/confirm": {
+      "post": {
+        "description": "Body: ``{setup_intent, make_default?}``. The intent is re-read from Stripe and refused\nunless it carries this caller's own ``metadata.user_id`` stamp. Idempotent.",
+        "operationId": "billing_api_me_my_payment_method_confirm",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "SelfBearerAuth": []
+          }
+        ],
+        "summary": "Adopt the card the browser confirmed",
+        "tags": [
+          "Payer portal"
+        ]
+      }
+    },
+    "/api/me/billing/payment-methods/default": {
+      "post": {
+        "description": "Body: ``{payment_method}``. NOMINATES NOTHING - each company is billed on the card it was\nput on; this decides which card the pickers offer first.",
+        "operationId": "billing_api_me_my_payment_method_default",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "SelfBearerAuth": []
+          }
+        ],
+        "summary": "Make one saved method the account's main card",
+        "tags": [
+          "Payer portal"
+        ]
+      }
+    },
+    "/api/me/billing/payment-methods/remove": {
+      "post": {
+        "description": "Body: ``{payment_method}``. Two 409s the page shows verbatim: the default cannot go\nwhile another method could take its place, and the last method cannot go at all while\nsomething is still billing forward.",
+        "operationId": "billing_api_me_my_payment_method_remove",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "SelfBearerAuth": []
+          }
+        ],
+        "summary": "Detach a saved method",
+        "tags": [
+          "Payer portal"
+        ]
+      }
+    },
+    "/api/me/billing/payment-methods/setup-intent": {
+      "post": {
+        "description": "Answers ``{client_secret, publishable_key, setup_intent}``. Takes nothing from the\nrequest; no customer is created here - that happens in ``confirm`` once Stripe says a\ncard exists, so an abandoned form leaves nothing behind.",
+        "operationId": "billing_api_me_my_payment_method_setup_intent",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "SelfBearerAuth": []
+          }
+        ],
+        "summary": "Open a SetupIntent for the card form",
+        "tags": [
+          "Payer portal"
+        ]
+      }
+    },
+    "/api/me/billing/payment-methods/update": {
+      "post": {
+        "description": "Body: ``{payment_method, exp_month?, exp_year?, name?, address?}`` - only what Stripe\npermits to change on an existing method.",
+        "operationId": "billing_api_me_my_payment_method_update",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "SelfBearerAuth": []
+          }
+        ],
+        "summary": "Edit a saved method's expiry or billing details",
+        "tags": [
+          "Payer portal"
+        ]
+      }
+    },
+    "/api/me/invoices": {
+      "get": {
+        "description": "Query params: ``entity`` (narrow to one company), ``page``, ``per_page``. ``entity`` is a\nfilter, not a permission: the set is already fixed to ``payer_user_id`` from the token.",
+        "operationId": "billing_api_me_my_invoices",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "SelfBearerAuth": []
+          }
+        ],
+        "summary": "The caller's invoices, newest first",
+        "tags": [
+          "Payer portal"
+        ]
+      }
+    },
+    "/api/me/subscriptions": {
+      "get": {
+        "description": "Query params, all optional: ``q``, ``sort`` (one of ``portal.SORT_FIELDS``, default\n``entity``), ``direction`` (``asc``/``desc``), ``page`` (1-based), ``per_page`` (clamped to\n``portal.MAX_PER_PAGE``). An unknown sort field falls back to entity name rather than\nerroring: this drives a column header, and an unrecognised one means the client is newer\nthan the server, which should degrade to a sensible order and not a broken table.",
+        "operationId": "billing_api_me_my_subscriptions",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "SelfBearerAuth": []
+          }
+        ],
+        "summary": "Every company the caller pays for",
+        "tags": [
+          "Payer portal"
+        ]
+      }
+    },
+    "/api/me/subscriptions/invite-admin": {
+      "post": {
+        "description": "Body: ``{\"entity\": id, \"email\": ...}``. The ONLY write the payer portal performs against\nMinty's own tables, and it is deliberately the smallest one on this screen: it adds a\nMEMBER, it does not move a payer. The gates (payer of the company, USER_INVITE) are the\nservice's; the invitation itself is Flask's, reached through ``core.flask_client``.",
+        "operationId": "billing_api_me_my_invite_admin",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "SelfBearerAuth": []
+          }
+        ],
+        "summary": "Invite someone into a company as an admin",
+        "tags": [
+          "Payer portal"
+        ]
+      }
+    },
+    "/api/me/subscriptions/subscriber-options": {
+      "get": {
+        "description": "``entity`` is REQUIRED, and it is the first id the payer portal accepts that is not a\nfilter over an already-payer-scoped set. So it is checked rather than trusted: the read\nmodel answers None unless the caller is the payer for that entity, and this returns 404\nfor it.",
+        "operationId": "billing_api_me_my_subscriber_options",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "SelfBearerAuth": []
+          }
+        ],
+        "summary": "Who one company's bill could go to",
+        "tags": [
+          "Payer portal"
+        ]
+      }
+    },
+    "/api/me/subscriptions/transfer": {
+      "post": {
+        "description": "Body: ``{entity, to_user}``. Authorised inside the service: ``transfer_blockers`` refuses\nunless the caller is that entity's payer.",
+        "operationId": "billing_api_me_my_transfer_initiate",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "SelfBearerAuth": []
+          }
+        ],
+        "summary": "Offer a company's subscription to another admin",
+        "tags": [
+          "Payer portal"
+        ]
+      }
+    },
+    "/api/me/subscriptions/transfer/cancel": {
+      "post": {
+        "description": "Body: ``{transfer}``. The initiator's escape hatch.",
+        "operationId": "billing_api_me_my_transfer_cancel",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "SelfBearerAuth": []
+          }
+        ],
+        "summary": "Withdraw a handover you offered",
+        "tags": [
+          "Payer portal"
+        ]
+      }
+    },
+    "/api/me/subscriptions/transfer/respond": {
+      "post": {
+        "description": "Body: ``{transfer, accept}``. THE ONE ROUTE HERE THAT MOVES MONEY, and re-entrant: called\ntwice it adopts the invoice already paid under the offer's key rather than raising a\nsecond one, so a double-click or a retry after a timeout costs nothing.",
+        "operationId": "billing_api_me_my_transfer_respond",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "SelfBearerAuth": []
+          }
+        ],
+        "summary": "Accept or decline a handover offered to you",
+        "tags": [
+          "Payer portal"
+        ]
+      }
+    },
+    "/api/me/subscriptions/transfers": {
+      "get": {
+        "description": "Scoped on ``to_user_id`` from the token - deliberately companies the caller does NOT\npay for yet. Still nothing in the request can be swapped for someone else's offers.",
+        "operationId": "billing_api_me_my_transfers",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "SelfBearerAuth": []
+          }
+        ],
+        "summary": "Handovers offered to the caller",
+        "tags": [
+          "Payer portal"
+        ]
+      }
+    },
+    "/api/onboarding/billing/accounts": {
+      "get": {
+        "description": "GET -> ``{accounts: [{id, billing_email, billing_company, default_id, cards[]}], …}``.\nPOST ``{payment_method, billing_email?, billing_company?}`` opens an account on a card the\npayer already holds (ownership proven first); it authorises nothing.",
+        "operationId": "billing_api_onboarding_billing_accounts",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "The payer's billing accounts; open one",
+        "tags": [
+          "Onboarding"
+        ]
+      },
+      "post": {
+        "description": "GET -> ``{accounts: [{id, billing_email, billing_company, default_id, cards[]}], …}``.\nPOST ``{payment_method, billing_email?, billing_company?}`` opens an account on a card the\npayer already holds (ownership proven first); it authorises nothing.",
+        "operationId": "billing_api_onboarding_billing_accounts",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "The payer's billing accounts; open one",
+        "tags": [
+          "Onboarding"
+        ]
+      }
+    },
+    "/api/onboarding/billing/authorize": {
+      "post": {
+        "description": "Body ``{entity_id, payment_method?}`` -> ``{\"has_billing_consent\": true}``. Charges\nnothing: the trial runs its term, and this is the difference between \"converts\" and\n\"expires\" at the end of it. ``payment_method`` is nominated BEFORE consent is recorded\n(``establish_payer=True`` - the one caller that does, because during the wizard no\ncompany has a payer yet and this request is what establishes one). Idempotent.",
+        "operationId": "billing_api_onboarding_billing_authorize",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Record consent to bill this company",
+        "tags": [
+          "Onboarding"
+        ]
+      }
+    },
+    "/api/onboarding/billing/payment-methods": {
+      "get": {
+        "operationId": "billing_api_onboarding_billing_payment_methods",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Every card on the payer's account",
+        "tags": [
+          "Onboarding"
+        ]
+      }
+    },
+    "/api/onboarding/billing/payment-methods/confirm": {
+      "post": {
+        "description": "Body ``{setup_intent, make_default?, billing_group_id?, billing_email?,\nbilling_company?}``. Saving a card AUTHORISES NOTHING - that is ``/billing/authorize``.\nThe three account fields are optional: a group id puts the card on an account the payer\nalready has (the service checks it is theirs), an email or company opens a new one.",
+        "operationId": "billing_api_onboarding_billing_confirm",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Adopt the confirmed card",
+        "tags": [
+          "Onboarding"
+        ]
+      }
+    },
+    "/api/onboarding/billing/payment-methods/default": {
+      "post": {
+        "description": "Body ``{payment_method}``. Nominates nothing by itself; decides which card is offered\nfirst - including to ``/billing/authorize``.",
+        "operationId": "billing_api_onboarding_billing_set_default",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Make one card the account's main one",
+        "tags": [
+          "Onboarding"
+        ]
+      }
+    },
+    "/api/onboarding/billing/payment-methods/setup-intent": {
+      "post": {
+        "description": "``{client_secret, publishable_key, setup_intent}``; needs no customer yet.",
+        "operationId": "billing_api_onboarding_billing_setup_intent",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Open a SetupIntent for the card form",
+        "tags": [
+          "Onboarding"
+        ]
+      }
+    },
+    "/api/onboarding/payment-method": {
+      "get": {
+        "description": "``?entity_id=`` -> ``{\"has_payment_method\", \"has_billing_consent\", \"card\"}``.\n\nTwo separate questions, and the second is the one that matters: ``has_payment_method``\nis read live from Stripe and belongs to the PAYER, shared across every entity they pay\nfor; consent is per (entity, payer) and decides whether the 30-day trial converts or\nlapses. ``card`` IS THIS ENTITY'S NOMINATED CARD, not the payer's default - null when\nnothing is nominated, and null is the honest answer. Neither gates the wizard. Stripe\nunreachable degrades to \"no card\" rather than 500; the consent read is local and\ndeliberately outside that guard.",
+        "operationId": "billing_api_onboarding_payment_method_status",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Whether this company can be billed",
+        "tags": [
+          "Onboarding"
+        ]
+      }
+    },
+    "/api/onboarding/payment-method/complete": {
+      "post": {
+        "description": "Body ``{entity_id, session_id}`` -> ``{\"has_payment_method\": true}``. Idempotent, so a\nrefresh of the return URL is harmless.",
+        "operationId": "billing_api_onboarding_payment_method_complete",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Save the card a setup Checkout captured",
+        "tags": [
+          "Onboarding"
+        ]
+      }
+    },
+    "/api/onboarding/payment-method/setup": {
+      "post": {
+        "description": "Body ``{entity_id}`` -> ``{\"url\"}``. No charge, no subscription: onboarding starts the\ntrials at finalize. Stripe returns to the wizard with ``?pm_session_id=``, which it hands\nto ``/payment-method/complete``.",
+        "operationId": "billing_api_onboarding_payment_method_setup",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Open a setup-mode Checkout to save a card",
+        "tags": [
+          "Onboarding"
+        ]
+      }
+    },
+    "/api/onboarding/trials/start": {
+      "post": {
+        "description": "Body ``{entity_id}`` -> ``{\"trial_end\": iso8601 | null}``.\n\nWhat Flask's ``onboarding_finalize`` did inline (``start_trials_for_enabled_modules``,\nbest-effort, then the earliest ``trial_end`` read back) - except that here a failure\nFAILS: onboarding-backend's finalize has already flipped the company live when it calls\nthis, and a trial that silently did not start is a company with modules on and nothing\nbehind them. A ``CheckoutError`` answers with its own status, anything else 502; the All\nSet screen offers Try again. Idempotent: modules that already hold a trial or a\nsubscription are skipped by the starter, and ``trial_end`` is READ BACK from the rows -\nthe answer on a revisit as much as on the first call. Null is a legitimate answer (an\nentity with no enabled module has no trial to state).",
+        "operationId": "billing_api_onboarding_trials_start",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Start the card-free trials of a finished wizard",
+        "tags": [
+          "Onboarding"
+        ]
+      }
+    }
+  },
+  "servers": []
+}

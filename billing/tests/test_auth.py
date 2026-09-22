@@ -5,8 +5,9 @@ with the shared ``SECRET_KEY``, unexpired and names a real user; the portal (``/
 takes it with or without a company, the module page (``/api/entities/*``) only when the
 caller holds a role on the company named by the token or the ``X-Entity-Id`` header.
 
-"Accepted" here means the request reaches the handler - a 501 stub until Part 2 step 3 -
-rather than being stopped at the door with 401.
+"Accepted" here means the request reaches the handler rather than being stopped at the door
+with 401: the portal answers its empty table (step 3 slice A), the module page its page model
+(slice B) - 200 both.
 """
 
 from __future__ import annotations
@@ -19,7 +20,8 @@ from billing.tests.conftest import make_token
 
 pytestmark = pytest.mark.django_db
 
-ACCEPTED = 501  # the stub behind the door, until step 3
+PORTAL_ACCEPTED = 200  # /api/me/subscriptions, the empty table for a payer with nothing
+MODULE_PAGE_ACCEPTED = 200  # /api/entities/{id}/modules, the page model of a company with nothing
 
 
 def _bearer(token):
@@ -31,12 +33,12 @@ def _bearer(token):
 
 def test_unscoped_flask_token_reaches_the_portal(client, user):
     res = client.get("/api/me/subscriptions", **_bearer(make_token(user.id)))
-    assert res.status_code == ACCEPTED
+    assert res.status_code == PORTAL_ACCEPTED
 
 
 def test_scoped_flask_token_reaches_the_portal_too(client, user, entity):
     res = client.get("/api/me/subscriptions", **_bearer(make_token(user.id, entity_id=entity.id)))
-    assert res.status_code == ACCEPTED
+    assert res.status_code == PORTAL_ACCEPTED
 
 
 def test_portal_tolerates_a_company_the_caller_has_no_role_on(client, other_user, entity):
@@ -44,7 +46,7 @@ def test_portal_tolerates_a_company_the_caller_has_no_role_on(client, other_user
     res = client.get(
         "/api/me/subscriptions", **_bearer(make_token(other_user.id, entity_id=entity.id))
     )
-    assert res.status_code == ACCEPTED
+    assert res.status_code == PORTAL_ACCEPTED
 
 
 def test_forged_token_is_refused(client, user):
@@ -73,7 +75,7 @@ def test_missing_bearer_is_refused(client, db):
 
 def test_member_reaches_the_module_page(client, user, entity):
     res = client.get(f"/api/entities/{entity.id}/modules", **_bearer(make_token(user.id, entity_id=entity.id)))
-    assert res.status_code == ACCEPTED
+    assert res.status_code == MODULE_PAGE_ACCEPTED
 
 
 def test_unscoped_token_plus_header_reaches_the_module_page(client, user, entity):
@@ -83,7 +85,7 @@ def test_unscoped_token_plus_header_reaches_the_module_page(client, user, entity
         HTTP_X_ENTITY_ID=str(entity.id),
         **_bearer(make_token(user.id)),
     )
-    assert res.status_code == ACCEPTED
+    assert res.status_code == MODULE_PAGE_ACCEPTED
 
 
 def test_non_member_is_refused_on_the_module_page(client, other_user, entity):
@@ -107,4 +109,4 @@ def test_system_superadmin_reads_any_company(client, other_user, entity):
         f"/api/entities/{entity.id}/modules",
         **_bearer(make_token(other_user.id, entity_id=entity.id, system_role="superadmin")),
     )
-    assert res.status_code == ACCEPTED
+    assert res.status_code == MODULE_PAGE_ACCEPTED

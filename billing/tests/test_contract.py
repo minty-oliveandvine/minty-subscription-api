@@ -76,6 +76,18 @@ def test_the_onboarding_router_carries_the_nine_plus_trials_start():
     assert ("POST", "/trials/start") in ONBOARDING_ROUTES
 
 
+def test_the_committed_openapi_document_is_current():
+    """``docs/openapi.json`` is the contract other repos read (Part 3's type generation starts
+    there), so it must be exactly what the API serves. Regenerate with
+    ``manage.py export_openapi``."""
+    from billing.management.commands.export_openapi import DEFAULT_PATH, render
+
+    assert DEFAULT_PATH.exists(), "docs/openapi.json is missing - run: manage.py export_openapi"
+    assert DEFAULT_PATH.read_text(encoding="utf-8") == render(), (
+        "docs/openapi.json is stale - run: manage.py export_openapi"
+    )
+
+
 def test_openapi_lists_every_path(client):
     doc = client.get("/api/openapi.json").json()
     paths = set(doc["paths"])
