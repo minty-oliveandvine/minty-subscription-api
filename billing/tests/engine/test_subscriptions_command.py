@@ -168,5 +168,6 @@ def test_run_daily_without_a_key_reports_per_job_and_finishes(monkeypatch):
     assert "No --issue" in out
     assert "Daily pass" in out
     # nothing raised out of the command; every job has a line
-    for job in ("notify-trial-ending", "close-trials", "repair-transfers", "run-renewals", "retry-dunning"):
+    for job in ("notify-trial-ending", "close-trials", "repair-transfers",
+                "collect-transfers", "run-renewals", "retry-dunning"):
         assert job in out, out

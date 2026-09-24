@@ -626,7 +626,13 @@ class SubscriptionTransfer(models.Model):
     """A change-of-subscriber request: ``from_user`` offers a company's billing to
     ``to_user``, who accepts (and is charged the quoted amount - ``charge_key`` is the
     idempotency key of that charge) or declines before ``expires_at``. At most one OPEN
-    offer per company (``idx_st_entity_open``)."""
+    offer per company (``idx_st_entity_open``).
+
+    ACCEPTING TAKES NO MONEY when the window being bought has not started yet, which is
+    the usual case: the outgoing payer has paid for days nobody has used. The charge is
+    parked on ``collect_at`` and taken on the day it begins. The offer still completes
+    at accept - the payer flips, the old payer stops being liable - so a handover
+    waiting to be collected does NOT hold the entity's one open-offer slot."""
 
     id = MintyUUIDField(primary_key=True, default=new_id)
     entity = models.ForeignKey(
@@ -649,6 +655,18 @@ class SubscriptionTransfer(models.Model):
     charge_attempt = models.IntegerField(default=0)
     charge_key = models.CharField(max_length=120, null=True, blank=True)
     charge_invoice_id = models.CharField(max_length=64, null=True, blank=True)
+    # NOT NULL = this handover's first charge has not been collected yet, and becomes
+    # collectable at this instant - the day the OUTGOING payer's money runs out. An
+    # accept takes no money; ``transfers.collect_due`` charges on the day and CLEARS
+    # this, which is the only marker of settled. NULL on every handover that charged at
+    # accept (its window had already begun) and on every trial-only one. See
+    # Minty's w1a01_transfer_handover.
+    collect_at = models.DateTimeField(null=True, blank=True)
+    # NOT NULL = the payer who ASKED has been shown how this offer ended (declined, expired
+    # or accepted), so the modal saying so never opens again on any device. Stamped when they
+    # press Done - not when the email went out, which records that a message was SENT and not
+    # that a person saw it. See Minty's w1a01_transfer_handover.
+    outcome_seen_at = models.DateTimeField(null=True, blank=True)
     note = models.CharField(max_length=500, null=True, blank=True)
 
     class Meta:

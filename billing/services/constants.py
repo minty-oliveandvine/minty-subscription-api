@@ -39,6 +39,7 @@ AUDIT_TRANSFER_OFFERED = "transfer_offered"      # 16 chars
 AUDIT_TRANSFER_ACCEPTED = "transfer_accepted"    # 17
 AUDIT_TRANSFER_DECLINED = "transfer_declined"    # 17
 AUDIT_TRANSFER_CANCELLED = "transfer_cancelled"  # 18
+AUDIT_TRANSFER_COLLECTED = "transfer_collected"  # 18 - the deferred charge, taken
 # All four fit the model's String(20). Counted rather than assumed, because the shipped
 # column is VARCHAR(40) and the model is narrower — the model is the binding constraint.
 

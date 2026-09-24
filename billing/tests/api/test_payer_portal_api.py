@@ -258,8 +258,8 @@ def test_accepting_passes_the_flag_through(client, user, monkeypatch):
 
     seen = {}
 
-    def _respond(user_id, transfer_id, *, accept):
-        seen.update(user=user_id, transfer=transfer_id, accept=accept)
+    def _respond(user_id, transfer_id, *, accept, codes=None):
+        seen.update(user=user_id, transfer=transfer_id, accept=accept, codes=codes)
         return True, "You're now the subscriber for this company.", {"id": transfer_id}
 
     monkeypatch.setattr(transfers, "respond_to_transfer", _respond)
@@ -267,7 +267,27 @@ def test_accepting_passes_the_flag_through(client, user, monkeypatch):
     response = _post(client, user, f"{PORTAL}/transfer/respond", {"transfer": "t1", "accept": True})
 
     assert response.status_code == 200
-    assert seen == {"user": str(user.id), "transfer": "t1", "accept": True}
+    # No ``codes`` in the body is None, NOT an empty list - the service reads None as "the
+    # whole company", and an empty list would mean "take nothing".
+    assert seen == {"user": str(user.id), "transfer": "t1", "accept": True, "codes": None}
+
+
+def test_the_chosen_modules_are_passed_through(client, user, monkeypatch):
+    """07-D's choice. The route carries it verbatim; what it means is the service's."""
+    from billing.services import transfers
+
+    seen = {}
+    monkeypatch.setattr(
+        transfers, "respond_to_transfer",
+        lambda u, t, *, accept, codes=None: (seen.update(codes=codes) or
+                                             (True, "You're now the subscriber.", {"id": t})),
+    )
+
+    response = _post(client, user, f"{PORTAL}/transfer/respond",
+                     {"transfer": "t1", "accept": True, "codes": ["PETTY_CASH"]})
+
+    assert response.status_code == 200
+    assert seen["codes"] == ["PETTY_CASH"]
 
 
 def test_declining_is_the_same_route_with_the_flag_off(client, user, monkeypatch):
@@ -276,8 +296,8 @@ def test_declining_is_the_same_route_with_the_flag_off(client, user, monkeypatch
     seen = {}
     monkeypatch.setattr(
         transfers, "respond_to_transfer",
-        lambda u, t, *, accept: (seen.update(accept=accept) or
-                                 (True, "You've declined the handover.", None)),
+        lambda u, t, *, accept, codes=None: (seen.update(accept=accept) or
+                                             (True, "You've declined the handover.", None)),
     )
 
     response = _post(client, user, f"{PORTAL}/transfer/respond", {"transfer": "t1", "accept": False})
@@ -286,6 +306,41 @@ def test_declining_is_the_same_route_with_the_flag_off(client, user, monkeypatch
     assert seen["accept"] is False
     # No transfer to hand back: the key is absent, not null.
     assert response.json() == {"ok": True, "message": "You've declined the handover."}
+
+
+def test_marking_an_outcome_seen_passes_through(client, user, monkeypatch):
+    """07-I's Done. Stamped from the click, not from the read that drew the modal."""
+    from billing.services import transfers
+
+    seen = {}
+    monkeypatch.setattr(
+        transfers, "mark_outcome_seen",
+        lambda u, t: (seen.update(user=u, transfer=t) or (True, "Done.")),
+    )
+
+    response = _post(client, user, f"{PORTAL}/transfer/seen", {"transfer": "t1"})
+
+    assert response.status_code == 200
+    assert seen == {"user": str(user.id), "transfer": "t1"}
+
+
+def test_marking_seen_needs_a_transfer_id(client, user):
+    response = _post(client, user, f"{PORTAL}/transfer/seen", {})
+    assert response.status_code == 400
+    assert response.json() == {"error": "transfer is required"}
+
+
+def test_a_refused_seen_is_a_422_with_the_services_words(client, user, monkeypatch):
+    from billing.services import transfers
+
+    monkeypatch.setattr(
+        transfers, "mark_outcome_seen", lambda u, t: (False, "That handover isn't yours.")
+    )
+
+    response = _post(client, user, f"{PORTAL}/transfer/seen", {"transfer": "t1"})
+
+    assert response.status_code == 422
+    assert response.json() == {"error": "That handover isn't yours."}
 
 
 def test_cancelling_needs_a_transfer_id(client, user):

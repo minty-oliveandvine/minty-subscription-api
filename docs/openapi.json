@@ -537,7 +537,7 @@
     },
     "/api/me/subscriptions/transfer/respond": {
       "post": {
-        "description": "Body: ``{transfer, accept}``. THE ONE ROUTE HERE THAT MOVES MONEY, and re-entrant: called\ntwice it adopts the invoice already paid under the offer's key rather than raising a\nsecond one, so a double-click or a retry after a timeout costs nothing.",
+        "description": "Body: ``{transfer, accept, codes?}``. THE ONE ROUTE HERE THAT MOVES MONEY, and re-entrant:\ncalled twice it adopts the invoice already paid under the offer's key rather than raising a\nsecond one, so a double-click or a retry after a timeout costs nothing.\n\n``codes`` is the modules being taken on (07-D \"Choose Modules\"); anything the company has and\nthe list does not name is cancelled as part of accepting. OMITTED MEANS ALL OF THEM, which is\nwhat every caller written before the screen offered a choice sends — the field is additive\nand an older client keeps working unchanged.",
         "operationId": "billing_api_me_my_transfer_respond",
         "parameters": [],
         "responses": {
@@ -551,6 +551,27 @@
           }
         ],
         "summary": "Accept or decline a handover offered to you",
+        "tags": [
+          "Payer portal"
+        ]
+      }
+    },
+    "/api/me/subscriptions/transfer/seen": {
+      "post": {
+        "description": "Body: ``{transfer}``. The payer pressing Done on 07-I / A-07 / A-08.\n\nStamped from their click rather than from the read that drew the modal: rendering is not\nevidence anybody saw it. Idempotent, so a double-click costs nothing, and it answers the\nsame way for a transfer that does not exist and one that is not theirs.",
+        "operationId": "billing_api_me_my_transfer_seen",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "SelfBearerAuth": []
+          }
+        ],
+        "summary": "Mark how one of your handovers ended as seen",
         "tags": [
           "Payer portal"
         ]

@@ -50,17 +50,20 @@ from datetime import UTC, datetime, timedelta
 
 from django.db import IntegrityError, transaction
 
-from billing.services import clock, store
+from billing.services import access, clock, store
 from billing.services._log import logger
 from billing.services.constants import (
+    AUDIT_CANCEL,
     AUDIT_TRANSFER_ACCEPTED,
     AUDIT_TRANSFER_CANCELLED,
+    AUDIT_TRANSFER_COLLECTED,
     AUDIT_TRANSFER_DECLINED,
     AUDIT_TRANSFER_OFFERED,
     EXT_PENDING,
     OUTCOME_ABORTED,
     OUTCOME_SUCCEEDED,
     PHASE_PAST_DUE,
+    PHASE_SCHEDULED_CANCEL,
     PHASE_TRIAL,
 )
 from billing.services.constants import (
@@ -203,6 +206,72 @@ def pending_transfer_for_entity(entity_id) -> SubscriptionTransfer | None:
         .order_by("-created_at")
         .first()
     )
+
+
+#: The ways an offer ends that the person who ASKED did not choose, and so has to be told.
+#: ``cancelled`` is deliberately absent: it covers a withdrawal they performed themselves -
+#: already answered by 07-K as they did it - and telling somebody their own click happened is
+#: not news.
+OUTCOME_STATUSES = (STATUS_DECLINED, STATUS_EXPIRED, STATUS_ACCEPTED)
+
+
+def unseen_outcomes(from_user_id, *, limit: int = 5) -> list[dict]:
+    """How this payer's offers ended, where they have not been shown yet.
+
+    THE ONLY READ OF A FINISHED TRANSFER in the engine. Every other query filters on the
+    three OPEN statuses, which is why a decline used to be invisible: ``pending_transfer``
+    went null and the offering screen fell back to the picker exactly as though nothing had
+    ever been asked. The payer learned by email or not at all.
+
+    Oldest first, so several outcomes that piled up while they were away are told in the
+    order they happened. ``limit`` is a sanity bound, not a page: a payer with more than a
+    handful of unanswered handovers has a different problem, and the screen shows them one
+    at a time anyway.
+    """
+    from shared_models.models import Entity
+
+    if not from_user_id:
+        return []
+    rows = list(
+        SubscriptionTransfer.objects.filter(
+            from_user_id=str(from_user_id),
+            status__in=OUTCOME_STATUSES,
+            outcome_seen_at__isnull=True,
+        ).order_by("responded_at", "created_at")[:limit]
+    )
+    out = []
+    for offer in rows:
+        entity = store._by_pk(Entity, offer.entity_id)
+        out.append({
+            "id": offer.id,
+            "entity_id": offer.entity_id,
+            "entity_name": getattr(entity, "name", None) or "",
+            "status": offer.status,
+            # The other party, named - the modal's title is "<Name> declined the transfer",
+            # and an outcome that cannot name anybody is a worse sentence than none.
+            "who": _display_name(store._by_pk(User, offer.to_user_id)),
+            "responded_at": offer.responded_at,
+        })
+    return out
+
+
+def mark_outcome_seen(user_id, transfer_id) -> tuple[bool, str]:
+    """Record that this payer has been shown how their offer ended.
+
+    IDEMPOTENT, and stamped from the person's own Done rather than from the read that drew
+    the modal: a render is not evidence anybody saw it, and neither is the email
+    (``subscription_email_log`` records that a message was SENT). Re-stamping is a no-op, so
+    a double-click or a retry after a timeout costs nothing.
+    """
+    offer = store._by_pk(SubscriptionTransfer, transfer_id)
+    if offer is None or str(offer.from_user_id) != str(user_id):
+        # Same answer for "no such transfer" and "not yours", which is the rule the rest of
+        # this module follows: an id that is not yours must not be confirmable as existing.
+        return False, "That handover isn't yours."
+    if offer.outcome_seen_at is None:
+        offer.outcome_seen_at = clock.now()
+        offer.save(update_fields=["outcome_seen_at"])
+    return True, "Done."
 
 
 def incoming_transfers(user_id) -> list[SubscriptionTransfer]:
@@ -498,12 +567,24 @@ def _decline(offer, user_id) -> tuple[bool, str, dict | None]:
 # --- accept -------------------------------------------------------------------------
 
 
-def respond_to_transfer(user_id, transfer_id, *, accept: bool) -> tuple[bool, str, dict | None]:
+def respond_to_transfer(
+    user_id, transfer_id, *, accept: bool, codes=None
+) -> tuple[bool, str, dict | None]:
     """Accept or decline an offer. Returns ``(ok, message, result)``.
 
     RE-ENTRANT. Called on an offer already in ``charging`` or ``charged`` it picks up at
     the adopt step instead of starting a second charge, which is what makes a retry after
     a crash safe rather than a double bill.
+
+    ``codes`` is the modules the recipient is TAKING ON (07-D "Choose Modules"). Omitted
+    means all of them, which is every caller that has not been updated and every handover
+    made before the screen offered the choice. Anything the company has and this does not
+    name is CANCELLED as part of accepting — see ``_decline_modules``.
+
+    NOT STORED ON THE OFFER, deliberately. The choice is made and acted on in this one
+    request: the modules are cancelled, the payer flips, and what remains is read back off
+    the rows from then on. A column recording it would be a second copy of something the
+    rows already say, and the deferred collection re-reads them anyway.
     """
     offer = store._by_pk(SubscriptionTransfer, transfer_id)
     if offer is None or offer.status not in OPEN_STATUSES:
@@ -537,14 +618,138 @@ def respond_to_transfer(user_id, transfer_id, *, accept: bool) -> tuple[bool, st
                     outcome=OUTCOME_ABORTED, note=reasons[0][:500])
         return False, reasons[0], None
 
-    return _accept(offer, user_id, now)
+    return _accept(offer, user_id, now, codes=codes)
 
 
-def _accept(offer, user_id, now) -> tuple[bool, str, dict | None]:
+def _decline_modules(entity_id, keep, at, actor_user_id) -> list[str]:
+    """End the modules the incoming payer is not taking on. Returns the codes ended.
+
+    ENDED AT ``at`` — the instant the outgoing payer's money runs out — and that exact
+    date is the whole design. A module declined at a handover is one nobody is going to
+    pay for after that day: the days up to it are bought and are honoured, and there are
+    no days after it to charge anybody for.
+
+    WHICH IS WHY THIS DOES NOT CALL ``checkout.cancel_module``. That path derives its own
+    access end, ``max(paid_through, now + paid_cancel_access_days)`` (``billing.
+    cancel_access_end``), which for a handover is almost always LATER than
+    ``paid_through`` — 24 Oct against a paid-through of 18 Oct on today's policy. Those
+    extra days are real access, so it books a real extension charge, and that charge would
+    land on the OUTGOING payer for days the recipient asked not to have. It would also
+    refuse the very accept it is part of: ``_blockers_money_settled`` is re-evaluated
+    inside the accept and rejects any row carrying a pending extension above zero.
+
+    Ending exactly at ``at`` owes nobody anything. ``_segmented_extension`` returns 0 for
+    ``end <= paid_through``, so no extension is stamped at all, and the row is invisible
+    to the blocker. Written directly for that reason, matching what the ordinary cancel
+    writes in every other respect: phase, the access date, and an audit row. Access is not
+    revoked here — ``access.access_end`` reads ``app_access_until`` first and the ordinary
+    cancel leaves the gate alone too.
+
+    A TRIAL IS DIFFERENT and goes through ``checkout.cancel_module``, which has its own
+    branch for it: the free days run to ``trial_end`` and the trial then expires instead of
+    converting. Nobody is charged either way, so there is nothing to end early.
+    """
+    from billing.services import checkout
+
+    ended: list[str] = []
+    for row in store.rows_for_entity(entity_id):
+        code = (row.function_code or "").upper()
+        if code in keep:
+            continue
+        if row.phase == PHASE_TRIAL:
+            try:
+                checkout.cancel_module(_EntityRef(entity_id), _UserRef(actor_user_id), code)
+                ended.append(code)
+            except Exception:
+                logger.exception(
+                    "transfer: could not end the declined trial {} on {}", code, entity_id
+                )
+            continue
+        if not access.is_billing_forward(phase=row.phase):
+            continue  # already winding down or dead - nothing to decline
+        try:
+            store.upsert_module_row(
+                entity_id, code, row.payer_user_id,
+                phase=PHASE_SCHEDULED_CANCEL,
+                app_access_until=at,
+            )
+            store.record_action(
+                entity_id=entity_id,
+                function_code=code,
+                payer_user_id=row.payer_user_id,
+                actor_user_id=actor_user_id,
+                action=AUDIT_CANCEL,
+                outcome=OUTCOME_SUCCEEDED,
+                phase_before=row.phase,
+                phase_after=PHASE_SCHEDULED_CANCEL,
+                app_access_until=at,
+                note="declined at handover; access runs to the paid-through date, no extension",
+            )
+            ended.append(code)
+        except Exception:
+            logger.exception(
+                "transfer: could not end the declined module {} on {}", code, entity_id
+            )
+    if ended:
+        logger.info(
+            "transfer: entity {} handed over without {}", entity_id, sorted(ended)
+        )
+    return ended
+
+
+class _EntityRef:
+    """What ``checkout.cancel_module`` reads off an entity: its id. The real row is not
+    needed and fetching one here would be a second read of something already in hand."""
+
+    def __init__(self, entity_id):
+        self.id = entity_id
+
+
+class _UserRef:
+    def __init__(self, user_id):
+        self.id = user_id
+
+
+def _accept(offer, user_id, now, *, codes=None) -> tuple[bool, str, dict | None]:
     from billing.services import checkout
 
     entity_id = offer.entity_id
-    codes = _billable_codes(entity_id)
+
+    # WHAT THEY ARE TAKING ON. ``codes`` is the recipient's choice from 07-D; omitted means
+    # the whole company, which is every caller that predates the screen offering one.
+    held = {(row.function_code or "").upper() for row in store.rows_for_entity(entity_id)}
+    if codes is None:
+        keep = set(held)
+    else:
+        keep = {str(c).strip().upper() for c in codes if str(c).strip()} & held
+        # Refused rather than read as "all of it". A request naming only modules this
+        # company does not have is a mistake somewhere, and the generous reading of it
+        # hands over a company nobody agreed to take.
+        if not keep:
+            return False, "Choose at least one module to take over.", None
+
+    # PRICED ON WHAT THEY KEEP. The rest are cancelled below, but only once the handover
+    # is certain - see the comment on ``_finish``.
+    codes = _billable_codes(entity_id) & keep
+
+    # READ THE HANDOVER INSTANT NOW, never the value quoted when the offer was made.
+    # ``run_renewals`` advances ``paid_through`` on every successful renewal, so an offer
+    # that outlived a cycle would otherwise bill a window the outgoing payer has since
+    # paid for — a full duplicate charge.
+    # Read off the ENTITY: the days already bought for this company belong to the card the
+    # outgoing payer had it on, and their other cards say nothing about it.
+    at = _aware(store.paid_through_for_entity(offer.entity_id)) or now
+
+    def _finish():
+        """End the declined modules, then move the pointer.
+
+        LAST, and only here. Cancelling before the accept is certain would leave a company
+        stripped of modules by a handover that then failed on a declined card — the rows
+        changed, the payer unmoved, and nobody told. Every path out of this function that
+        succeeds goes through here; every path that refuses returns before it.
+        """
+        _decline_modules(entity_id, keep, at, user_id)
+        return _complete(offer, actor_user_id=user_id, now=now)
 
     # NOTHING TO CHARGE IS NOT A FAILURE. A trial-only entity has been paid for by nobody,
     # so there is no window to buy and no invoice to raise — the handover is just the flip.
@@ -555,28 +760,25 @@ def _accept(offer, user_id, now) -> tuple[bool, str, dict | None]:
     # the pointer, and here no money moves. The blockers have already refused the
     # genuinely empty entity, so reaching this with no codes means a live trial.
     if not codes:
-        return _complete(offer, actor_user_id=user_id, now=now)
+        return _finish()
 
-    # READ THE HANDOVER INSTANT NOW, never the value quoted when the offer was made.
-    # ``run_renewals`` advances ``paid_through`` on every successful renewal, so an offer
-    # that outlived a cycle would otherwise bill a window the outgoing payer has since
-    # paid for — a full duplicate charge.
-    # Read off the ENTITY: the days already bought for this company belong to the card the
-    # outgoing payer had it on, and their other cards say nothing about it.
-    at = _aware(store.paid_through_for_entity(offer.entity_id)) or now
-
+    # A CARD IS REQUIRED HERE AND NOWHERE EARLIER. The offer is allowed to reach someone
+    # who has none — being asked is not being charged — so these two refusals are the only
+    # place the requirement lives, and they are read by the recipient themselves. Worded in
+    # the second person and as an instruction, because they are now the first time anybody
+    # is told, rather than a restatement of something the offering screen already refused.
     customer_id = store.customer_id_for_user(offer.to_user_id)
     if not customer_id:
-        return False, "That billing account isn't set up to be charged.", None
+        return False, "Add a payment method before taking over the billing.", None
 
     # THE INCOMING PAYER'S CARD, nominated here if they have not chosen one.
     #
     # They cannot have chosen one BEFORE this point: the nomination is per (company,
     # payer), and until they accept, the company is not theirs — ``payment_methods``
     # refuses to let a non-payer point a card at somebody else's company. So the accept is
-    # the first moment the choice can exist, and it is made from their account default,
-    # which the blockers already required them to have and which the quote they are
-    # accepting was priced and shown against.
+    # the first moment the choice can exist, and it is made from their account default —
+    # the card the quote they are accepting was priced and shown against, saved either
+    # before the offer arrived or on the accept screen itself.
     #
     # This is not the silent fallback the rest of the engine refuses. It is written, once,
     # as a consequence of an explicit "yes, bill me for this company" — recorded with its
@@ -587,10 +789,42 @@ def _accept(offer, user_id, now) -> tuple[bool, str, dict | None]:
 
         default_card = stripe_client.customer_default_payment_method(customer_id)
         if not default_card:
-            return False, "That billing account has no payment method to charge.", None
+            return False, "Add a payment method before taking over the billing.", None
         store.nominate_card_for_entity(
             entity_id, offer.to_user_id, default_card, "transfer"
         )
+
+    # NOTHING IS CHARGED FOR DAYS THAT HAVE NOT STARTED YET.
+    #
+    # ``at`` is where the outgoing payer's money runs out, and it is normally in the
+    # FUTURE — they have bought days nobody has used. Charging here asked the incoming
+    # payer for money weeks before the thing it pays for began: accepted on 24
+    # September, "HKD 245.16 for 18 Oct to 6 Nov", taken today. A handover takes no
+    # money.
+    #
+    # The window and the amount do not change. Only the DAY moves, to the start of the
+    # window itself, where ``collect_due`` takes it. The handover still COMPLETES here —
+    # the payer flips, consent is recorded, the old payer stops being liable — because
+    # who owns the company and who has paid for it were never the same question. That is
+    # also why this sits AFTER the card: the nomination is part of taking a company on,
+    # and the collection weeks later has no screen to ask on.
+    #
+    # NO CLAIM IS WRITTEN with it, and that half is load-bearing. ``_complete`` passes
+    # ``accepted_billed_through`` to ``transfer_entity_payer``, which stamps
+    # ``billed_through`` on the rows, and ``renewals.entities_covered_into`` then
+    # suppresses the new payer's renewal for every period that claim covers. Left set,
+    # the company would run free AND be marked paid for — an absence with no invoice to
+    # notice it by. Leaving it NULL is also what keeps the deferral collectable: the
+    # card's ``paid_through`` is untouched, so ``due_renewals`` cannot reach this company
+    # first, and the collection below is the only thing that will ever bill it.
+    if at > now:
+        offer.collect_at = at
+        offer.save(update_fields=["collect_at"])
+        return _finish()
+
+    # Otherwise the window has already begun — the outgoing payer's money ran out before
+    # anybody got round to accepting — so these are days being used right now. There is
+    # no future date to defer to and they are owed, which is the path below.
 
     # --- the journal write, committed BEFORE the external call ----------------------
     # Same shape as ``notify._claim``: a process that dies between the two must leave a
@@ -637,7 +871,7 @@ def _accept(offer, user_id, now) -> tuple[bool, str, dict | None]:
             "quoted_amount", "quoted_currency",
         ])
 
-    return _complete(offer, actor_user_id=user_id, now=now)
+    return _finish()
 
 
 def _complete(offer, *, actor_user_id, now) -> tuple[bool, str, dict | None]:
@@ -715,6 +949,193 @@ def _complete(offer, *, actor_user_id, now) -> tuple[bool, str, dict | None]:
         entity_id, from_user_id, to_user_id, offer.accepted_billed_through,
     )
     return True, "You're now the subscriber for this company.", _as_dict(offer)
+
+
+# --- the deferred charge --------------------------------------------------------------
+
+
+def collect_due(now=None, *, limit=None) -> dict:
+    """Charge the handovers whose parked first charge has come due.
+
+    The other half of ``_accept``'s deferral. An accept takes no money for days that
+    have not started; it parks the instant they do on ``collect_at`` and completes. This
+    is what turns up on that day and takes it — the SAME charge, through the same
+    ``_bill_transfer_in_house``, for the same window and the same amount. Only the day
+    it happens is different.
+
+    ``collect_at`` IS the marker, and clearing it is the only record of settled. There is
+    no second flag to disagree with it, and nothing infers the state from an absent
+    invoice id — a zero-total charge legitimately has none.
+
+    WHAT A FAILURE DOES, and why it is not simply handed to dunning. A declined card
+    here leaves the row UNCOLLECTED, so the next pass tries again with a fresh key: the
+    counter keeps climbing and the key carries it, exactly as a re-attempted accept does,
+    because voiding an invoice keeps its key claimed and a stable one would jam the retry
+    forever. Dunning cannot do that job — it chases the payer's oldest OPEN invoice, and
+    the failed charge voided its own. What dunning IS started for is the consequence:
+    the rows go past due, the grace window begins, and access lapses if the card is never
+    fixed. So the retry is here and the access story is dunning's, which is the split
+    that actually works rather than the one that reads tidiest.
+
+    Returns ``{"collected": [...], "failed": [...], "abandoned": [...]}``.
+    """
+    from billing.services import checkout
+
+    now = now or clock.now()
+    parked = SubscriptionTransfer.objects.filter(collect_at__isnull=False).order_by("collect_at")
+    rows = list(parked[:limit] if limit else parked)
+    result: dict[str, list] = {"collected": [], "failed": [], "abandoned": []}
+
+    for offer in rows:
+        try:
+            # DUE-NESS IS DECIDED IN PYTHON, not in the query — the same rule
+            # ``_expire_lapsed`` follows and for the same reason: pushing an aware
+            # datetime at a column that may be naive is how a charge lands a day early.
+            due = _aware(offer.collect_at)
+            if due is None or due > now:
+                continue
+            outcome = _collect_one(offer, due, now, checkout)
+            if outcome is not None:
+                bucket, entry = outcome
+                result[bucket].append(entry)
+        except Exception:
+            # One bad handover never stops the pass, and never loses its ``collect_at``:
+            # an exception here leaves the row exactly as it was, still owed, still due.
+            logger.exception("transfer: could not collect the deferred charge on {}", offer.id)
+
+    if any(result.values()):
+        logger.info("transfer: collected deferred handover charges {}", _summarise(result))
+    return result
+
+
+def _summarise(result: dict[str, list]) -> dict[str, int]:
+    return {key: len(value) for key, value in result.items()}
+
+
+def _abandon(offer, reason: str) -> tuple[str, dict]:
+    """Stop asking for this one. The debt is not collectable and never will be."""
+    offer.collect_at = None
+    offer.save(update_fields=["collect_at"])
+    logger.warning(
+        "transfer: abandoned the deferred charge on {} ({})", offer.id, reason
+    )
+    return "abandoned", {"transfer_id": offer.id, "entity_id": offer.entity_id, "reason": reason}
+
+
+def _collect_one(offer, due, now, checkout) -> tuple[str, dict] | None:
+    entity_id = offer.entity_id
+    to_user_id = offer.to_user_id
+
+    # THE COMPANY MUST STILL BE THEIRS. A handover can be handed on again before this
+    # falls due, and the second one reads the paid-through as it stands and parks its own
+    # window. Charging the first recipient for days a third party now owns would bill
+    # somebody for a company they no longer have.
+    current = store.payer_for_entity(entity_id)
+    if current and str(current) != str(to_user_id):
+        return _abandon(offer, "the company has changed hands again")
+
+    # RE-READ, never trust the set quoted at accept. Weeks have passed; a module may have
+    # been cancelled, or gone to trial, and billing forward is the only thing to charge
+    # for. Nothing left to bill is not a failure — it is a company that owes nothing.
+    codes = _billable_codes(entity_id)
+    if not codes:
+        return _abandon(offer, "nothing is billing forward on this company any more")
+
+    customer_id = store.customer_id_for_user(to_user_id)
+    group = store.billing_group_for_entity(entity_id, to_user_id)
+    if not customer_id or group is None:
+        # Not abandoned. The card was there at accept and has gone since, so this is the
+        # same shape as a decline: past due, and tried again when they put one back.
+        return _fail(offer, group, now, "there is no card to charge for this company")
+
+    # A FRESH KEY PER ATTEMPT, carrying the counter — the accept's rule, and the reason
+    # is the same: the previous attempt's invoice was voided and its key stays claimed.
+    offer.charge_attempt = int(offer.charge_attempt or 0) + 1
+    offer.charge_key = f"transfer-{offer.id}-{offer.charge_attempt}"
+    offer.save(update_fields=["charge_attempt", "charge_key"])
+
+    result = checkout._bill_transfer_in_house(
+        entity_id, to_user_id, customer_id, codes, at=due, idempotency_key=offer.charge_key,
+    )
+    if not result["paid"]:
+        return _fail(offer, group, now, result["reason"])
+
+    # PAID. The claim goes on NOW and not a moment earlier: it is the statement that
+    # these days are covered, and until this instant they were not. Written through the
+    # same one-statement writer the accept uses, which moves the claim forward only and
+    # leaves the payer pointer where it already is.
+    store.transfer_entity_payer(entity_id, to_user_id, billed_through=_aware(result["period_end"]))
+
+    offer.collect_at = None
+    offer.charge_invoice_id = result["invoice_id"]
+    offer.accepted_billed_through = result["period_end"]
+    offer.accepted_anchor_at = result["anchor"]
+    offer.quoted_amount = result["amount"]
+    offer.quoted_currency = result["currency"]
+    offer.save(update_fields=[
+        "collect_at", "charge_invoice_id", "accepted_billed_through",
+        "accepted_anchor_at", "quoted_amount", "quoted_currency",
+    ])
+
+    # Out of dunning, if an earlier attempt put it there. Ordered after the money and
+    # before the sweep: the rows have to be out of ``past_due`` for the sweep to restore
+    # what it revoked.
+    if getattr(group, "dunning_started_at", None) is not None:
+        try:
+            store.end_group_dunning(group.id, status="active")
+        except Exception:
+            logger.exception("transfer: could not end dunning for group {}", group.id)
+
+    for code in sorted(codes):
+        store.record_action(
+            entity_id=entity_id,
+            function_code=code,
+            payer_user_id=to_user_id,
+            action=AUDIT_TRANSFER_COLLECTED,
+            outcome=OUTCOME_SUCCEEDED,
+            actor_user_id=None,
+            note=f"deferred handover charge collected for {due:%d %b %Y}",
+        )
+
+    try:
+        from billing.services.access_sweep import sweep_expired_module_access
+
+        sweep_expired_module_access(payer_user_id=to_user_id)
+    except Exception:
+        logger.exception("transfer: could not re-sync module access for {}", to_user_id)
+
+    return "collected", {
+        "transfer_id": offer.id,
+        "entity_id": entity_id,
+        "user_id": to_user_id,
+        "invoice": result["invoice_id"],
+        "amount": result["amount"],
+        "currency": result["currency"],
+    }
+
+
+def _fail(offer, group, now, reason) -> tuple[str, dict]:
+    """Left owed, and the company put past due — see ``collect_due``'s docstring.
+
+    ``collect_at`` is deliberately NOT cleared: the next pass tries again with a fresh
+    key, which is what lets a fixed card settle it without anybody re-accepting.
+    """
+    if group is not None:
+        try:
+            store.begin_group_dunning(group.id, now)
+        except Exception:
+            # The failure entry must survive a failure to record it — the same nested
+            # try ``run_renewals`` uses on this exact call.
+            logger.exception("transfer: could not start dunning for group {}", group.id)
+    logger.warning(
+        "transfer: deferred charge on {} was not collected ({})", offer.id, reason
+    )
+    return "failed", {
+        "transfer_id": offer.id,
+        "entity_id": offer.entity_id,
+        "user_id": offer.to_user_id,
+        "reason": reason,
+    }
 
 
 # --- the repair step ------------------------------------------------------------------
@@ -932,10 +1353,22 @@ def _as_dict(offer) -> dict:
 def _blockers_recipient(entity_id, to_user_id) -> list[str]:
     """Whether the person being handed the bill can actually take it on.
 
-    Blocks 5 and 6 are ONE ``if/elif/else`` and stay together: the card is only worth
-    asking about once the recipient is an admin with a live account.
+    A SAVED CARD IS NOT ASKED FOR HERE, deliberately. It used to be block 6, and it was
+    the wrong question at the wrong moment:
+
+      * it refused a person for a thing they could fix in the next ten seconds, and
+        refused them BEFORE they had been asked whether they wanted the company at all;
+      * the offering screen never showed it. ``portal.build_subscriber_options`` drops
+        every reason starting "That person" and evaluates blockers against one arbitrary
+        candidate, so a card-less admin rendered as selectable and the POST then refused —
+        the screen and the API disagreeing about the same person;
+      * on the recipient's own side it read as a sentence about somebody else ("That
+        person needs...") describing themselves, above a disabled button.
+
+    What genuinely cannot proceed without a card is the CHARGE, and that is guarded where
+    it happens: ``_accept`` refuses with no customer and refuses with no default card to
+    nominate. The accept screen collects one before it gets there.
     """
-    from billing.services import stripe_client
     from core.policy import Role, role_at_least
 
     reasons: list[str] = []
@@ -954,22 +1387,6 @@ def _blockers_recipient(entity_id, to_user_id) -> list[str]:
         reasons.append("That person needs to be an admin of this company first.")
     elif account is None or not getattr(account, "approved", False):
         reasons.append("That account isn't active, so it can't take on the billing.")
-
-    # 6. Without a saved card nothing can be charged AT ALL: ``start_billing_cycle``
-    #    silently no-ops for a payer with no ``user_stripe_customer`` row, so the accept
-    #    would fail at the charge having promised to succeed.
-    #
-    #    Having a card SAVED is checked here; having one nominated for this company is
-    #    not, and cannot be — the incoming payer chooses that as part of accepting, and
-    #    demanding it beforehand would ask them to point a card at a company they have not
-    #    yet agreed to take on. The accept refuses if they still have not.
-    else:
-        customer_id = store.customer_id_for_user(to_user_id)
-        if not customer_id or not stripe_client.customer_default_payment_method(customer_id):
-            reasons.append(
-                "That person needs a saved payment method before they can take over "
-                "the billing."
-            )
     return reasons
 
 def _blockers_anything_to_hand_over(entity_id) -> list[str]:

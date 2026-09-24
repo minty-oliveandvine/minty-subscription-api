@@ -40,6 +40,7 @@ ROUTES = (
     ("POST", "/subscriptions/invite-admin"),  # forwards to Flask (core/flask_client.py)
     ("POST", "/subscriptions/transfer"),
     ("POST", "/subscriptions/transfer/respond"),
+    ("POST", "/subscriptions/transfer/seen"),
     ("POST", "/subscriptions/transfer/cancel"),
     ("GET", "/subscriptions/transfers"),
     ("GET", "/invoices"),
@@ -199,17 +200,46 @@ def my_transfer_initiate(request):
 
 @me_router.post("/subscriptions/transfer/respond", summary="Accept or decline a handover offered to you")
 def my_transfer_respond(request):
-    """Body: ``{transfer, accept}``. THE ONE ROUTE HERE THAT MOVES MONEY, and re-entrant: called
-    twice it adopts the invoice already paid under the offer's key rather than raising a
-    second one, so a double-click or a retry after a timeout costs nothing."""
+    """Body: ``{transfer, accept, codes?}``. THE ONE ROUTE HERE THAT MOVES MONEY, and re-entrant:
+    called twice it adopts the invoice already paid under the offer's key rather than raising a
+    second one, so a double-click or a retry after a timeout costs nothing.
+
+    ``codes`` is the modules being taken on (07-D "Choose Modules"); anything the company has and
+    the list does not name is cancelled as part of accepting. OMITTED MEANS ALL OF THEM, which is
+    what every caller written before the screen offered a choice sends — the field is additive
+    and an older client keeps working unchanged."""
     from billing.services import transfers
 
     return _transfer_call(
         request,
         lambda uid, payload: transfers.respond_to_transfer(
-            uid, _required(payload, "transfer"), accept=bool(payload.get("accept"))
+            uid,
+            _required(payload, "transfer"),
+            accept=bool(payload.get("accept")),
+            codes=payload.get("codes"),
         ),
         description="transfer respond",
+    )
+
+
+@me_router.post(
+    "/subscriptions/transfer/seen", summary="Mark how one of your handovers ended as seen"
+)
+def my_transfer_seen(request):
+    """Body: ``{transfer}``. The payer pressing Done on 07-I / A-07 / A-08.
+
+    Stamped from their click rather than from the read that drew the modal: rendering is not
+    evidence anybody saw it. Idempotent, so a double-click costs nothing, and it answers the
+    same way for a transfer that does not exist and one that is not theirs."""
+    from billing.services import transfers
+
+    return _transfer_call(
+        request,
+        lambda uid, payload: (
+            *transfers.mark_outcome_seen(uid, _required(payload, "transfer")),
+            None,
+        ),
+        description="transfer seen",
     )
 
 

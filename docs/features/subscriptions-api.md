@@ -35,11 +35,12 @@ already done, 5xx upstream. `billing/tests/test_contract.py` pins every table be
 
 | Method | Path | Flask origin (`routes/portal.py`) | Answers |
 |---|---|---|---|
-| GET | `/subscriptions` | `my_subscriptions_api` | the payer, their billing anchor/paid-through, a page of companies with module status per company; `q`, `sort`, `direction`, `page`, `per_page` |
-| GET | `/subscriptions/subscriber-options` | `my_subscriber_options_api` | who a company's bill could move to (admins), each with a quote and inherited trials; blockers; the pending transfer |
+| GET | `/subscriptions` | `my_subscriptions_api` | the payer, their billing anchor/paid-through, a page of companies with module status per company; `q`, `sort`, `direction`, `page`, `per_page`. **Plus `transfer_outcomes`** — how the caller's OWN offers ended (declined / expired / accepted) where they have not been shown yet, the only read of a finished transfer in the engine; `cancelled` is excluded (their own withdrawal, already answered by 07-K). Read advisorily, so a failure leaves it empty rather than taking the page down |
+| GET | `/subscriptions/subscriber-options` | `my_subscriber_options_api` | who a company's bill could move to (admins), each with a quote and inherited trials; blockers; the pending transfer; and `paid_through`, what the COMPANY is paid up until (the screen's footer needs it whether or not there is a candidate to quote) |
 | POST | `/subscriptions/invite-admin` | `my_invite_admin_api` | **forwarded to Flask** `POST /api/onboarding/invite` (the invitation is Flask's) |
-| POST | `/subscriptions/transfer` | `my_transfer_initiate_api` | offer a company's billing to another admin |
-| POST | `/subscriptions/transfer/respond` | `my_transfer_respond_api` | accept (charges the quoted amount) or decline |
+| POST | `/subscriptions/transfer` | `my_transfer_initiate_api` | offer a company's billing to another admin — **any** admin, with a saved card or without: being asked is not being charged, so the card is required at the accept, not here (the offer-time refusal was dropped 2026-09-24) |
+| POST | `/subscriptions/transfer/respond` | `my_transfer_respond_api` | accept or decline. Body `{transfer, accept, codes?}` — `codes` is the modules being taken on (07-D "Choose Modules"); anything the company holds that it does not name is **cancelled** as part of accepting, ending at the outgoing payer's `paid_through` so no extension is owed by anybody (the ordinary `cancel_module` cannot be used: its access end is `max(paid_through, now + paid_cancel_access_days)`, which books a real extension and trips the handover's own blocker). Omitted means the whole company; naming none is refused. **Accepting takes no money** when the window being bought has not started yet (the usual case — the outgoing payer has bought days nobody has used): the charge is parked on `subscription_transfer.collect_at` and taken by `collect-transfers` on that day, and **no `billed_through` claim is written** until it is collected. A window that has already lapsed is charged inline as before. Either way a card is required — refuses with "Add a payment method before taking over the billing." when there is none to nominate, leaving the offer pending |
+| POST | `/subscriptions/transfer/seen` | — (**new; Flask had none**) | mark how one of MY offers ended as seen, `{transfer}`. The payer pressing Done on 07-I / A-07 / A-08. Stamps `subscription_transfer.outcome_seen_at` — from the click, not from the read that drew the modal and not from the email, which records that a message was SENT. Idempotent; the same answer for a transfer that does not exist and one that is not mine |
 | POST | `/subscriptions/transfer/cancel` | `my_transfer_cancel_api` | withdraw an offer |
 | GET | `/subscriptions/transfers` | `my_transfers_api` | offers made TO me |
 | GET | `/invoices` | `my_invoices_api` | my invoices, newest first; `entity`, `page`, `per_page` |
@@ -224,9 +225,13 @@ next light pass by up to an hour and **a deploy after 05:00 HKT loses that day's
 paused instance runs nothing.
 
 The pass itself is `billing/services/daily.py::run_daily(now, issue, mode)` — the job order
-`notify-trial-ending → close-trials → repair-transfers → run-renewals → retry-dunning →
-sweep-access` (light: `close-trials → repair-transfers → run-renewals → sweep-touched`), each job
-caught on its own, a sweep skipped when a job that grants entitlement failed before it.
+`notify-trial-ending → close-trials → repair-transfers → collect-transfers → run-renewals →
+retry-dunning → sweep-access` (light: `close-trials → repair-transfers → collect-transfers →
+run-renewals → sweep-touched`), each job caught on its own, a sweep skipped when a job that
+grants entitlement failed before it. Both transfer jobs run **before** the renewal and for
+mirrored reasons: `repair-transfers` writes a claim for money already collected, and
+`collect-transfers` writes one by collecting it — run afterwards, the renewal would either
+re-bill days already settled or skip a card that has never collected.
 `scheduler.run_pass_now` runs on APScheduler's worker thread, so it opens the engine's
 request scope itself (`billing.services._context.scope()` — what Flask's `app.app_context()`
 gave the timer: the clock, policy, catalog and default-card memos) and calls

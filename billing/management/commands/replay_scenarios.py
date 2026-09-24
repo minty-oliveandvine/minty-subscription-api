@@ -24,9 +24,9 @@ login works in Flask. Run it against the DEV database and clone to a fresh payer
 …``) when the Flask script has run the same shape today: Stripe remembers an idempotency key for
 24 hours and the keys are per payer.
 
-SEVEN SHAPES, and a payer for each person who needs to see one. ``RUNS`` is that pairing
-and nothing more — the shapes themselves are the lists below. Two of them carry the bulk
-of the work:
+EIGHT SHAPES, and a payer for each person who needs to see one. ``RUNS`` is that pairing
+and nothing more — the shapes themselves are the lists below. Three of them carry the
+bulk of the work:
 
   the catalogue   Scenarios 2-12 — one state each, the shapes the UI has to render. Ten
                   weeks: long enough for a module to be cancelled AND have run out the
@@ -35,6 +35,10 @@ of the work:
                   that convert and trials that lapse, a module added mid-period,
                   cancellations, monthly renewals, and a card that starts declining and is
                   then fixed. This one exercises the machinery rather than the pixels.
+  the split       Scenario 1B — the same four months with the account split across two
+                  cards on day 40. Every renewal after that raises one invoice per card,
+                  and the decline stops at the card that failed instead of taking the
+                  whole account down. The only shape with more than one card on it.
 
 The other five are the edge shapes further down, each driving one account-level outcome.
 
@@ -647,9 +651,10 @@ def clone_run(base: dict, tag: str, email: str, *, user_id: str | None = None,
               name: tuple | None = None, notify_to: str | None = None) -> dict:
     """One shape, a different payer — the whole of what the entries in ``RUNS`` vary.
 
-    Every run below is one of SEVEN shapes (the catalogue, the lifecycle, and the five
-    edges) pointed at a payer. Nothing else differs, so a new payer for an existing shape
-    does not need a new entry: ``--as`` and ``--tag`` build it at the command line.
+    Every run below is one of EIGHT shapes (the catalogue, the lifecycle, the split, and
+    the five edges) pointed at a payer. Nothing else differs, so a new payer for an
+    existing shape does not need a new entry: ``--as`` and ``--tag`` build it at the
+    command line.
 
     The payer id is DERIVED from the email by default — `uuid5`, so the same address
     always resolves to the same payer and a second `--setup` finds the run it seeded last
@@ -672,36 +677,6 @@ def clone_run(base: dict, tag: str, email: str, *, user_id: str | None = None,
     }
 
 RUNS = {
-    "michael": {
-        # The catalogue again, on a payer whose mail lands in Michael's inbox. A SEPARATE
-        # user row, not his own `bec4a3d6…` account: the payer's `email` column is where
-        # every notice is sent, so pointing the run at his real account would mean either
-        # rewriting that column — breaking the address he signs in with — or seeding a
-        # month of fictional invoices onto the account he actually uses. He signs in as
-        # this address instead, and the plus-alias keeps the mail filterable.
-        #
-        # A distinct tag, because `_entities` matches on NAME alone and is not
-        # payer-scoped: sharing another catalogue run's tag would make this one adopt
-        # that payer's eleven entities rather than seed its own.
-        "label": "Scenarios 2-12 for Michael",
-        "user_id": "22222222-3333-4444-5555-666666666666",
-        "email": "michael.leguira+catalogue@oliveandvinehk.com",
-        "name": ("Michael", "Scenarios"),
-        "tag": "Mike",
-        "scenarios": CATALOGUE,
-    },
-    "michael-lifecycle": {
-        # Scenario 1 on a second Michael alias. Still a separate payer from `michael`,
-        # for the reason in the module docstring: this run deliberately breaks a card,
-        # and dunning is account-level — sharing a payer with the catalogue would drag
-        # all eleven of its entities into arrears alongside these four.
-        "label": "Scenario 1 for Michael (mail -> michael.leguira+lifecycle)",
-        "user_id": "33333333-4444-5555-6666-777777777777",
-        "email": "michael.leguira+lifecycle@oliveandvinehk.com",
-        "name": ("Michael", "Lifecycle"),
-        "tag": "M1",
-        "scenarios": lifecycle_as("M1"),
-    },
     # HANDED OVER. These two payer rows were renamed in the database to the
     # digitalisation addresses, so the same entities, invoices and history now sign in
     # under the new login. The `email` here is what `--setup` would recreate the row
@@ -827,49 +802,6 @@ RUNS = {
         "name": ("Angelika", "MonthEnd"),
         "tag": "E1",
         "scenarios": E1_MONTH_END,
-    },
-    # The same five edge scenarios on MICHAEL. Separate payers and separate TAGS from
-    # angelika's set, because `_entities` matches on entity NAME and is not payer-scoped:
-    # sharing "L1" would make this run adopt her entities instead of seeding its own.
-    "michael-L1": {
-        "label": "Dunning that gives up, + a trial ending mid-arrears (Michael)",
-        "user_id": "b2b2b2b2-0000-1111-2222-333333333333",
-        "email": "michael.leguira+ml1@oliveandvinehk.com",
-        "name": ("Michael", "ML1"),
-        "tag": "ML1",
-        "scenarios": lifecycle_edge("ML1", L1_GIVES_UP),
-    },
-    "michael-C1": {
-        "label": "Two conversions on the anchor day beside a plain renewer (Michael)",
-        "user_id": "c2c2c2c2-0000-1111-2222-333333333333",
-        "email": "michael.leguira+mc1@oliveandvinehk.com",
-        "name": ("Michael", "MC1"),
-        "tag": "MC1",
-        "scenarios": lifecycle_edge("MC1", C1_CONVERSIONS),
-    },
-    "michael-R1": {
-        "label": "Un-cancel on both sides of the extension being invoiced (Michael)",
-        "user_id": "d2d2d2d2-0000-1111-2222-333333333333",
-        "email": "michael.leguira+mr1@oliveandvinehk.com",
-        "name": ("Michael", "MR1"),
-        "tag": "MR1",
-        "scenarios": lifecycle_edge("MR1", R1_UNCANCEL),
-    },
-    "michael-X1": {
-        "label": "The last entity leaves, and still owes an extension (Michael)",
-        "user_id": "e2e2e2e2-0000-1111-2222-333333333333",
-        "email": "michael.leguira+mx1@oliveandvinehk.com",
-        "name": ("Michael", "MX1"),
-        "tag": "MX1",
-        "scenarios": lifecycle_edge("MX1", X1_LAST_ONE_OUT),
-    },
-    "michael-E1": {
-        "label": "Anchored on the 31st - month-length clamping (Michael)",
-        "user_id": "f2f2f2f2-0000-1111-2222-333333333333",
-        "email": "michael.leguira+me1@oliveandvinehk.com",
-        "name": ("Michael", "ME1"),
-        "tag": "ME1",
-        "scenarios": lifecycle_edge("ME1", E1_MONTH_END),
     },
     # Jayden's two runs, read by Angelika. `notify_to` is the ONLY thing that separates
     # the payer from the reader — see `_patch_notify`. It deliberately points at

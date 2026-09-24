@@ -36,6 +36,16 @@ FLASK_PORTAL_PATHS = {
     "/billing/payment-methods/remove",
 }
 
+#: Paths this service adds that Flask never had. Kept apart from the set above so that one
+#: goes on documenting the PORT - "what Flask served" is a different question from "what we
+#: serve", and folding them together loses the ability to answer either.
+#:
+#: ``transfer/seen`` records that the payer who offered a handover has been shown how it
+#: ended (07-I / A-07 / A-08). Flask had no such screen and no such column.
+ADDED_PORTAL_PATHS = {
+    "/subscriptions/transfer/seen",
+}
+
 #: The nineteen ``POST /entity/settings/module/<org_id>/<action>`` routes of Flask's
 #: entity/routes/settings.py (lines 1419-2431).
 FLASK_MODULE_ACTIONS = {
@@ -57,8 +67,11 @@ FLASK_ONBOARDING_PATHS = {
 
 
 def test_the_portal_carries_flasks_fifteen_paths():
-    assert {p for _, p in ME_ROUTES} == FLASK_PORTAL_PATHS
-    assert len(ME_ROUTES) == 16
+    served = {p for _, p in ME_ROUTES}
+    assert served == FLASK_PORTAL_PATHS | ADDED_PORTAL_PATHS
+    # Every one of Flask's is still here: an addition must never be a replacement.
+    assert FLASK_PORTAL_PATHS <= served
+    assert len(ME_ROUTES) == 17
     assert ("GET", "/billing/entity-payment-method") in ME_ROUTES
     assert ("POST", "/billing/entity-payment-method") in ME_ROUTES
 

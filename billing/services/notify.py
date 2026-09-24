@@ -240,7 +240,7 @@ def billing_sender() -> str | None:
 
 
 def settings_url(entity_id) -> str:
-    """The Module & Subscription page for an entity — where every action actually is.
+    """The Module page for an entity — where every action actually is.
 
     The page is minty-web's (Part 2 step 4), reached through Flask's login-gated
     re-handoff so a cold recipient with no session is signed in first: Flask stays the

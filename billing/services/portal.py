@@ -440,8 +440,23 @@ def build_payer_subscriptions(
         for module in item["modules"]:
             module.pop("_date", None)
 
+    # HOW THIS PAYER'S OWN OFFERS ENDED, where they have not been told yet - the one place
+    # a finished handover is visible. Advisory: a failure here leaves the list empty and the
+    # billing page still renders, exactly as the pending read below does. A modal is not
+    # worth taking a page down for.
+    try:
+        from billing.services import transfers
+
+        outcomes = transfers.unseen_outcomes(user_id)
+    except Exception:
+        logger.exception("portal: could not read finished handovers for %s", user_id)
+        outcomes = []
+
     return {
         "payer": subscriber,
+        # Empty list rather than absent when there is nothing, the shape rule the rest of
+        # this payload follows.
+        "transfer_outcomes": outcomes,
         "billing": {
             "anchor": _fmt(anchor_at),
             "anchor_iso": _iso(anchor_at),
@@ -534,6 +549,15 @@ def build_subscriber_options(user_id, entity_id) -> dict | None:
 
     current = _person(_by_pk(User, payer_id), payer_id)
 
+    # The day this company's money runs to - the footer's "paid up until ...". Advisory, like
+    # the pending read below: the screen renders without it (the sentence is simply left off),
+    # so a company whose billing cannot be read still offers the handover.
+    try:
+        paid_through = sub_store.paid_through_for_entity(entity.id)
+    except Exception:
+        logger.exception("portal: could not read what %s is paid through", entity.id)
+        paid_through = None
+
     # The current payer LEADS the list and is included whether or not the membership
     # query produced them — they may have been demoted since, or hold no row on this
     # entity at all. A list missing the person the banner says is being billed
@@ -571,8 +595,11 @@ def build_subscriber_options(user_id, entity_id) -> dict | None:
                     entity.id, from_user_id=payer_id, to_user_id=rest[0]["id"]
                 )
                 # Refusals about a PARTICULAR CANDIDATE are dropped: they say nothing
-                # about the entity, and "that person needs a saved payment method" above
-                # a list of five people reads as though none of them could take it.
+                # about the entity, and "that person needs to be an admin" above a list of
+                # five people reads as though none of them could take it. They are also
+                # computed against ``rest[0]`` alone, so they would be one candidate's
+                # answer shown over everybody. The remaining ones are true of whoever
+                # accepts.
                 if not reason.startswith("That person")
             # ONE reason, the most blocking. ``transfer_blockers`` is ordered by priority
             # and the refusal paths already answer with the first, so sending the whole
@@ -607,6 +634,11 @@ def build_subscriber_options(user_id, entity_id) -> dict | None:
 
     return {
         "entity": {"entity_id": str(entity.id), "entity_name": entity.name or ""},
+        # The day the outgoing payer's money stops covering the company. It is a fact about
+        # the ENTITY, so it is answered here and not left to be read off a quote: quotes are
+        # priced per candidate and only when there IS one - a company whose payer is its only
+        # admin has none, and the screen's footer was losing "paid up until ..." entirely.
+        "paid_through": paid_through,
         "current": current,
         "candidates": [
             {**current, "is_current": True},

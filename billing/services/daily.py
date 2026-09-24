@@ -102,6 +102,12 @@ SWEEP_TOUCHED = "sweep-touched"
 # accept is a one-shot user action that nothing would otherwise revisit.
 REPAIR_TRANSFERS = "repair-transfers"
 
+# Take the handover charges that were parked at accept. An accept buys days that have not
+# started yet, so it charges nothing and records the instant they do; this is what turns
+# up on that day. The only job here that bills money nobody has been asked for on a screen,
+# which is why the card is nominated at the accept rather than left to this.
+COLLECT_TRANSFERS = "collect-transfers"
+
 FULL = "full"
 LIGHT = "light"
 
@@ -112,6 +118,11 @@ JOB_ORDER = (
     # it writes the claim that keeps the entity off this run's invoice — left until
     # afterwards, the renewal would bill days the new payer has already settled.
     REPAIR_TRANSFERS,
+    # ALSO before the renewal, and for the mirror of that reason. This one writes the
+    # claim by COLLECTING it, and the charge establishes the card's ``paid_through``.
+    # Run afterwards, the renewal would find a card that has never collected, skip it,
+    # and leave the company a day unbilled every time.
+    COLLECT_TRANSFERS,
     RUN_RENEWALS,
     RETRY_DUNNING,
     SWEEP_ACCESS,
@@ -124,6 +135,7 @@ JOB_ORDER = (
 LIGHT_ORDER = (
     CLOSE_TRIALS,
     REPAIR_TRANSFERS,
+    COLLECT_TRANSFERS,
     RUN_RENEWALS,
     SWEEP_TOUCHED,
 )
@@ -246,6 +258,18 @@ def _repair_transfers(now: datetime, *, days_before: int, issue: bool) -> dict:
     return repair_stranded(now)
 
 
+def _collect_transfers(now: datetime, *, days_before: int, issue: bool) -> dict:
+    from billing.services.transfers import collect_due as collect_transfers
+
+    # Honours no ``issue`` gate, which needs saying because this one DOES charge. It is
+    # the trial conversion's shape, not the renewal's: a per-row date-driven charge that
+    # falls due whether or not the renewal switch is on, and leaving it uncollected is
+    # not a smaller pass — it is a company running for nothing. ``close-trials`` charges
+    # on a shadow run for exactly the same reason ("``issue=False`` is a smaller pass,
+    # not a read-only one" — ``run_daily`` below).
+    return collect_transfers(now)
+
+
 def _retry_dunning(now: datetime, *, days_before: int, issue: bool) -> dict:
     from billing.services.dunning import collect_due
 
@@ -259,6 +283,7 @@ _RUNNERS = {
     RUN_RENEWALS: _run_renewals,
     RETRY_DUNNING: _retry_dunning,
     REPAIR_TRANSFERS: _repair_transfers,
+    COLLECT_TRANSFERS: _collect_transfers,
 }
 
 
@@ -389,7 +414,7 @@ def run_daily(
 ) -> dict:
     """Run a pass. Returns a summary; never raises for a job that failed.
 
-    ``mode`` is ``FULL`` (all five, ending in the unscoped sweep) or ``LIGHT`` (the two
+    ``mode`` is ``FULL`` (everything, ending in the unscoped sweep) or ``LIGHT`` (the
     money jobs, then a sweep narrowed to the payers they touched). See the module
     docstring for why the expensive sweep is the one that stays daily.
 
@@ -399,9 +424,9 @@ def run_daily(
 
     It gates the RENEWAL step and nothing else, which is narrower than it sounds: with it
     off the pass still converts due trials (cutting an invoice and charging the card),
-    still expires the ones with no card, still revokes and restores access, and still
-    lets dunning retry invoices already owed. ``issue=False`` is a smaller pass, not a
-    read-only one.
+    still collects the handover charges parked at accept (likewise), still expires the
+    trials with no card, still revokes and restores access, and still lets dunning retry
+    invoices already owed. ``issue=False`` is a smaller pass, not a read-only one.
 
     ``now`` is passed in rather than read here so the pass is testable against a fixed
     clock, and so every step in one pass agrees about what time it is — which is not a

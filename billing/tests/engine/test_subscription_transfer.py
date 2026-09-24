@@ -20,6 +20,12 @@ import pytest
 NOW = datetime(2027, 8, 20, tzinfo=UTC)
 PAID_THROUGH = datetime(2027, 9, 12, tzinfo=UTC)
 PERIOD_END = datetime(2027, 10, 1, tzinfo=UTC)
+# The usual case is a FUTURE window - the outgoing payer has bought days nobody has used -
+# and an accept takes no money for those: it parks the instant on ``collect_at`` and the
+# daily pass charges on the day. So a test about the CHARGE has to put the window in the
+# past, which is the other case: the money ran out before anybody got round to accepting,
+# the days are being used now, and they are owed at once.
+LAPSED = datetime(2027, 8, 10, tzinfo=UTC)
 # The incoming payer's cycle anchor, as the charge reports it back. Distinct from every
 # other date here so a test that finds it on the offer row cannot be reading something
 # else that happens to match.
@@ -85,7 +91,7 @@ def _trial_row(code="PETTY_CASH", phase="trial", days=14):
 
 
 def _wire(monkeypatch, db, *, rows=None, payer=OLD, dunning=(), admin=True,
-          approved=True, card=True, charge=None):
+          approved=True, card=True, charge=None, paid_through=PAID_THROUGH):
     """Mock what sits either side of the service; return (transfers, calls)."""
     from billing.services import checkout, clock, store, transfers
     from shared_models.models import User, UserEntity
@@ -98,9 +104,9 @@ def _wire(monkeypatch, db, *, rows=None, payer=OLD, dunning=(), admin=True,
                         lambda eid: list(rows if rows is not None else [_Row()]))
     monkeypatch.setattr(store, "payer_for_entity", lambda eid: payer)
     monkeypatch.setattr(store, "payer_is_dunning", lambda uid: uid in dunning)
-    monkeypatch.setattr(store, "paid_through_for_user", lambda uid: PAID_THROUGH)
+    monkeypatch.setattr(store, "paid_through_for_user", lambda uid: paid_through)
     # Same value per company: these cases describe an account with one card.
-    monkeypatch.setattr(store, "paid_through_for_entity", lambda _e: PAID_THROUGH)
+    monkeypatch.setattr(store, "paid_through_for_entity", lambda _e: paid_through)
     monkeypatch.setattr(store, "customer_id_for_user", lambda uid: "cus_new")
     monkeypatch.setattr(
         store, "transfer_entity_payer",
@@ -222,13 +228,45 @@ def test_a_deactivated_account_cannot_be_handed_the_bill(db_session, monkeypatch
     assert any("isn't active" in r for r in reasons)
 
 
-def test_no_saved_card_blocks_it(db_session, monkeypatch):
-    """Without one nothing can be charged at all — ``start_billing_cycle`` silently
-    no-ops for a payer with no customer row, so the accept would fail at the charge
-    having already promised to succeed."""
+def test_no_saved_card_does_not_block_the_offer(db_session, monkeypatch):
+    """Being ASKED is not being charged, so a card-less admin may be offered the company.
+
+    This was a blocker, and it was wrong in three ways: it refused someone for a thing
+    they could fix in seconds, it refused them before they had been asked whether they
+    even wanted the company, and the offering screen never showed it anyway — the portal
+    drops every "That person" reason, so a card-less admin rendered as selectable and the
+    POST then refused. The requirement lives at the accept now, which is where the charge
+    is (see the two tests below)."""
     transfers, _ = _wire(monkeypatch, db_session, card=False)
     reasons = transfers.transfer_blockers(ENTITY, from_user_id=OLD, to_user_id=NEW)
-    assert any("saved payment method" in r for r in reasons)
+    assert reasons == []
+
+
+def test_a_card_less_recipient_can_be_sent_an_offer(db_session, monkeypatch):
+    transfers, calls = _wire(monkeypatch, db_session, card=False)
+
+    ok, _msg, _ = transfers.offer_transfer(OLD, ENTITY, NEW)
+
+    assert ok is True
+    assert calls["charges"] == []
+
+
+def test_accepting_without_a_card_is_refused_and_charges_nothing(db_session, monkeypatch):
+    """The requirement did not go away, it moved to the moment it is actually true. The
+    nomination is made from the recipient's account default, and there is none to make it
+    from — so the accept refuses BEFORE the journal write, leaving the offer pending for
+    them to retry once they have saved one."""
+    transfers, calls = _wire(monkeypatch, db_session, card=False)
+    offer = _offer(db_session, transfers)
+
+    ok, msg, _ = transfers.respond_to_transfer(NEW, offer.id, accept=True)
+
+    assert ok is False
+    assert "Add a payment method" in msg
+    assert calls["charges"] == []
+    assert calls["flips"] == []
+    offer.refresh_from_db()
+    assert offer.status == "pending"
 
 
 def test_a_clean_handover_has_no_blockers(db_session, monkeypatch):
@@ -259,8 +297,44 @@ def test_you_cannot_hand_a_company_to_yourself(db_session, monkeypatch):
 # --- accept: the money and the ordering ----------------------------------------------
 
 
-def test_accept_charges_then_flips(db_session, monkeypatch):
+def test_accept_takes_no_money_and_parks_the_charge(db_session, monkeypatch):
+    """The window starts 12 Sept; it is 20 Aug. Nothing is owed for days nobody has used.
+
+    The handover still COMPLETES — the payer flips, consent is recorded, the old payer
+    stops being liable — because who owns the company and who has paid for it were never
+    the same question."""
     transfers, calls = _wire(monkeypatch, db_session)
+    offer = _offer(db_session, transfers)
+
+    ok, _msg, _result = transfers.respond_to_transfer(NEW, offer.id, accept=True)
+    offer.refresh_from_db()
+
+    assert ok is True
+    assert calls["charges"] == [], "a handover takes no money"
+    assert transfers._aware(offer.collect_at) == PAID_THROUGH
+    assert offer.status == "accepted"
+    assert calls["consent"] == [(ENTITY, NEW, "transfer")]
+
+
+def test_a_parked_handover_claims_nothing(db_session, monkeypatch):
+    """The load-bearing half. ``billed_through`` says "someone's money covers these days";
+    until the collection it is nobody's. Written at accept, the company would run free AND
+    be marked paid for - ``entities_covered_into`` would suppress the renewal - which is an
+    absence with no invoice to notice it by."""
+    transfers, calls = _wire(monkeypatch, db_session)
+    offer = _offer(db_session, transfers)
+
+    transfers.respond_to_transfer(NEW, offer.id, accept=True)
+    offer.refresh_from_db()
+
+    assert calls["flips"] == [(ENTITY, NEW, None)], "the payer moves, the claim does not"
+    assert offer.accepted_billed_through is None
+
+
+def test_a_lapsed_window_is_charged_at_accept(db_session, monkeypatch):
+    """The other case: the old payer's money ran out on 10 Aug and it is 20 Aug, so these
+    are days being used right now. There is no future date to defer to."""
+    transfers, calls = _wire(monkeypatch, db_session, paid_through=LAPSED)
     offer = _offer(db_session, transfers)
 
     ok, _msg, result = transfers.respond_to_transfer(NEW, offer.id, accept=True)
@@ -268,9 +342,10 @@ def test_accept_charges_then_flips(db_session, monkeypatch):
 
     assert ok is True
     assert len(calls["charges"]) == 1
+    assert calls["charges"][0]["at"] == LAPSED
     assert calls["flips"] == [(ENTITY, NEW, PERIOD_END)]
-    assert calls["consent"] == [(ENTITY, NEW, "transfer")]
     assert offer.status == "accepted"
+    assert offer.collect_at is None, "nothing left to collect"
     assert result["invoice_id"] == "in_1"
 
 
@@ -281,7 +356,7 @@ def test_accept_records_the_cycle_the_entity_landed_on(db_session, monkeypatch):
     the incoming payer's anchor is immutable, but a repair pass reading it back has no way
     to tell an anchor that was established BY this accept from one that was already there.
     """
-    transfers, _calls = _wire(monkeypatch, db_session)
+    transfers, _calls = _wire(monkeypatch, db_session, paid_through=LAPSED)
     offer = _offer(db_session, transfers)
 
     transfers.respond_to_transfer(NEW, offer.id, accept=True)
@@ -296,7 +371,7 @@ def test_accept_records_the_cycle_the_entity_landed_on(db_session, monkeypatch):
 def test_a_decline_records_no_anchor(db_session, monkeypatch):
     """Nothing was charged, so there is no cycle to claim the entity landed on."""
     transfers, _calls = _wire(
-        monkeypatch, db_session,
+        monkeypatch, db_session, paid_through=LAPSED,
         charge={"paid": False, "period_end": None, "invoice_id": None, "amount": 0,
                 "currency": None, "anchor": None, "reason": "declined"},
     )
@@ -310,8 +385,11 @@ def test_a_decline_records_no_anchor(db_session, monkeypatch):
 
 def test_the_handover_instant_is_read_at_accept_not_quoted_at_offer(db_session, monkeypatch):
     """``paid_through`` advances on every successful renewal, so an offer that outlives a
-    cycle would otherwise bill a window the old payer has since paid for."""
-    transfers, calls = _wire(monkeypatch, db_session)
+    cycle would otherwise bill a window the old payer has since paid for.
+
+    Read at accept even though nothing is charged there - the instant parked on
+    ``collect_at`` IS the window's start, and a stale one would collect early."""
+    transfers, _calls = _wire(monkeypatch, db_session)
     offer = _offer(db_session, transfers)
 
     moved = datetime(2027, 10, 12, tzinfo=UTC)
@@ -325,12 +403,12 @@ def test_the_handover_instant_is_read_at_accept_not_quoted_at_offer(db_session, 
     transfers.respond_to_transfer(NEW, offer.id, accept=True)
     offer.refresh_from_db()
 
-    assert calls["charges"][0]["at"] == moved
+    assert transfers._aware(offer.collect_at) == moved
 
 
 def test_a_decline_leaves_the_company_where_it_was(db_session, monkeypatch):
     transfers, calls = _wire(
-        monkeypatch, db_session,
+        monkeypatch, db_session, paid_through=LAPSED,
         charge={"paid": False, "period_end": None, "invoice_id": None, "amount": 0,
                 "currency": None, "anchor": None,
                 "reason": "That payment didn't go through."},
@@ -356,7 +434,8 @@ def test_a_retry_after_a_decline_uses_a_fresh_key(db_session, monkeypatch):
                 2: {"paid": True, "period_end": PERIOD_END, "invoice_id": "in_2",
                     "amount": 19000, "currency": "HKD", "anchor": ANCHOR,
                     "reason": None}}
-    transfers, calls = _wire(monkeypatch, db_session, charge=lambda n: outcomes[n])
+    transfers, calls = _wire(monkeypatch, db_session, paid_through=LAPSED,
+                             charge=lambda n: outcomes[n])
     offer = _offer(db_session, transfers)
 
     assert transfers.respond_to_transfer(NEW, offer.id, accept=True)[0] is False
@@ -383,6 +462,486 @@ def test_an_accept_that_died_after_the_charge_is_finished_not_recharged(db_sessi
     assert calls["charges"] == [], "the money was already taken"
     assert calls["flips"] == [(ENTITY, NEW, PAID_THROUGH)]
     assert offer.status == "accepted"
+
+
+# --- choosing what to take on (07-D) --------------------------------------------------
+
+
+def _upserts(monkeypatch):
+    """Capture ``upsert_module_row``, which is how a declined module is ended."""
+    from billing.services import store
+
+    written: list[dict] = []
+    monkeypatch.setattr(
+        store, "upsert_module_row",
+        lambda eid, code, payer, **fields: written.append({"code": code, **fields}),
+    )
+    return written
+
+
+def test_taking_the_whole_company_is_the_default(db_session, monkeypatch):
+    """No ``codes`` at all - every caller written before the screen offered a choice."""
+    transfers, calls = _wire(
+        monkeypatch, db_session, paid_through=LAPSED,
+        rows=[_Row(code="PETTY_CASH"), _Row(code="PAYMENT_REQUEST")],
+    )
+    written = _upserts(monkeypatch)
+    offer = _offer(db_session, transfers)
+
+    ok, _msg, _ = transfers.respond_to_transfer(NEW, offer.id, accept=True)
+
+    assert ok is True
+    assert written == [], "nothing declined, so nothing ended"
+    assert len(calls["charges"]) == 1
+
+
+def test_a_declined_module_ends_where_the_money_runs_out(db_session, monkeypatch):
+    """The date is the whole design. ``checkout.cancel_module`` would end it at
+    ``max(paid_through, now + paid_cancel_access_days)`` - LATER than paid-through - and
+    book an extension the OUTGOING payer would owe for days the recipient declined. It
+    would also make the accept refuse itself: the pending-extension blocker is
+    re-evaluated inside the accept."""
+    transfers, _calls = _wire(
+        monkeypatch, db_session,
+        rows=[_Row(code="PETTY_CASH"), _Row(code="PAYMENT_REQUEST")],
+    )
+    written = _upserts(monkeypatch)
+    offer = _offer(db_session, transfers)
+
+    ok, _msg, _ = transfers.respond_to_transfer(
+        NEW, offer.id, accept=True, codes=["PETTY_CASH"]
+    )
+
+    assert ok is True
+    assert written == [{
+        "code": "PAYMENT_REQUEST",
+        "phase": "scheduled_cancel",
+        "app_access_until": PAID_THROUGH,
+    }]
+    # NO extension fields at all - not a zero, absent. That is what keeps the blocker
+    # quiet and leaves nobody owing anything for the wind-down.
+    assert "extension_amount" not in written[0]
+    assert "extension_state" not in written[0]
+
+
+def test_only_the_kept_modules_are_priced(db_session, monkeypatch):
+    transfers, calls = _wire(
+        monkeypatch, db_session, paid_through=LAPSED,
+        rows=[_Row(code="PETTY_CASH"), _Row(code="PAYMENT_REQUEST")],
+    )
+    _upserts(monkeypatch)
+    offer = _offer(db_session, transfers)
+
+    priced: list[set] = []
+    from billing.services import checkout
+
+    monkeypatch.setattr(
+        checkout, "_bill_transfer_in_house",
+        lambda eid, payer, cid, c, *, at, idempotency_key: (
+            priced.append(set(c)) or {"paid": True, "period_end": PERIOD_END,
+                                      "invoice_id": "in_1", "amount": 19000,
+                                      "currency": "HKD", "anchor": ANCHOR, "reason": None}
+        ),
+    )
+    transfers.respond_to_transfer(NEW, offer.id, accept=True, codes=["PETTY_CASH"])
+
+    assert priced == [{"PETTY_CASH"}]
+    assert calls["charges"] == [], "the stub above replaced the wired one"
+
+
+def test_declining_everything_is_refused(db_session, monkeypatch):
+    """Taking on no modules is not a handover. Read generously as "all of them" it would
+    hand over a company nobody agreed to take."""
+    transfers, calls = _wire(monkeypatch, db_session)
+    written = _upserts(monkeypatch)
+    offer = _offer(db_session, transfers)
+
+    ok, msg, _ = transfers.respond_to_transfer(NEW, offer.id, accept=True, codes=[])
+
+    assert ok is False
+    assert "at least one module" in msg
+    assert written == [] and calls["flips"] == [] and calls["charges"] == []
+
+
+def test_codes_naming_nothing_this_company_has_are_refused(db_session, monkeypatch):
+    transfers, calls = _wire(monkeypatch, db_session)
+    offer = _offer(db_session, transfers)
+
+    ok, msg, _ = transfers.respond_to_transfer(
+        NEW, offer.id, accept=True, codes=["NOT_A_MODULE"]
+    )
+
+    assert ok is False
+    assert "at least one module" in msg
+    assert calls["flips"] == []
+
+
+def test_a_declined_module_is_not_ended_when_the_accept_fails(db_session, monkeypatch):
+    """Ordering. Cancelled first, a declined card would leave the company stripped of a
+    module by a handover that never happened - rows changed, payer unmoved, nobody told."""
+    transfers, calls = _wire(
+        monkeypatch, db_session, paid_through=LAPSED,
+        rows=[_Row(code="PETTY_CASH"), _Row(code="PAYMENT_REQUEST")],
+        charge={"paid": False, "period_end": None, "invoice_id": None, "amount": 0,
+                "currency": None, "anchor": None, "reason": "declined"},
+    )
+    written = _upserts(monkeypatch)
+    offer = _offer(db_session, transfers)
+
+    ok, _msg, _ = transfers.respond_to_transfer(
+        NEW, offer.id, accept=True, codes=["PETTY_CASH"]
+    )
+
+    assert ok is False
+    assert written == [], "the declined module still belongs to the company"
+    assert calls["flips"] == []
+
+
+def test_a_declined_trial_goes_through_the_trial_path(db_session, monkeypatch):
+    """A trial costs nobody anything, so there is nothing to end early: its free days run
+    to ``trial_end`` and it then expires instead of converting. That branch already exists
+    in ``checkout.cancel_module``, and ending a trial at the paid-through date instead
+    would cut short days that were never anybody's to charge for."""
+    transfers, _calls = _wire(
+        monkeypatch, db_session,
+        rows=[_Row(code="PETTY_CASH"), _trial_row(code="PAYMENT_REQUEST")],
+    )
+    written = _upserts(monkeypatch)
+    cancelled: list[str] = []
+    from billing.services import checkout
+
+    monkeypatch.setattr(
+        checkout, "cancel_module",
+        lambda entity, user, code, **kw: cancelled.append(code),
+    )
+    offer = _offer(db_session, transfers)
+
+    ok, _msg, _ = transfers.respond_to_transfer(
+        NEW, offer.id, accept=True, codes=["PETTY_CASH"]
+    )
+
+    assert ok is True
+    assert cancelled == ["PAYMENT_REQUEST"]
+    assert written == [], "the trial path writes its own row, not this one"
+
+
+def test_a_row_already_winding_down_is_left_alone(db_session, monkeypatch):
+    """Not declining it - it is already going. Writing it again would move its access
+    date onto the paid-through and discard an extension somebody may already owe."""
+    transfers, _calls = _wire(
+        monkeypatch, db_session,
+        rows=[_Row(code="PETTY_CASH"), _Row(code="PAYMENT_REQUEST", phase="scheduled_cancel")],
+    )
+    written = _upserts(monkeypatch)
+    offer = _offer(db_session, transfers)
+
+    transfers.respond_to_transfer(NEW, offer.id, accept=True, codes=["PETTY_CASH"])
+
+    assert written == []
+
+
+# --- the deferred charge, collected --------------------------------------------------
+
+
+def _parked(db, transfers, *, collect_at=PAID_THROUGH):
+    """An accepted handover whose first charge is parked on ``collect_at``."""
+    from shared_models.models import SubscriptionTransfer
+
+    row = SubscriptionTransfer(
+        id=OFFER, entity_id=ENTITY, from_user_id=OLD, to_user_id=NEW,
+        status="accepted", charge_attempt=0, charge_key=None,
+        expires_at=NOW + timedelta(days=7), collect_at=collect_at,
+    )
+    row.save(force_insert=True)
+    return row
+
+
+def _group(monkeypatch, *, dunning_at=None):
+    """The card the incoming payer put the company on, as ``store`` answers for it."""
+    from billing.services import store
+
+    class _Group:
+        id = "g_new"
+        payer_user_id = NEW
+        stripe_payment_method_id = "pm_1"
+        paid_through = None
+        dunning_started_at = dunning_at
+
+    group = _Group()
+    monkeypatch.setattr(store, "billing_group_for_entity", lambda eid, uid=None: group)
+    return group
+
+
+def test_the_parked_charge_is_taken_on_the_day_and_not_before(db_session, monkeypatch):
+    """THE guard this whole change needs. Deferring the charge must move it, not lose it:
+    a window that is never collected is a company running for nothing, and nothing else
+    in the engine would notice - its card's ``paid_through`` is NULL, so ``due_renewals``
+    skips it outright.
+
+    ``payer=NEW`` throughout this section: the accept already flipped the company, which
+    is the state every collection runs against."""
+    transfers, calls = _wire(monkeypatch, db_session, payer=NEW)
+    _group(monkeypatch)
+    offer = _parked(db_session, transfers)
+
+    # The day before. Not due, not touched.
+    early = transfers.collect_due(PAID_THROUGH - timedelta(days=1))
+    offer.refresh_from_db()
+    assert early == {"collected": [], "failed": [], "abandoned": []}
+    assert calls["charges"] == []
+    assert transfers._aware(offer.collect_at) == PAID_THROUGH
+
+    # The day itself.
+    result = transfers.collect_due(PAID_THROUGH)
+    offer.refresh_from_db()
+
+    assert len(result["collected"]) == 1
+    assert len(calls["charges"]) == 1
+    assert calls["charges"][0]["at"] == PAID_THROUGH, "the window it was parked for"
+    assert offer.collect_at is None, "cleared IS the record of settled"
+    assert offer.charge_invoice_id == "in_1"
+
+
+def test_collecting_writes_the_claim_that_the_accept_did_not(db_session, monkeypatch):
+    """The claim says "these days are covered". Until the money is in, they are not - so
+    it goes on here and at no earlier moment."""
+    transfers, calls = _wire(monkeypatch, db_session, payer=NEW)
+    _group(monkeypatch)
+    _parked(db_session, transfers)
+
+    transfers.collect_due(PAID_THROUGH)
+
+    assert calls["flips"] == [(ENTITY, NEW, PERIOD_END)]
+
+
+def test_a_second_pass_does_not_charge_again(db_session, monkeypatch):
+    transfers, calls = _wire(monkeypatch, db_session, payer=NEW)
+    _group(monkeypatch)
+    _parked(db_session, transfers)
+
+    transfers.collect_due(PAID_THROUGH)
+    transfers.collect_due(PAID_THROUGH + timedelta(days=1))
+
+    assert len(calls["charges"]) == 1
+
+
+def test_a_declined_collection_stays_owed_and_retries_with_a_fresh_key(db_session, monkeypatch):
+    """The same trap as the accept's retry: the failed attempt's invoice was voided and
+    its key stays claimed, so a stable key would jam this forever. ``collect_at`` is NOT
+    cleared - a fixed card settles it on the next pass with nobody re-accepting."""
+    outcomes = {1: {"paid": False, "period_end": None, "invoice_id": None, "amount": 0,
+                    "currency": None, "anchor": None, "reason": "declined"},
+                2: {"paid": True, "period_end": PERIOD_END, "invoice_id": "in_2",
+                    "amount": 19000, "currency": "HKD", "anchor": ANCHOR, "reason": None}}
+    transfers, calls = _wire(monkeypatch, db_session, payer=NEW, charge=lambda n: outcomes[n])
+    _group(monkeypatch)
+    offer = _parked(db_session, transfers)
+
+    first = transfers.collect_due(PAID_THROUGH)
+    offer.refresh_from_db()
+    assert len(first["failed"]) == 1
+    assert transfers._aware(offer.collect_at) == PAID_THROUGH, "still owed"
+    assert calls["flips"] == [], "no claim for money that was not taken"
+
+    second = transfers.collect_due(PAID_THROUGH + timedelta(days=1))
+    offer.refresh_from_db()
+    assert len(second["collected"]) == 1
+    assert offer.collect_at is None
+
+    keys = [c["key"] for c in calls["charges"]]
+    assert keys == [f"transfer-{OFFER}-1", f"transfer-{OFFER}-2"], keys
+
+
+def test_a_declined_collection_puts_the_company_past_due(db_session, monkeypatch):
+    """A company nobody has paid for is past due, which is what starts the grace window
+    and eventually revokes access. Dunning cannot collect this debt - it chases the
+    payer's oldest OPEN invoice and the failed charge voided its own - so the retry above
+    is what settles it; this is the access half."""
+    from billing.services import store
+
+    transfers, _calls = _wire(
+        monkeypatch, db_session, payer=NEW,
+        charge={"paid": False, "period_end": None, "invoice_id": None, "amount": 0,
+                "currency": None, "anchor": None, "reason": "declined"},
+    )
+    group = _group(monkeypatch)
+    started: list = []
+    monkeypatch.setattr(store, "begin_group_dunning",
+                        lambda gid, at: started.append((gid, at)))
+    _parked(db_session, transfers)
+
+    transfers.collect_due(PAID_THROUGH)
+
+    assert started == [(group.id, PAID_THROUGH)]
+
+
+def test_a_company_handed_on_again_is_not_charged_to_the_wrong_person(db_session, monkeypatch):
+    """A handover can be handed on before its charge falls due. The second one reads the
+    paid-through as it stands and parks its own window; billing the first recipient for
+    days a third party now owns would charge somebody for a company they do not have."""
+    transfers, calls = _wire(monkeypatch, db_session, payer="0a7d0e6e-0000-4000-8000-00000000003f")
+    _group(monkeypatch)
+    offer = _parked(db_session, transfers)
+
+    result = transfers.collect_due(PAID_THROUGH)
+    offer.refresh_from_db()
+
+    assert calls["charges"] == []
+    assert len(result["abandoned"]) == 1
+    assert offer.collect_at is None, "stop asking - it is not collectable"
+
+
+def test_nothing_billing_forward_is_not_a_debt(db_session, monkeypatch):
+    """Weeks pass between the accept and the collection. Every module cancelled in that
+    time leaves a company that owes nothing, which is not a failure to collect."""
+    transfers, calls = _wire(
+        monkeypatch, db_session, payer=NEW, rows=[_Row(code="PETTY_CASH", phase="expired")],
+    )
+    _group(monkeypatch)
+    offer = _parked(db_session, transfers)
+
+    result = transfers.collect_due(PAID_THROUGH)
+    offer.refresh_from_db()
+
+    assert calls["charges"] == []
+    assert len(result["abandoned"]) == 1
+    assert offer.collect_at is None
+
+
+def test_the_module_set_is_re_read_at_collection(db_session, monkeypatch):
+    """Priced on what the company holds ON THE DAY, never on the set quoted at accept."""
+    transfers, calls = _wire(
+        monkeypatch, db_session, payer=NEW,
+        rows=[_Row(code="PETTY_CASH", phase="active"), _Row(code="PAYMENT_REQUEST", phase="expired")],
+    )
+    _group(monkeypatch)
+    _parked(db_session, transfers)
+
+    codes: list = []
+    from billing.services import checkout
+
+    def _charge(entity_id, payer, customer_id, c, *, at, idempotency_key):
+        codes.append(set(c))
+        return {"paid": True, "period_end": PERIOD_END, "invoice_id": "in_1",
+                "amount": 19000, "currency": "HKD", "anchor": ANCHOR, "reason": None}
+
+    monkeypatch.setattr(checkout, "_bill_transfer_in_house", _charge)
+    transfers.collect_due(PAID_THROUGH)
+
+    assert codes == [{"PETTY_CASH"}], "the expired module is not priced"
+    assert calls["charges"] == [], "the stub above replaced the wired one"
+
+
+def test_the_collection_runs_in_the_daily_pass_before_the_renewal():
+    """Ordering, not decoration. The collection establishes the card's ``paid_through``;
+    run after the renewal, that card would look like one that has never collected, be
+    skipped, and leave the company a day unbilled on every pass."""
+    from billing.services import daily
+
+    assert daily.COLLECT_TRANSFERS in daily._RUNNERS
+    for order in (daily.JOB_ORDER, daily.LIGHT_ORDER):
+        assert daily.COLLECT_TRANSFERS in order
+        assert order.index(daily.COLLECT_TRANSFERS) < order.index(daily.RUN_RENEWALS)
+
+
+# --- telling the payer how it ended (07-I / A-07 / A-08) -----------------------------
+
+
+def _ended(db, transfers, status, *, seen=None, offer_id=OFFER):
+    """A finished offer THIS payer made, seen or not."""
+    from shared_models.models import SubscriptionTransfer
+
+    row = SubscriptionTransfer(
+        id=offer_id, entity_id=ENTITY, from_user_id=OLD, to_user_id=NEW,
+        status=status, expires_at=NOW + timedelta(days=7),
+        responded_at=NOW, outcome_seen_at=seen,
+    )
+    row.save(force_insert=True)
+    return row
+
+
+def test_an_unseen_decline_is_reported_to_the_payer_who_asked(db_session, monkeypatch):
+    """The gap this closes: every other read filters on the three OPEN statuses, so a
+    declined offer was invisible and the offering screen fell back to the picker exactly as
+    though nothing had ever been asked."""
+    transfers, _calls = _wire(monkeypatch, db_session)
+    _ended(db_session, transfers, "declined")
+
+    out = transfers.unseen_outcomes(OLD)
+
+    assert len(out) == 1
+    assert out[0]["id"] == OFFER
+    assert out[0]["status"] == "declined"
+    assert out[0]["entity_id"] == ENTITY
+    # Named, because the modal's title is "<Name> declined the transfer".
+    assert out[0]["who"]
+
+
+def test_a_seen_outcome_is_never_reported_again(db_session, monkeypatch):
+    transfers, _calls = _wire(monkeypatch, db_session)
+    _ended(db_session, transfers, "declined", seen=NOW)
+
+    assert transfers.unseen_outcomes(OLD) == []
+
+
+def test_expired_and_accepted_are_reported_too_but_cancelled_is_not(db_session, monkeypatch):
+    """A cancellation is the payer's OWN withdrawal, answered by 07-K as they did it.
+    Telling somebody their own click happened is not news."""
+    transfers, _calls = _wire(monkeypatch, db_session)
+    ids = {
+        "expired": "7a17ffe4-0000-4000-8000-0000000000b1",
+        "accepted": "7a17ffe4-0000-4000-8000-0000000000b2",
+        "cancelled": "7a17ffe4-0000-4000-8000-0000000000b3",
+        "pending": "7a17ffe4-0000-4000-8000-0000000000b4",
+    }
+    for status, oid in ids.items():
+        _ended(db_session, transfers, status, offer_id=oid)
+
+    reported = {o["status"] for o in transfers.unseen_outcomes(OLD)}
+
+    assert reported == {"expired", "accepted"}
+
+
+def test_only_the_payer_who_asked_is_told(db_session, monkeypatch):
+    """Scoped on ``from_user_id``. The recipient already knows - they answered it."""
+    transfers, _calls = _wire(monkeypatch, db_session)
+    _ended(db_session, transfers, "declined")
+
+    assert transfers.unseen_outcomes(NEW) == []
+    assert transfers.unseen_outcomes(None) == []
+
+
+def test_done_stamps_it_seen_once_and_is_idempotent(db_session, monkeypatch):
+    transfers, _calls = _wire(monkeypatch, db_session)
+    offer = _ended(db_session, transfers, "declined")
+
+    ok, _msg = transfers.mark_outcome_seen(OLD, OFFER)
+    offer.refresh_from_db()
+    first = offer.outcome_seen_at
+
+    assert ok is True
+    assert first is not None
+    assert transfers.unseen_outcomes(OLD) == []
+
+    # Again: a double-click must not move the stamp or raise.
+    ok2, _msg2 = transfers.mark_outcome_seen(OLD, OFFER)
+    offer.refresh_from_db()
+    assert ok2 is True
+    assert offer.outcome_seen_at == first
+
+
+def test_marking_somebody_elses_handover_seen_is_refused(db_session, monkeypatch):
+    transfers, _calls = _wire(monkeypatch, db_session)
+    offer = _ended(db_session, transfers, "declined")
+
+    ok, msg = transfers.mark_outcome_seen(NEW, OFFER)
+    offer.refresh_from_db()
+
+    assert ok is False
+    assert "isn't yours" in msg
+    assert offer.outcome_seen_at is None
+    # The same answer for one that does not exist, so an id cannot be probed for existence.
+    assert transfers.mark_outcome_seen(OLD, "7a17ffe4-0000-4000-8000-00000000dead")[0] is False
 
 
 def test_the_repair_step_finishes_a_stranded_handover(db_session, monkeypatch):
@@ -668,7 +1227,7 @@ def test_only_the_live_module_is_charged_for(db_session, monkeypatch):
     """The expired row moves with the entity but is not priced — you do not bill someone
     for a module nobody holds."""
     transfers, calls = _wire(
-        monkeypatch, db_session,
+        monkeypatch, db_session, paid_through=LAPSED,
         rows=[_Row(code="PETTY_CASH", phase="expired"), _Row(code="PAYMENT_REQUEST", phase="active")],
     )
     offer = _offer(db_session, transfers)
@@ -687,7 +1246,7 @@ def test_the_dead_row_still_moves_to_the_new_payer(db_session, monkeypatch):
     the incoming payer inherits "this module has had its free trial" rather than getting a
     fresh one. The trial belongs to the company, not to whoever is paying."""
     transfers, calls = _wire(
-        monkeypatch, db_session,
+        monkeypatch, db_session, paid_through=LAPSED,
         rows=[_Row(code="PETTY_CASH", phase="expired"), _Row(code="PAYMENT_REQUEST", phase="active")],
     )
     offer = _offer(db_session, transfers)
@@ -880,7 +1439,7 @@ def test_a_charge_free_handover_raises_no_invoice_and_claims_no_key(db_session, 
 
 def test_a_mixed_entity_charges_only_for_the_paid_module(db_session, monkeypatch):
     transfers, calls = _wire(
-        monkeypatch, db_session,
+        monkeypatch, db_session, paid_through=LAPSED,
         rows=[_trial_row(code="PETTY_CASH"), _Row(code="PAYMENT_REQUEST", phase="active")],
     )
     offer = _offer(db_session, transfers)
@@ -1079,6 +1638,26 @@ def test_only_the_most_blocking_reason_reaches_the_screen(db_session, monkeypatc
     assert payload is not None
     assert len(payload["blockers"]) == 1, "the screen shows one"
     assert payload["blockers"][0] == all_reasons[0], "and it is the most blocking one"
+
+
+def test_the_screen_is_told_what_the_company_is_paid_through(db_session, monkeypatch):
+    """The footer says "paid up until ..." - and that is a fact about the ENTITY, not about
+    whoever might take it over.
+
+    It used to be read off a candidate's quote, which exists only when there IS a candidate:
+    a company whose payer is its own only admin produced none, and the sentence silently
+    disappeared from the screen that is meant to explain what the payer is still on the hook
+    for. So the read answers it directly, with no candidates at all."""
+    from billing.services import portal
+
+    _wire(monkeypatch, db_session, rows=[_Row(phase="active")])
+    monkeypatch.setattr(portal, "_admin_candidates", lambda eid: [])
+
+    payload = portal.build_subscriber_options(OLD, ENTITY)
+
+    assert payload is not None
+    assert [c["is_current"] for c in payload["candidates"]] == [True], "only the payer"
+    assert payload["paid_through"] == PAID_THROUGH, "and still the date the footer needs"
 
 
 def test_a_trial_beside_an_active_module_is_priced_as_an_upgrade(db_session, monkeypatch):
