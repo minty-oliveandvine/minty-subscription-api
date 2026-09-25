@@ -462,6 +462,17 @@ def test_only_the_address_keys_that_were_supplied_are_sent(app, wallet):
     assert "exp_month" not in payload
 
 
+def test_a_blanked_field_is_cleared_not_ignored(app, wallet):
+    """``""`` is Stripe's "unset". A blank used to become ``None``, which the SDK drops from
+    the request (``stripe/_encode.py``) — the edit reported success and changed nothing."""
+    wallet["methods"] = [_card("pm_1")]
+
+    wallet["module"].update("u1", "pm_1", name="  ", address={"line2": "  ", "city": None})
+
+    _pm_id, payload = wallet["updated"][-1]
+    assert payload["billing_details"] == {"name": "", "address": {"line2": ""}}
+
+
 def test_an_empty_edit_is_refused_rather_than_sent(app, wallet):
     from billing.services.payment_methods import PaymentMethodError
 

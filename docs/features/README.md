@@ -12,7 +12,7 @@ codebase; the plan and Minty's own `docs/features/` are linked, not repeated.
 | Feature | Document |
 |---|---|
 | Verifying the module token, person- vs company-scoped routes (`SelfBearerAuth` / `EntityBearerAuth` / `BearerAuth`), the permission port, what this service never does | [authentication.md](authentication.md) — Minty's `docs/features/authentication.md` has the system-wide picture |
-| The API route by route (the fifteen portal routes, the page model + nineteen actions, the notice, the nine wizard routes + `trials/start`), the dark contract, the thirteen tables and the one write outside them, the daily pass and its scheduler, Stripe and mail, configuration, tests, and which step fills what | [subscriptions-api.md](subscriptions-api.md) — Minty's `docs/features/modules-and-subscriptions.md` describes the Flask original this is a 1:1 port of |
+| The API route by route (the portal's twenty paths — Flask's fifteen plus `transfer/seen` and the billing accounts, the page model + nineteen actions, the notice, the nine wizard routes + `trials/start`), the dark contract, the thirteen tables and the one write outside them, the daily pass and its scheduler, Stripe and mail, configuration, tests, and which step fills what | [subscriptions-api.md](subscriptions-api.md) — Minty's `docs/features/modules-and-subscriptions.md` describes the Flask original this is a 1:1 port of |
 
 The three rules the service is built on (verifies never mints · no migrations, `managed =
 False` · single Stripe writer), the dark contract and the in-process scheduler's known costs

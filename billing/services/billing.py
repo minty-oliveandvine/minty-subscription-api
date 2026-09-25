@@ -197,6 +197,16 @@ def prorate(amount: int, period: Period, at: datetime) -> int:
     return _round_money(amount * period.remaining_seconds(at) / total)
 
 
+def paid_from(period: Period, at: datetime) -> datetime:
+    """The instant a line starting at ``at`` begins paying: ``at`` held inside ``period``.
+
+    The same clamp ``prorate`` applies — at or before the start is the whole period, at or
+    after the end is nothing — so the days a line records are the days it was charged for.
+    """
+    at = _require_aware("at", at)
+    return min(max(at, period.start), period.end)
+
+
 @dataclass(frozen=True)
 class Adjustment:
     """What a mid-period price change costs: a credit, a charge, and the net.
@@ -437,6 +447,13 @@ class Line:
     ``entity_id`` travels with the line so a payment processor's own metadata is never
     needed to work out who a charge belongs to — the mistake that made Stripe's invoices
     unreadable, where every line inherited the subscription's entity.
+
+    ``period_start`` / ``period_end`` / ``unit_amount`` say what the line PAID FOR: the
+    days, half-open like ``Period``, and the price per period they were charged at —
+    positive on a credit too, ``amount`` carries the sign. Set by whatever priced the line,
+    because only that knows, and recorded on ``subscription_invoice_line`` so a breakdown
+    never has to work them out again. None where there is no single answer (see
+    ``checkout.pending_extension_terms``).
     """
 
     entity_id: str
@@ -445,6 +462,9 @@ class Line:
     amount: int
     kind: str = "full"
     at: datetime | None = None
+    period_start: datetime | None = None
+    period_end: datetime | None = None
+    unit_amount: int | None = None
 
     @property
     def description(self) -> str:
@@ -481,7 +501,8 @@ def renewal_invoice(entries, period: Period, currency: str) -> Invoice:
     version, where two entities on the same bundle produced two identical lines.
     """
     lines = tuple(
-        Line(entity_id=eid, entity_name=name, product_name=product, amount=amount)
+        Line(entity_id=eid, entity_name=name, product_name=product, amount=amount,
+             period_start=period.start, period_end=period.end, unit_amount=amount)
         for eid, name, product, amount in entries
     )
     return Invoice(currency=currency, period=period, lines=lines)
@@ -499,7 +520,8 @@ def join_invoice(entity_id: str, entity_name: str, product_name: str, amount: in
         period=period,
         lines=(
             Line(entity_id, entity_name, product_name, adjustment.charge,
-                 kind="remaining", at=at),
+                 kind="remaining", at=at, period_start=paid_from(period, at),
+                 period_end=period.end, unit_amount=amount),
         ),
     )
 
@@ -513,14 +535,17 @@ def change_invoice(entity_id: str, entity_name: str, old_product: str, new_produ
     cannot reconcile it against the 280.00 they paid three weeks ago.
     """
     adjustment = change_line(old_amount, new_amount, period, at)
+    start = paid_from(period, at)
     return Invoice(
         currency=currency,
         period=period,
         lines=(
             Line(entity_id, entity_name, old_product, adjustment.credit,
-                 kind="unused", at=at),
+                 kind="unused", at=at, period_start=start, period_end=period.end,
+                 unit_amount=old_amount),
             Line(entity_id, entity_name, new_product, adjustment.charge,
-                 kind="remaining", at=at),
+                 kind="remaining", at=at, period_start=start, period_end=period.end,
+                 unit_amount=new_amount),
         ),
     )
 
@@ -541,6 +566,7 @@ def cancellation_invoice(entity_id: str, entity_name: str, product_name: str,
         period=period,
         lines=(
             Line(entity_id, entity_name, f"{product_name} (access extension)", amount,
-                 kind="remaining", at=period.end),
+                 kind="remaining", at=period.end, period_start=period.end,
+                 period_end=_require_aware("access_end", access_end), unit_amount=marginal),
         ),
     )

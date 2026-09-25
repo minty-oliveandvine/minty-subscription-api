@@ -101,6 +101,21 @@ def test_a_month_end_anchor_clamps_the_way_the_renewal_does(app, monkeypatch):
     assert modules.get_next_payment_date("e1") == "31 Mar 2026"
 
 
+def test_the_settings_card_and_the_payer_portal_name_the_same_day(app, monkeypatch):
+    """Both project the PAYER's cycle, through the one helper — two copies of the
+    arithmetic is how the card and the portal would come to disagree."""
+    from billing.services import portal
+
+    modules = _wire(
+        app, monkeypatch,
+        anchor=datetime(2026, 1, 31, 13, tzinfo=UTC),
+        now=datetime(2026, 2, 10, 9, tzinfo=UTC),
+    )
+
+    assert modules.get_next_payment_date("e1") == "28 Feb 2026"
+    assert portal._fmt(portal.next_billing_at("u1")) == "28 Feb 2026"
+
+
 def test_a_trial_has_no_date_to_name(app, monkeypatch):
     """No anchor means nothing has ever been charged, so there is no cycle to project.
     The card shows "To Be Decided" — inventing the trial's end date here would name a day

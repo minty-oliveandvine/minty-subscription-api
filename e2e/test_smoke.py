@@ -94,6 +94,21 @@ class TestLive:
         assert isinstance(body["entities"], list) and "total" in body
         assert res.headers.get("Access-Control-Allow-Origin") == WEB_ORIGIN
 
+    def test_the_billing_accounts_answer_for_the_payer(self, base_url, credentials):
+        # 08-A / 08-B's read, live: the accounts and the one payer-wide next billing date.
+        # Read only - no Stripe write happens here (the wallet read is a Stripe LIST).
+        token = mint(credentials["secret"], credentials["user_id"])
+        res = requests.get(
+            f"{base_url}/api/me/billing/accounts?countries=1",
+            headers={"Authorization": f"Bearer {token}", "Origin": WEB_ORIGIN},
+            timeout=20,
+        )
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert isinstance(body["accounts"], list) and isinstance(body["countries"], list)
+        assert "next_billing" in body and "payer" in body
+        assert res.headers.get("Access-Control-Allow-Origin") == WEB_ORIGIN
+
     def test_module_page_needs_a_company_the_caller_belongs_to(self, base_url, credentials):
         if not credentials["entity_id"]:
             pytest.skip("set E2E_MINTY_ENTITY for the module-page check")

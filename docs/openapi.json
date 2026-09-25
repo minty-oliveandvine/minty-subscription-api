@@ -244,6 +244,90 @@
         ]
       }
     },
+    "/api/me/billing/accounts": {
+      "get": {
+        "description": "``?countries=1`` adds what 08-C's address form needs and no other screen does: the\ncountry registry (the countries it offers) and Stripe's publishable key (it IS Stripe's\nown form, the AddressElement).",
+        "operationId": "billing_api_me_my_billing_accounts",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "SelfBearerAuth": []
+          }
+        ],
+        "summary": "The caller's billing accounts, oldest first",
+        "tags": [
+          "Payer portal"
+        ]
+      }
+    },
+    "/api/me/billing/accounts/default-card": {
+      "post": {
+        "description": "Body: ``{account, payment_method}``. From its next bill every company on the account\nis charged to this card.",
+        "operationId": "billing_api_me_my_billing_account_default_card",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "SelfBearerAuth": []
+          }
+        ],
+        "summary": "Switch the card a billing account charges",
+        "tags": [
+          "Payer portal"
+        ]
+      }
+    },
+    "/api/me/billing/accounts/move": {
+      "post": {
+        "description": "Body: ``{entity, account}``. Nothing is charged; the company's paid days travel with\nit. Answers the accounts plus ``moved`` (null when it was already there).",
+        "operationId": "billing_api_me_my_billing_account_move",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "SelfBearerAuth": []
+          }
+        ],
+        "summary": "Move a company to another billing account",
+        "tags": [
+          "Payer portal"
+        ]
+      }
+    },
+    "/api/me/billing/accounts/update": {
+      "post": {
+        "description": "Body: ``{account, billing_company?, billing_email?, address?, cardholder?}``. The\naddress - and the cardholder, the name Stripe's address form asks for with it - are the\naccount's charged card's billing details at Stripe (the account holds none).",
+        "operationId": "billing_api_me_my_billing_account_update",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "SelfBearerAuth": []
+          }
+        ],
+        "summary": "Rename a billing account, or change its address",
+        "tags": [
+          "Payer portal"
+        ]
+      }
+    },
     "/api/me/billing/entity-payment-method": {
       "get": {
         "description": "``?entity=<id>`` -> the saved methods, plus ``nominated_id``.",
@@ -306,7 +390,7 @@
     },
     "/api/me/billing/payment-methods/confirm": {
       "post": {
-        "description": "Body: ``{setup_intent, make_default?}``. The intent is re-read from Stripe and refused\nunless it carries this caller's own ``metadata.user_id`` stamp. Idempotent.",
+        "description": "Body: ``{setup_intent, make_default?, billing_group_id?, billing_email?,\nbilling_company?}``. The intent is re-read from Stripe and refused unless it carries this\ncaller's own ``metadata.user_id`` stamp. Idempotent.\n\nThe account fields are the onboarding twin's: ``billing_group_id`` puts the card on one\nof the caller's accounts (08-B's \"Add payment method\"); a company and an email OPEN one\n(\"New billing account\"), and both are required to. Both are checked HERE, before the\nservice runs, because the service only reaches them after the card is attached at\nStripe - a refusal there would leave a card saved against no account.",
         "operationId": "billing_api_me_my_payment_method_confirm",
         "parameters": [],
         "responses": {
@@ -348,7 +432,7 @@
     },
     "/api/me/billing/payment-methods/remove": {
       "post": {
-        "description": "Body: ``{payment_method}``. Two 409s the page shows verbatim: the default cannot go\nwhile another method could take its place, and the last method cannot go at all while\nsomething is still billing forward.",
+        "description": "Body: ``{payment_method, account?}``. Two 409s the page shows verbatim: the default\ncannot go while another method could take its place, and the last method cannot go at\nall while something is still billing forward. ``account`` is the billing account whose\npage asked (08-B): its own charged card is refused in its words, and the Stripe\ncustomer's default is handed to its card rather than refused.",
         "operationId": "billing_api_me_my_payment_method_remove",
         "parameters": [],
         "responses": {
@@ -411,7 +495,7 @@
     },
     "/api/me/invoices": {
       "get": {
-        "description": "Query params: ``entity`` (narrow to one company), ``page``, ``per_page``. ``entity`` is a\nfilter, not a permission: the set is already fixed to ``payer_user_id`` from the token.",
+        "description": "Query params: ``entity`` (narrow to one company), ``account`` (to one billing\naccount - 08-B), ``page``, ``per_page``. Both are filters, not permissions: the set is\nalready fixed to ``payer_user_id`` from the token, and someone else's account matches\nnothing.",
         "operationId": "billing_api_me_my_invoices",
         "parameters": [],
         "responses": {
@@ -425,6 +509,37 @@
           }
         ],
         "summary": "The caller's invoices, newest first",
+        "tags": [
+          "Payer portal"
+        ]
+      }
+    },
+    "/api/me/invoices/{invoice_id}/breakdown": {
+      "get": {
+        "description": "08-B's \"Billing Breakdown · Download csv\": a row per company line - the subscription,\nits monthly rate, the days it paid for and what was charged - which the web writes as the\nCSV. An invoice that is not the caller's, or no invoice at all, is 404.",
+        "operationId": "billing_api_me_my_invoice_breakdown",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "invoice_id",
+            "required": true,
+            "schema": {
+              "title": "Invoice Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "SelfBearerAuth": []
+          }
+        ],
+        "summary": "One invoice, company by company - the billing breakdown",
         "tags": [
           "Payer portal"
         ]

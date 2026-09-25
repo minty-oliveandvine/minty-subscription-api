@@ -1,0 +1,290 @@
+"""The payer portal's billing accounts — the writes behind 08-A, 08-B and 08-C.
+
+A BILLING ACCOUNT is a ``payer_billing_group`` row: the name it bills under ("Bill to"), a
+billing email, the cards on it (``billing_account_payment_method``), the ONE card it
+charges, the companies it pays for (``entity_billing_group``) and its own dunning clock.
+Payers open them with a new card (``payment_methods.confirm_setup`` carrying a company and
+an email — the "New billing account" form); here they switch the card one charges, rename
+it, give it an address, and move a company from one account to another.
+
+EVERY WRITE ANSWERS ``portal.build_billing_accounts``, so the page redraws from what the
+server holds rather than patching itself — the rule the wallet routes already follow.
+
+Three things are deliberately NOT here:
+
+* the Stripe customer's identity. One customer per payer carries one name and email
+  (``checkout._payer_identity`` — the oldest named account's), so renaming an account
+  changes the portal, not the hosted invoice; ``01_schema_rebased.sql`` item 17 records
+  that as owed;
+* a column for the address. The account's address IS the billing address of the card it
+  charges (the user's decision, 2026-09-25), so ``update`` writes it to that card at
+  Stripe;
+* any charge. Moving a company prices nothing and takes nothing: its paid days travel
+  with it (``store._carry_paid_days``) and its next bill comes from the account it lands
+  on.
+"""
+
+from __future__ import annotations
+
+import re
+
+from billing.services import store as sub_store
+from billing.services._log import logger
+from billing.services.payment_methods import (
+    ADDRESS_KEYS,
+    PaymentMethodError,
+    _owned,
+    _payer_of,
+    account_of,
+    write_billing_address,
+)
+
+#: One "@", something either side, a dot in the domain — onboarding's ``EMAIL_RE``
+#: (``onboarding/lib/validation.ts``), deliberately shallow: these addresses authenticate
+#: nobody, and the only real proof one works is sending to it.
+EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+
+#: ``payer_billing_group.billing_email`` / ``billing_company`` are VARCHAR(255).
+FIELD_MAX = 255
+
+# The copy is onboarding's 01-D form's, word for word: the same fields in two apps should
+# not be explained two ways.
+COMPANY_REQUIRED = "Enter the company name to invoice."
+EMAIL_REQUIRED = "Enter the email address invoices should go to."
+EMAIL_INVALID = "That email address doesn't look right."
+TOO_LONG = "Keep that under 255 characters."
+
+
+def validate_identity(email, company, *, require_both: bool) -> tuple[str | None, str | None]:
+    """``(email, company)`` trimmed, or a 422 in the form's own words.
+
+    ``require_both`` is the rule for OPENING an account (01-D's): both are its identity.
+    Otherwise a field left out (None) is left alone, a blank company is refused — it is the
+    account's name, and a blank one would print as an empty "Bill to" — and a blank email
+    clears it.
+    """
+    company = None if company is None else str(company).strip()
+    email = None if email is None else str(email).strip()
+
+    if require_both or company is not None:
+        if not company:
+            raise PaymentMethodError(COMPANY_REQUIRED, status=422)
+        if len(company) > FIELD_MAX:
+            raise PaymentMethodError(TOO_LONG, status=422)
+    if require_both and not email:
+        raise PaymentMethodError(EMAIL_REQUIRED, status=422)
+    if email:
+        if not EMAIL_RE.match(email):
+            raise PaymentMethodError(EMAIL_INVALID, status=422)
+        if len(email) > FIELD_MAX:
+            raise PaymentMethodError(TOO_LONG, status=422)
+    return email, company
+
+
+def _accounts(user_id) -> dict:
+    from billing.services import portal
+
+    return portal.build_billing_accounts(user_id)
+
+
+def _payer(user_id) -> dict:
+    from billing.services import portal
+    from shared_models.models import User
+
+    return portal._person(sub_store._by_pk(User, user_id), user_id)
+
+
+def _name(group, payer: dict) -> str:
+    from billing.services import portal
+
+    return portal.account_name(group, payer)
+
+
+def _company_name(entity_id) -> str:
+    from shared_models.models import Entity
+
+    entity = sub_store._by_pk(Entity, entity_id)
+    return ((getattr(entity, "name", None) or "").strip()) or "That company"
+
+
+# --- the card an account charges -------------------------------------------------------
+
+
+def set_default_card(user_id, account_id, payment_method_id) -> dict:
+    """Make one card on this account the card it CHARGES (08-B "Set as default", 08-N).
+
+    WRITES MONEY FORWARD: from its next bill every company on the account is charged to
+    this card, and a retry of a failed bill names it too (dunning passes the account's
+    current card). Both halves of the pair move together (``store.set_group_default_card``).
+
+    The Stripe customer's default is left alone. It decides what card pickers offer first,
+    which is a payer-wide question this page is not asking; ``payment_methods.remove`` hands
+    it over when the card holding it is removed from an account's page.
+    """
+    _owned(user_id, payment_method_id)
+    account = account_of(user_id, account_id)
+    if not sub_store.card_on_group(account.id, payment_method_id):
+        raise PaymentMethodError("That card isn't on this billing account.", status=404)
+    if account.stripe_payment_method_id != payment_method_id:
+        sub_store.set_group_default_card(account.id, payment_method_id)
+    return _accounts(user_id)
+
+
+# --- the account's name, email and address (08-C) ----------------------------------------
+
+
+def _valid_address(address) -> dict:
+    """The address as Stripe will take it, or a 422. Line 1 and a registered country are
+    required; every other key is optional and a blank one clears."""
+    from shared_models.models import CountryInfo
+
+    if not isinstance(address, dict):
+        raise PaymentMethodError("Enter the address to bill.", status=422)
+    cleaned = {
+        key: str(address.get(key)).strip()
+        for key in ADDRESS_KEYS
+        if address.get(key) is not None
+    }
+    if not cleaned.get("line1"):
+        raise PaymentMethodError("Enter the first line of the address.", status=422)
+    country = (cleaned.get("country") or "").upper()
+    if not country or not CountryInfo.objects.filter(country_code=country).exists():
+        raise PaymentMethodError("Choose a country from the list.", status=422)
+    cleaned["country"] = country
+    return cleaned
+
+
+def _valid_cardholder(name) -> str:
+    """The name on the charged card, trimmed, or a 422. A blank clears it, as Stripe's ""
+    does; the form never sends one (Stripe's address form requires the name)."""
+    name = str(name).strip()
+    if len(name) > FIELD_MAX:
+        raise PaymentMethodError(TOO_LONG, status=422)
+    return name
+
+
+def update(
+    user_id,
+    account_id,
+    *,
+    billing_company=None,
+    billing_email=None,
+    address=None,
+    cardholder=None,
+) -> dict:
+    """Rename an account and/or change its address (08-C "Save billing account").
+
+    ``cardholder`` is the name on the card it charges: 08-C's address form is Stripe's own
+    (the AddressElement), which asks for the name with the address, so both go on that card
+    in one write.
+
+    EVERYTHING IS VALIDATED BEFORE ANYTHING IS WRITTEN, then Stripe first. The address
+    lives at Stripe (on the card the account charges) and Stripe is the write that fails —
+    a network error, a refused field — so failing there leaves nothing changed. The local
+    rename almost never fails; when it does after Stripe succeeded, the payer is told
+    exactly that, and both halves are safe to repeat.
+    """
+    account = account_of(user_id, account_id)
+    email, company = validate_identity(billing_email, billing_company, require_both=False)
+    cleaned = _valid_address(address) if address is not None else None
+    holder = _valid_cardholder(cardholder) if cardholder is not None else None
+    if company is None and email is None and cleaned is None and holder is None:
+        raise PaymentMethodError("There was nothing to change.", status=422)
+
+    if cleaned is not None or holder is not None:
+        try:
+            _owned(user_id, account.stripe_payment_method_id)
+        except PaymentMethodError as exc:
+            raise PaymentMethodError(
+                "This billing account has no card to keep its address on. "
+                "Add a card to it first.",
+                status=409,
+            ) from exc
+        write_billing_address(user_id, account.stripe_payment_method_id, cleaned, name=holder)
+
+    if company is not None or email is not None:
+        try:
+            sub_store.set_account_identity(
+                account.id, billing_email=email, billing_company=company
+            )
+        except Exception as exc:
+            logger.exception("billing accounts: could not rename account {}", account.id)
+            if cleaned is not None or holder is not None:
+                raise PaymentMethodError(
+                    "Your address was saved, but the company name and email weren't. "
+                    "Please try again.",
+                    status=500,
+                ) from exc
+            raise
+    return _accounts(user_id)
+
+
+# --- moving a company between accounts ("Change billing account") ------------------------
+
+
+def move_company(user_id, entity_id, account_id) -> dict:
+    """Put one company on another of the payer's accounts. Returns the accounts, plus
+    ``moved`` — what went where, or None when it was already there.
+
+    Refused, each in words that name the fix:
+
+    * a company on NO account — there is nothing to move; it gets one when its billing is
+      first confirmed (the module page, onboarding), and consent is not this screen's;
+    * a PAST-DUE company. Its debt is an invoice the account it is on raised: the retries,
+      "Pay now" (``dunning.retry_now`` settles the account the company is on NOW) and the
+      recovery that restores its access (``end_group_dunning`` → the account's companies)
+      all follow the account. Moved, they would chase the wrong one and the company would
+      stay past due with nothing able to clear it;
+    * a target account IN DUNNING — the company's access would be measured against a date
+      that has stopped, and it would join a collection already failing;
+    * a target account whose card Stripe no longer holds — its next bill could not be paid.
+    """
+    payer = _payer_of(user_id, entity_id)
+    target = account_of(user_id, account_id)
+    nomination = sub_store.nomination_for_entity(entity_id, payer)
+    company = _company_name(entity_id)
+    if nomination is None:
+        raise PaymentMethodError(
+            f"{company} isn't on a billing account yet, so there's nothing to move.",
+            status=409,
+        )
+    if str(nomination.billing_group_id) == str(target.id):
+        return {**_accounts(user_id), "moved": None}
+
+    person = _payer(user_id)
+    leaving = sub_store.billing_group(nomination.billing_group_id)
+    if sub_store.entity_is_past_due(entity_id, payer):
+        raise PaymentMethodError(
+            f"{company}'s last payment on {_name(leaving, person)} didn't go through. "
+            "Settle it there first, then move the company.",
+            status=409,
+        )
+    if target.dunning_started_at is not None:
+        raise PaymentMethodError(
+            f"A payment on {_name(target, person)} didn't go through. Settle it before "
+            "moving a company onto it.",
+            status=409,
+        )
+    try:
+        _owned(user_id, target.stripe_payment_method_id)
+    except PaymentMethodError as exc:
+        raise PaymentMethodError(
+            f"{_name(target, person)} has no card it can charge. Add a card to it first.",
+            status=409,
+        ) from exc
+
+    sub_store.nominate_group_for_entity(entity_id, payer, target.id, source="moved")
+    logger.info(
+        "billing accounts: payer {} moved {} from account {} to {}",
+        user_id, entity_id, getattr(leaving, "id", None), target.id,
+    )
+    payload = _accounts(user_id)
+    payload["moved"] = {
+        "entity_id": str(entity_id),
+        "entity_name": company,
+        "from_account": (
+            {"id": str(leaving.id), "name": _name(leaving, person)} if leaving else None
+        ),
+        "to_account": {"id": str(target.id), "name": _name(target, person)},
+    }
+    return payload

@@ -42,8 +42,17 @@ FLASK_PORTAL_PATHS = {
 #:
 #: ``transfer/seen`` records that the payer who offered a handover has been shown how it
 #: ended (07-I / A-07 / A-08). Flask had no such screen and no such column.
+#:
+#: The four ``billing/accounts`` routes are the portal's billing accounts (08-A / 08-B /
+#: 08-C): Flask's portal listed cards, never accounts. ``invoices/{invoice_id}/breakdown`` is
+#: 08-B's "Billing Breakdown · Download csv": Flask's invoice tab had no breakdown.
 ADDED_PORTAL_PATHS = {
     "/subscriptions/transfer/seen",
+    "/billing/accounts",
+    "/billing/accounts/update",
+    "/billing/accounts/default-card",
+    "/billing/accounts/move",
+    "/invoices/{invoice_id}/breakdown",
 }
 
 #: The nineteen ``POST /entity/settings/module/<org_id>/<action>`` routes of Flask's
@@ -71,7 +80,8 @@ def test_the_portal_carries_flasks_fifteen_paths():
     assert served == FLASK_PORTAL_PATHS | ADDED_PORTAL_PATHS
     # Every one of Flask's is still here: an addition must never be a replacement.
     assert FLASK_PORTAL_PATHS <= served
-    assert len(ME_ROUTES) == 17
+    # Flask's sixteen operations plus the six added paths (one operation each).
+    assert len(ME_ROUTES) == 22
     assert ("GET", "/billing/entity-payment-method") in ME_ROUTES
     assert ("POST", "/billing/entity-payment-method") in ME_ROUTES
 

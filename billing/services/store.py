@@ -14,9 +14,10 @@ THIS module rather than a database.
 Each mutating helper is its own unit of work, mirroring Flask's
 ``entity.services.modules.set_entity_module``: under Django's autocommit every ``save()``
 and ``update()`` is committed as it happens, which is what Flask's per-helper
-``db.session.commit()`` gave. Three helpers group several writes into one transaction on
-purpose - ``set_group_default_card``, ``create_billing_account`` and
+``db.session.commit()`` gave. Four helpers group several writes into one transaction on
+purpose - ``set_group_default_card``, ``create_billing_account``,
 ``nominate_card_for_entity`` (Flask staged their parts with ``flush()`` and committed once)
+and ``nominate_group_for_entity``, the portal's account-keyed move, which Flask never had
 - and ``reserve_invoice`` claims its idempotency key inside a savepoint so the unique
 index's refusal poisons nothing around it.
 
@@ -694,12 +695,17 @@ def card_for_entity(entity_id, payer_user_id=None) -> str | None:
 def nominate_card_for_entity(
     entity_id, payer_user_id, payment_method_id, source: str = "chosen"
 ) -> PayerBillingGroup:
-    """Put this company on this card. Creates the group if the payer has none on it.
+    """Put this company on this card. Creates an account if the payer has none charging it.
 
-    Find-or-create rather than always-create: the group IS the card, so nominating a
-    second company onto a card the payer already bills on must join the existing cycle,
-    not open a second one against the same ``pm_...`` (which the unique index refuses
-    anyway).
+    Find-or-create rather than always-create: nominating a second company onto a card the
+    payer already bills on must join that account's cycle, not open a second one against
+    the same ``pm_...``. The lookup is by the card an account CHARGES — a card that is only
+    a spare on some account's shelf opens a new, unnamed account of its own, because a
+    nomination keyed by card has to charge that card.
+
+    Since ``v1a01_billing_account`` two accounts may charge one card, so "the account on
+    this card" can have several answers; ``_group_for_card`` takes the oldest. The
+    account-keyed twin, ``nominate_group_for_entity``, has no such question to answer.
 
     A company already nominated is REPOINTED — the row is updated, never duplicated. The
     group it leaves is kept even when it empties: it holds the ``paid_through`` for
@@ -710,43 +716,106 @@ def nominate_card_for_entity(
 
     payer = str(payer_user_id)
     with transaction.atomic():
-        group = _one_or_none(
-            PayerBillingGroup.objects.filter(
-                payer_user_id=payer, stripe_payment_method_id=str(payment_method_id)
-            )
-        )
-        if group is None:
-            group = PayerBillingGroup(
-                id=_uuid(), payer_user_id=payer,
-                stripe_payment_method_id=str(payment_method_id),
-            )
-            # The account before the nomination, which carries ``billing_group_id`` as a
-            # plain value the foreign key has to find.
-            group.save(force_insert=True)
-            # The shelf has to be opened with the account. An account whose card list is
-            # empty while it charges a card is exactly the divergence
-            # ``billing_account_payment_method`` exists to prevent, and this is the one
-            # path that creates an account without going through ``create_billing_account``.
-            add_card_to_group(group.id, payment_method_id, make_default=True)
-
-        nomination = nomination_for_entity(entity_id, payer)
-        if nomination is None:
-            EntityBillingGroup(
-                id=_uuid(), entity_id=str(entity_id), payer_user_id=payer,
-                billing_group_id=group.id, source=str(source)[:20],
-            ).save(force_insert=True)
-        else:
-            leaving = billing_group(nomination.billing_group_id)
-            nomination.billing_group_id = group.id
-            nomination.source = str(source)[:20]
-            nomination.save(update_fields=["billing_group_id", "source"])
-            _carry_paid_days(entity_id, leaving, group)
+        group = _group_for_card(payer, payment_method_id)
+        _repoint(entity_id, payer, group, source)
     group.refresh_from_db()
     logger.info(
         "billing: entity {} is now billed on {} (payer {})",
         entity_id, payment_method_id, payer,
     )
     return group
+
+
+def nominate_group_for_entity(
+    entity_id, payer_user_id, group_id, source: str = "moved"
+) -> PayerBillingGroup:
+    """Put this company on this billing ACCOUNT — the portal's "Change billing account".
+
+    The account-keyed twin of ``nominate_card_for_entity``. The payer names an account, not
+    a card, so there is nothing to find or create: an account that is not this payer's is
+    refused outright rather than opened. Repointing and carrying the paid days are the
+    card path's own (``_repoint``), so a company lands with the same dates whichever way it
+    was moved.
+
+    Nothing is charged here and consent is not touched: "you may bill me for this company"
+    was given once, and a payer choosing which of their own accounts pays is not
+    re-authorising it (the same rule ``payment_methods.set_for_entity`` states).
+    """
+    if not entity_id or not payer_user_id or not group_id:
+        raise ValueError("entity, payer and billing account are all required")
+
+    payer = str(payer_user_id)
+    group = billing_group(group_id)
+    if group is None or str(group.payer_user_id) != payer:
+        raise ValueError(f"no billing account {group_id} for payer {payer}")
+    with transaction.atomic():
+        _repoint(entity_id, payer, group, source)
+    group.refresh_from_db()
+    logger.info(
+        "billing: entity {} is now billed by account {} (payer {})",
+        entity_id, group.id, payer,
+    )
+    return group
+
+
+def _group_for_card(payer: str, payment_method_id) -> PayerBillingGroup:
+    """The account this payer bills on ``payment_method_id``, opened if there is none.
+
+    OLDEST FIRST when several charge the card. ``create_billing_account`` always creates,
+    so two accounts on one card is a legal state — and the ``_one_or_none`` this replaced
+    answered it with ``MultipleObjectsReturned``: every card-keyed nomination for that
+    payer (set-for-entity, consent, handover accept) became a 500. The oldest wins for the
+    reason ``billing_groups_for_payer`` is oldest-first: it held the card before any second
+    account existed. Logged, because the payer may have meant the other one.
+
+    Runs inside the caller's transaction.
+    """
+    matches = list(
+        PayerBillingGroup.objects.filter(
+            payer_user_id=payer, stripe_payment_method_id=str(payment_method_id)
+        ).order_by("created_at", "id")[:2]
+    )
+    if len(matches) > 1:
+        logger.warning(
+            "billing: payer {} has several accounts charging {}; nominating onto the "
+            "oldest, {}",
+            payer, payment_method_id, matches[0].id,
+        )
+    if matches:
+        return matches[0]
+
+    group = PayerBillingGroup(
+        id=_uuid(), payer_user_id=payer, stripe_payment_method_id=str(payment_method_id),
+    )
+    # The account before the nomination, which carries ``billing_group_id`` as a plain
+    # value the foreign key has to find.
+    group.save(force_insert=True)
+    # The shelf has to be opened with the account. An account whose card list is empty
+    # while it charges a card is exactly the divergence ``billing_account_payment_method``
+    # exists to prevent, and this is the one path that creates an account without going
+    # through ``create_billing_account``.
+    add_card_to_group(group.id, payment_method_id, make_default=True)
+    return group
+
+
+def _repoint(entity_id, payer: str, group: PayerBillingGroup, source: str) -> None:
+    """Point this company's nomination at ``group``, carrying its paid days if it moved.
+
+    Shared by both nominations so a company moved by card and one moved by account land in
+    the same state. Runs inside the caller's transaction.
+    """
+    nomination = nomination_for_entity(entity_id, payer)
+    if nomination is None:
+        EntityBillingGroup(
+            id=_uuid(), entity_id=str(entity_id), payer_user_id=payer,
+            billing_group_id=group.id, source=str(source)[:20],
+        ).save(force_insert=True)
+        return
+    leaving = billing_group(nomination.billing_group_id)
+    nomination.billing_group_id = group.id
+    nomination.source = str(source)[:20]
+    nomination.save(update_fields=["billing_group_id", "source"])
+    _carry_paid_days(entity_id, leaving, group)
 
 
 def _carry_paid_days(entity_id, leaving, joining) -> None:
@@ -759,10 +828,17 @@ def _carry_paid_days(entity_id, leaving, joining) -> None:
       outright, so the company would simply never be billed again — it keeps running,
       silently, for nothing. Seeded from the card it left, so the new one picks the cycle
       up exactly where the old one stopped.
-    * THE NEW CARD IS BEHIND the days already bought. Its next renewal would charge for a
-      period the old card has already collected. ``billed_through`` is the claim that
-      suppresses exactly that — the same mechanism a handover uses, and honoured by the
-      same ``renewals.entities_covered_into``.
+    * THE NEW CARD IS BEHIND the days already bought, and still pays for other companies.
+      Its next renewal would charge for a period the old card has already collected.
+      ``billed_through`` is the claim that suppresses exactly that — the same mechanism a
+      handover uses, and honoured by the same ``renewals.entities_covered_into``.
+    * THE NEW CARD IS BEHIND AND IDLE — nothing else on it is still paid for (no other
+      company in a phase whose access reads the account's ``paid_through``). This is the
+      account a payer emptied and is now moving a company back onto: ``due_renewals``
+      stopped advancing it when its last company left, and ACCESS is measured against
+      its date (``paid_through_for_entity``), not against the claim below — so the
+      company would lose access at the next sweep for days it had paid. The account takes
+      the cycle over exactly as the no-cycle case does, forward only.
 
     The remaining case, a new card paid FURTHER ahead than the company was, is left as
     is: the company is covered to a date its own money did not reach, which is a handful
@@ -771,7 +847,9 @@ def _carry_paid_days(entity_id, leaving, joining) -> None:
 
     Never raises and never blocks the move. A card change that failed because of this
     would leave a company pointing at a card the payer did not choose, which is worse
-    than a date that has to be corrected.
+    than a date that has to be corrected. The writes run in their own SAVEPOINT because
+    every caller holds a transaction open around this: on Postgres a failed statement
+    swallowed without one leaves that transaction unusable, and the move fails anyway.
     """
     if leaving is None or joining is None or leaving.id == joining.id:
         return
@@ -783,7 +861,8 @@ def _carry_paid_days(entity_id, leaving, joining) -> None:
     try:
         if joining.paid_through is None:
             joining.paid_through = bought
-            joining.save(update_fields=["paid_through"])
+            with transaction.atomic():
+                joining.save(update_fields=["paid_through"])
             logger.info(
                 "billing: group {} takes over the cycle at {} for entity {}",
                 joining.id, bought, entity_id,
@@ -794,23 +873,55 @@ def _carry_paid_days(entity_id, leaving, joining) -> None:
             joined = joined.replace(tzinfo=UTC)
         if joined >= bought:
             return
-        # FORWARD-ONLY, enforced in the WHERE and not trusted from here, and on
-        # billing-forward rows only — a claim on a trial row is inert until it converts
-        # and then silently suppresses renewals nobody chose to skip.
-        EntityModuleSubscription.objects.filter(
-            Q(billed_through__isnull=True) | Q(billed_through__lt=bought),
-            entity_id=str(entity_id),
-            phase__in=(PHASE_ACTIVE, PHASE_PAST_DUE),
-        ).update(billed_through=bought, updated_at=Now())
-        logger.info(
-            "billing: entity {} carries days paid to {} onto group {}",
-            entity_id, bought, joining.id,
-        )
+        with transaction.atomic():
+            idle = not _pays_for_others(joining, entity_id)
+            if idle:
+                # Forward-only in the WHERE as well, like ``set_group_paid_through``.
+                PayerBillingGroup.objects.filter(
+                    pk=joining.id, paid_through__lt=bought
+                ).update(paid_through=bought, updated_at=Now())
+            else:
+                # FORWARD-ONLY, enforced in the WHERE and not trusted from here, and on
+                # billing-forward rows only — a claim on a trial row is inert until it
+                # converts and then silently suppresses renewals nobody chose to skip.
+                EntityModuleSubscription.objects.filter(
+                    Q(billed_through__isnull=True) | Q(billed_through__lt=bought),
+                    entity_id=str(entity_id),
+                    phase__in=(PHASE_ACTIVE, PHASE_PAST_DUE),
+                ).update(billed_through=bought, updated_at=Now())
+        if idle:
+            joining.paid_through = bought
+            logger.info(
+                "billing: idle group {} takes over the cycle at {} for entity {}",
+                joining.id, bought, entity_id,
+            )
+        else:
+            logger.info(
+                "billing: entity {} carries days paid to {} onto group {}",
+                entity_id, bought, joining.id,
+            )
     except Exception:
         logger.exception(
             "billing: could not carry the paid days for entity {} onto group {}",
             entity_id, joining.id,
         )
+
+
+def _pays_for_others(group: PayerBillingGroup, entity_id) -> bool:
+    """Whether any OTHER company on ``group`` holds a module whose access reads the
+    account's ``paid_through`` — active, past due, or winding down on bought days.
+
+    Trials do not count: their access is their own ``trial_end``, and an account holding
+    only trials has collected nothing its date could be protecting.
+    """
+    others = entity_ids_in_group(group.id) - {str(entity_id)}
+    if not others:
+        return False
+    return EntityModuleSubscription.objects.filter(
+        entity_id__in=sorted(others),
+        payer_user_id=str(group.payer_user_id),
+        phase__in=(PHASE_ACTIVE, PHASE_PAST_DUE, PHASE_SCHEDULED_CANCEL),
+    ).exists()
 
 
 def clear_nomination_for_entity(entity_id, payer_user_id) -> bool:
@@ -838,6 +949,35 @@ def entity_ids_in_group(group_id) -> set[str]:
             billing_group_id=str(group_id)
         ).values_list("entity_id", flat=True)
     }
+
+
+def nominations_for_payer(user_id) -> list[EntityBillingGroup]:
+    """Every company this payer has put on one of their accounts — one read for a page.
+
+    Includes nominations kept as history (a company handed over keeps its row under the
+    old payer until ``clear_nomination_for_entity``); callers intersect with what the
+    payer still pays for.
+    """
+    if not user_id:
+        return []
+    return list(EntityBillingGroup.objects.filter(payer_user_id=str(user_id)))
+
+
+def card_on_group(group_id, payment_method_id) -> bool:
+    """Whether this card is on this account's shelf."""
+    if not group_id or not payment_method_id:
+        return False
+    return _shelf_row(group_id, payment_method_id) is not None
+
+
+def entity_is_past_due(entity_id, payer_user_id) -> bool:
+    """Whether any of this company's modules under this payer is past due — money owed on
+    an invoice the account it is on now raised."""
+    if not entity_id or not payer_user_id:
+        return False
+    return EntityModuleSubscription.objects.filter(
+        entity_id=str(entity_id), payer_user_id=str(payer_user_id), phase=PHASE_PAST_DUE
+    ).exists()
 
 
 def groups_with_billing() -> list[PayerBillingGroup]:
@@ -1431,6 +1571,10 @@ def reserve_invoice(
             amount=int(line.amount),
             kind=line.kind,
             at=line.at,
+            # What the line paid for, as whatever priced it said (``billing.Line``).
+            period_start=line.period_start,
+            period_end=line.period_end,
+            unit_amount=line.unit_amount,
         )
         for line in lines
     ]

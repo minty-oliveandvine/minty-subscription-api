@@ -1,9 +1,14 @@
-"""The payer portal: the fifteen ``/api/me/*`` routes of Flask's ``routes/portal.py``.
+"""The payer portal: the ``/api/me/*`` routes — Flask's ``routes/portal.py`` plus what this
+service added.
+
+Fifteen paths (sixteen operations) are Flask's, byte for byte: paths, methods, JSON and
+status codes, so minty-web's ``features/subscription/api/payerPortal.ts`` is
+billing-frontend's ``lib/payerPortal.ts`` with a new base URL. Five are this service's own
+(``billing/tests/test_contract.py::ADDED_PORTAL_PATHS``): ``subscriptions/transfer/seen``
+and the four ``billing/accounts`` routes behind the portal's billing accounts (08-A/B/C).
 
 Person-scoped (``SelfBearerAuth``): every row is found by the caller's ``user_id``, never
-by the company in the token or the ``X-Entity-Id`` header. Paths, methods, JSON and status
-codes are Flask's byte for byte, so minty-web's ``features/subscription/api/payerPortal.ts``
-is billing-frontend's ``lib/payerPortal.ts`` with a new base URL.
+by the company in the token or the ``X-Entity-Id`` header.
 
 WHAT FLASK'S VIEWS DID THAT IS NOT HERE, because the framework does it: the CORS headers on
 every answer (``corsheaders`` middleware), the OPTIONS preflight (same), the 404-while-dark
@@ -44,6 +49,7 @@ ROUTES = (
     ("POST", "/subscriptions/transfer/cancel"),
     ("GET", "/subscriptions/transfers"),
     ("GET", "/invoices"),
+    ("GET", "/invoices/{invoice_id}/breakdown"),  # 08-B's "Billing Breakdown" (Flask had none)
     ("GET", "/billing/payment-methods"),
     ("POST", "/billing/payment-methods/setup-intent"),
     ("POST", "/billing/payment-methods/confirm"),
@@ -52,6 +58,11 @@ ROUTES = (
     ("POST", "/billing/entity-payment-method"),
     ("POST", "/billing/payment-methods/update"),
     ("POST", "/billing/payment-methods/remove"),
+    # The billing accounts (Flask never had them): read, rename, switch card, move a company.
+    ("GET", "/billing/accounts"),
+    ("POST", "/billing/accounts/update"),
+    ("POST", "/billing/accounts/default-card"),
+    ("POST", "/billing/accounts/move"),
 )
 
 #: Flask forwards the invitation here: its bearer-authenticated onboarding invite endpoint
@@ -275,8 +286,10 @@ def my_transfers(request):
 
 @me_router.get("/invoices", summary="The caller's invoices, newest first")
 def my_invoices(request):
-    """Query params: ``entity`` (narrow to one company), ``page``, ``per_page``. ``entity`` is a
-    filter, not a permission: the set is already fixed to ``payer_user_id`` from the token."""
+    """Query params: ``entity`` (narrow to one company), ``account`` (to one billing
+    account - 08-B), ``page``, ``per_page``. Both are filters, not permissions: the set is
+    already fixed to ``payer_user_id`` from the token, and someone else's account matches
+    nothing."""
     from billing.services import portal
 
     uid = user_id(request)
@@ -284,12 +297,34 @@ def my_invoices(request):
         payload = portal.build_payer_invoices(
             uid,
             entity_id=(request.GET.get("entity") or "").strip() or None,
+            account_id=(request.GET.get("account") or "").strip() or None,
             page=int_arg(request, "page", 1),
             per_page=int_arg(request, "per_page", 10),
         )
     except Exception:
         logger.exception("payer invoices API failed for user {}", uid)
         return error("Could not load your invoices.", 500)
+    return respond(payload)
+
+
+@me_router.get(
+    "/invoices/{invoice_id}/breakdown",
+    summary="One invoice, company by company - the billing breakdown",
+)
+def my_invoice_breakdown(request, invoice_id: str):
+    """08-B's "Billing Breakdown · Download csv": a row per company line - the subscription,
+    its monthly rate, the days it paid for and what was charged - which the web writes as the
+    CSV. An invoice that is not the caller's, or no invoice at all, is 404."""
+    from billing.services import portal
+
+    uid = user_id(request)
+    try:
+        payload = portal.build_invoice_breakdown(uid, invoice_id)
+    except Exception:
+        logger.exception("invoice breakdown API failed for user {} invoice {}", uid, invoice_id)
+        return error("Could not load that invoice's breakdown.", 500)
+    if payload is None:
+        return error("That invoice couldn't be found.", 404)
     return respond(payload)
 
 
@@ -336,16 +371,39 @@ def my_payment_method_setup_intent(request):
 
 @me_router.post("/billing/payment-methods/confirm", summary="Adopt the card the browser confirmed")
 def my_payment_method_confirm(request):
-    """Body: ``{setup_intent, make_default?}``. The intent is re-read from Stripe and refused
-    unless it carries this caller's own ``metadata.user_id`` stamp. Idempotent."""
-    from billing.services import payment_methods
+    """Body: ``{setup_intent, make_default?, billing_group_id?, billing_email?,
+    billing_company?}``. The intent is re-read from Stripe and refused unless it carries this
+    caller's own ``metadata.user_id`` stamp. Idempotent.
+
+    The account fields are the onboarding twin's: ``billing_group_id`` puts the card on one
+    of the caller's accounts (08-B's "Add payment method"); a company and an email OPEN one
+    ("New billing account"), and both are required to. Both are checked HERE, before the
+    service runs, because the service only reaches them after the card is attached at
+    Stripe - a refusal there would leave a card saved against no account."""
+    from billing.services import billing_accounts, payment_methods
 
     payload = body(request)
     setup_intent = str(payload.get("setup_intent") or "").strip()
     make_default = bool(payload.get("make_default"))
-    return _payment_methods_call(
-        request, lambda uid: payment_methods.confirm_setup(uid, setup_intent, make_default=make_default)
-    )
+    billing_group_id = str(payload.get("billing_group_id") or "").strip() or None
+    billing_email = payload.get("billing_email")
+    billing_company = payload.get("billing_company")
+
+    def _confirm(uid):
+        email, company = billing_email, billing_company
+        if billing_group_id:
+            payment_methods.account_of(uid, billing_group_id)
+        elif email is not None or company is not None:
+            email, company = billing_accounts.validate_identity(
+                email, company, require_both=True
+            )
+        return payment_methods.confirm_setup(
+            uid, setup_intent, make_default=make_default,
+            billing_group_id=billing_group_id,
+            billing_email=email, billing_company=company,
+        )
+
+    return _payment_methods_call(request, _confirm)
 
 
 @me_router.post("/billing/payment-methods/default", summary="Make one saved method the account's main card")
@@ -406,10 +464,87 @@ def my_payment_method_update(request):
 
 @me_router.post("/billing/payment-methods/remove", summary="Detach a saved method")
 def my_payment_method_remove(request):
-    """Body: ``{payment_method}``. Two 409s the page shows verbatim: the default cannot go
-    while another method could take its place, and the last method cannot go at all while
-    something is still billing forward."""
+    """Body: ``{payment_method, account?}``. Two 409s the page shows verbatim: the default
+    cannot go while another method could take its place, and the last method cannot go at
+    all while something is still billing forward. ``account`` is the billing account whose
+    page asked (08-B): its own charged card is refused in its words, and the Stripe
+    customer's default is handed to its card rather than refused."""
     from billing.services import payment_methods
 
     payment_method = _pm_id(request)
-    return _payment_methods_call(request, lambda uid: payment_methods.remove(uid, payment_method))
+    account = str(body(request).get("account") or "").strip() or None
+    return _payment_methods_call(
+        request, lambda uid: payment_methods.remove(uid, payment_method, account_id=account)
+    )
+
+
+# --- Billing accounts (08-A / 08-B / 08-C) ----------------------------------------------
+#
+# A payer's named billing accounts: each one a name, an email, the cards on it, the card it
+# charges and the companies it pays for (``services.billing_accounts``). Every account id
+# arrives from the browser and is proven to be the caller's before anything reads or writes
+# it (``payment_methods.account_of``); every write answers the fresh accounts. Through the
+# wallet's shell, so the refusals reach the page as sentences (400 / 404 / 409 / 422).
+
+
+@me_router.get("/billing/accounts", summary="The caller's billing accounts, oldest first")
+def my_billing_accounts(request):
+    """``?countries=1`` adds what 08-C's address form needs and no other screen does: the
+    country registry (the countries it offers) and Stripe's publishable key (it IS Stripe's
+    own form, the AddressElement)."""
+    from billing.services import portal
+
+    countries = (request.GET.get("countries") or "").strip() in ("1", "true")
+    return _payment_methods_call(
+        request, lambda uid: portal.build_billing_accounts(uid, countries=countries)
+    )
+
+
+@me_router.post("/billing/accounts/update", summary="Rename a billing account, or change its address")
+def my_billing_account_update(request):
+    """Body: ``{account, billing_company?, billing_email?, address?, cardholder?}``. The
+    address - and the cardholder, the name Stripe's address form asks for with it - are the
+    account's charged card's billing details at Stripe (the account holds none)."""
+    from billing.services import billing_accounts
+
+    payload = body(request)
+    account = str(payload.get("account") or "").strip()
+    return _payment_methods_call(
+        request,
+        lambda uid: billing_accounts.update(
+            uid,
+            account,
+            billing_company=payload.get("billing_company"),
+            billing_email=payload.get("billing_email"),
+            address=payload.get("address"),
+            cardholder=payload.get("cardholder"),
+        ),
+    )
+
+
+@me_router.post("/billing/accounts/default-card", summary="Switch the card a billing account charges")
+def my_billing_account_default_card(request):
+    """Body: ``{account, payment_method}``. From its next bill every company on the account
+    is charged to this card."""
+    from billing.services import billing_accounts
+
+    payload = body(request)
+    account = str(payload.get("account") or "").strip()
+    payment_method = str(payload.get("payment_method") or "").strip()
+    return _payment_methods_call(
+        request, lambda uid: billing_accounts.set_default_card(uid, account, payment_method)
+    )
+
+
+@me_router.post("/billing/accounts/move", summary="Move a company to another billing account")
+def my_billing_account_move(request):
+    """Body: ``{entity, account}``. Nothing is charged; the company's paid days travel with
+    it. Answers the accounts plus ``moved`` (null when it was already there)."""
+    from billing.services import billing_accounts
+
+    payload = body(request)
+    entity_id = str(payload.get("entity") or "").strip()
+    account = str(payload.get("account") or "").strip()
+    return _payment_methods_call(
+        request, lambda uid: billing_accounts.move_company(uid, entity_id, account)
+    )

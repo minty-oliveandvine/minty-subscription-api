@@ -119,8 +119,30 @@ def entities_covered_past(user_id, period: Period) -> set[str]:
     return _covered_entities(user_id, period, through_end=True)
 
 
+def _trial_converts(entity_id, payer_user_id) -> bool:
+    """Whether this company's trial will become a paid subscription when it ends.
+
+    ``checkout._trial_will_convert``'s conjunction - the payer's customer, a card for THIS
+    company, and its consent - read from the DATABASE ALONE. That one falls back to a
+    Stripe search (and a write) when the customer mapping is missing, which a forecast on
+    a page read must never do; a lost mapping only makes the forecast leave the trial out,
+    and the trial-end job still recovers it. Any failure answers False, and is logged.
+    """
+    try:
+        return bool(
+            store.customer_mapping_for_user(payer_user_id)
+            and store.card_for_entity(entity_id, payer_user_id)
+            and store.has_billing_consent(entity_id, payer_user_id)
+        )
+    except Exception:
+        logger.exception(
+            "renewal forecast: could not tell whether entity {}'s trial converts", entity_id
+        )
+        return False
+
+
 def billable_codes_by_entity(
-    user_id, period: Period | None = None, *, group_id=None
+    user_id, period: Period | None = None, *, group_id=None, converting_by=None
 ) -> dict[str, set[str]]:
     """{entity_id: {module codes}} this payer will be charged for next period.
 
@@ -135,6 +157,13 @@ def billable_codes_by_entity(
     answers for the whole account, which no longer corresponds to a single document and
     is used only for "is there anything here at all".
 
+    ``converting_by`` is the FORECAST's question, never the runner's (which leaves it
+    None, and reads the phases as they are when it fires): a trial ending on or before it
+    that will convert (``_trial_converts``) counts as billing forward, because by then it
+    is active and the renewal bills it - priced with the company's other modules, as the
+    runner will price it. The settings panel forecasts the same way
+    (``panel._panel_next_invoice``: "a trial that converts before the invoice date").
+
     A company nominated onto NO card is excluded either way and logged. There is
     deliberately no fallback to the account default — see ``store.card_for_entity`` — so
     the alternative to skipping it is charging a card the payer never chose for it.
@@ -147,9 +176,22 @@ def billable_codes_by_entity(
     in_group = store.entity_ids_in_group(group_id) if group_id else None
     by_entity: dict[str, set[str]] = {}
     unnominated: set[str] = set()
+    converts: dict[str, bool] = {}
     for row in store.module_rows_for_payer(user_id):
         if not access.is_billing_forward(phase=row.phase):
-            continue
+            trial_end = getattr(row, "trial_end", None)
+            if (
+                converting_by is None
+                or row.phase != access.PHASE_TRIAL
+                or trial_end is None
+                or trial_end > converting_by
+            ):
+                continue
+            entity_key = str(row.entity_id)
+            if entity_key not in converts:
+                converts[entity_key] = _trial_converts(entity_key, user_id)
+            if not converts[entity_key]:
+                continue
         entity_id = str(row.entity_id)
         if entity_id in already:
             continue
@@ -169,8 +211,13 @@ def billable_codes_by_entity(
     return by_entity
 
 
-def build_renewal(user_id, period: Period, *, group_id=None) -> Invoice | None:
+def build_renewal(
+    user_id, period: Period, *, group_id=None, converting_by=None
+) -> Invoice | None:
     """What this CARD owes for ``period``, or None if it owes nothing.
+
+    ``converting_by`` makes it a FORECAST - see ``billable_codes_by_entity``. The runner
+    never passes it.
 
     Returns None rather than an empty invoice: a card whose companies have all lapsed or
     gone to trial has nothing to collect, and issuing a zero invoice would put a
@@ -188,7 +235,9 @@ def build_renewal(user_id, period: Period, *, group_id=None) -> Invoice | None:
     # NOT an early return on "nothing renewing": a payer whose last entity was
     # cancelled has no billable modules but may still owe a cancel-extension, and
     # bailing here would give those days away.
-    by_entity = billable_codes_by_entity(user_id, period, group_id=group_id)
+    by_entity = billable_codes_by_entity(
+        user_id, period, group_id=group_id, converting_by=converting_by
+    )
     names = _entity_names(by_entity.keys())
     entries: list[tuple[str, str, str, int]] = []
     currency = None
@@ -271,7 +320,13 @@ def _pending_extension_lines(
     the company was never nominated) rides the payer's FIRST group, so the charge is not
     silently lost. It is money already promised in exchange for access already granted;
     dropping it because a pointer is missing would give those days away.
+
+    Each line carries the days it pays for and the rate they were priced at
+    (``checkout.pending_extension_terms``), so the invoice keeps them after the row moves
+    on — a resume clears the module's access end.
     """
+    from billing.services import checkout
+
     if group_id:
         in_group = store.entity_ids_in_group(group_id)
         groups = store.billing_groups_for_payer(user_id)
@@ -285,6 +340,7 @@ def _pending_extension_lines(
                 if not (homeless and is_first_group):
                     continue
         name = names.get(entity_id) or _entity_names({entity_id}).get(entity_id, entity_id)
+        start, end, rate = checkout.pending_extension_terms(row)
         lines.append(
             Line(
                 entity_id=entity_id,
@@ -292,6 +348,9 @@ def _pending_extension_lines(
                 product_name=f"{_extension_product(row.function_code)} "
                              "(access after cancellation)",
                 amount=int(row.extension_amount or 0),
+                period_start=start,
+                period_end=end,
+                unit_amount=rate,
             )
         )
     return lines

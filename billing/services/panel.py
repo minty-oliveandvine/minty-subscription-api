@@ -471,24 +471,19 @@ def get_next_payment_date(entity_id: str) -> str | None:
     None while the entity is only on an app-level trial: no charge has happened, so there
     is no cycle to project and nothing honest to name. The page shows that as
     "To Be Decided", same as before.
+
+    The projection itself is the PAYER's (``portal.next_billing_at``) — the date the
+    payer portal prints as "Next Billing Date" — so the two pages cannot name different
+    days. A date that cannot be projected is None there too, never a failed page.
     """
-    from billing.services import clock
     from billing.services import store as sub_store
-    from billing.services.billing import period_containing
+    from billing.services.portal import next_billing_at
 
     payer_id = sub_store.payer_for_entity(entity_id)
     if not payer_id:
         return None
-    anchor, _currency = sub_store.billing_cycle_for_user(payer_id)
-    if not anchor:
-        return None
-    try:
-        return fmt_day(period_containing(anchor, clock.now()).end)
-    except Exception:
-        # A date on a card must never cost anyone the page — the panel below it carries
-        # the same information per module.
-        logger.exception("modules: could not project the next payment date for {}", entity_id)
-        return None
+    when = next_billing_at(payer_id)
+    return fmt_day(when) if when else None
 
 
 

@@ -2220,25 +2220,95 @@ def _segmented_extension(code: str, ends: dict, period, paid_through) -> int:
 
     ``ends`` is {code: access_end} for everything leaving, this module included.
     """
+    pieces = _extension_pieces(code, ends, period, paid_through)
+    return max(0, sum(charge for _start, _stop, _rate, charge in pieces))
+
+
+def _extension_pieces(code: str, ends: dict, period, paid_through) -> list:
+    """``(start, stop, rate, charge)`` for each piece of ``code``'s extra days — the
+    arithmetic ``_segmented_extension`` sums, kept apart so the invoice line can also say
+    what RATE the days were charged at (``pending_extension_terms``). Empty when access
+    ends at or before ``paid_through``: there are no extra days."""
     from billing.services.billing import Period, extension_charge
 
     end = ends.get(code)
     if end is None or end <= paid_through:
-        return 0
+        return []
 
     window = Period(period.start, paid_through)
     cuts = sorted(
         {paid_through, end}
         | {e for c, e in ends.items() if c != code and e and paid_through < e < end}
     )
-    total = 0
+    pieces = []
     for start, stop in zip(cuts, cuts[1:]):
         # Who still holds their module during this piece: everyone whose access outlasts
         # its start. The cuts are the only points where that can change.
         live = {c for c, e in ends.items() if e and e > start}
         base = _leaving_marginal(live, code)
-        total += extension_charge(base, window, stop) - extension_charge(base, window, start)
-    return max(0, total)
+        pieces.append((
+            start, stop, base,
+            extension_charge(base, window, stop) - extension_charge(base, window, start),
+        ))
+    return pieces
+
+
+def pending_extension_terms(row) -> tuple:
+    """``(start, end, rate)`` of the access extension ``row`` has pending — what its invoice
+    line records (``renewals._pending_extension_lines``).
+
+    The days are the overhang ``extension_charge`` priced: from what the company is paid
+    through to the module's access end. The rate is re-derived the way the charge was — the
+    window cut wherever another leaver stops, each piece priced against whoever is still
+    there — and returned only when that REPRODUCES the amount the row holds and every piece
+    shares one rate. Otherwise None, never a blend: a window whose rate stepped part-way had
+    no single rate, and a re-derivation that does not reproduce the figure being billed is
+    not evidence of one. The days are recorded either way.
+
+    NEVER RAISES. This labels a charge, it does not price one, and a renewal must not fail
+    over a label (the posture ``renewals._extension_product`` takes) — an error is logged
+    and answered with whatever is known.
+    """
+    from billing.services.billing import period_containing
+
+    end = getattr(row, "app_access_until", None)
+    if end is None:
+        return None, None, None
+    start = None
+    try:
+        start = store.paid_through_for_entity(row.entity_id)
+        anchor, _currency = store.billing_cycle_for_user(row.payer_user_id)
+        if start is None or anchor is None or end <= start:
+            return start, end, None
+        code = (row.function_code or "").upper()
+        # Every module on this company still leaving past the paid-through date, from the
+        # rows as they stand — the set ``_reprice_pending_extensions`` last priced against.
+        # One the sweep has already closed (its access ran out while this waited) still
+        # counts: it shared the pieces before it went.
+        ends = {
+            (r.function_code or "").upper(): r.app_access_until
+            for r in store.module_rows_for_entity(row.entity_id)
+            if r.phase in (PHASE_SCHEDULED_CANCEL, PHASE_CANCELLED)
+            and getattr(r, "first_billed_at", None) is not None
+            and getattr(r, "app_access_until", None) is not None
+            and r.app_access_until > start
+        }
+        ends[code] = end
+        period = period_containing(anchor, start - timedelta(seconds=1))
+        pieces = _extension_pieces(code, ends, period, start)
+        rates = {rate for _s, _e, rate, _c in pieces}
+        charged = max(0, sum(charge for _s, _e, _r, charge in pieces))
+        if len(rates) == 1 and charged == int(getattr(row, "extension_amount", 0) or 0):
+            return start, end, rates.pop()
+        return start, end, None
+    except Exception:
+        logger.exception(
+            "renewal: could not work out the terms of the pending extension {} {}; "
+            "recording its line without them",
+            getattr(row, "entity_id", None),
+            getattr(row, "function_code", None),
+        )
+        return start, end, None
 
 
 def _reprice_pending_extensions(

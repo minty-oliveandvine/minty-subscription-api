@@ -10,8 +10,11 @@ until step 2 lands and this page becomes it.
 ## 1. What a person gets
 
 - **The payer portal** (`minty-web`, `/subscription/*`): the companies I pay for and who pays
-  for each, a change of subscriber (offer, accept, decline, withdraw), my billing accounts and
-  saved cards, my invoices. Fifteen `/api/me/*` routes.
+  for each, a change of subscriber (offer, accept, decline, withdraw), my billing accounts —
+  each a name, an email, its cards and the companies it pays for — and my invoices, per
+  account, and any invoice's breakdown company by company. Twenty-one `/api/me/*` paths
+  (twenty-two operations): Flask's fifteen, plus `transfer/seen`, the four
+  `billing/accounts` routes and `invoices/{invoice_id}/breakdown`.
 - **A company's module settings page** (`minty-web`, `/subscription/entities/{id}/modules`):
   the two module cards (Petty Cash, Payment Request) with their state, and the nineteen actions —
   start a trial, buy, restart, cancel, retry a payment, change the card, manage billing. One page
@@ -35,7 +38,7 @@ already done, 5xx upstream. `billing/tests/test_contract.py` pins every table be
 
 | Method | Path | Flask origin (`routes/portal.py`) | Answers |
 |---|---|---|---|
-| GET | `/subscriptions` | `my_subscriptions_api` | the payer, their billing anchor/paid-through, a page of companies with module status per company; `q`, `sort`, `direction`, `page`, `per_page`. **Plus `transfer_outcomes`** — how the caller's OWN offers ended (declined / expired / accepted) where they have not been shown yet, the only read of a finished transfer in the engine; `cancelled` is excluded (their own withdrawal, already answered by 07-K). Read advisorily, so a failure leaves it empty rather than taking the page down |
+| GET | `/subscriptions` | `my_subscriptions_api` | the payer, their billing anchor/paid-through and **`next_billing` / `next_billing_iso`** (2026-09-25: the end of the anchor period now is in — the anchor is the FIRST charge and never moves, and the landing printed it as the next billing date), a page of companies with module status per company; `q`, `sort`, `direction`, `page`, `per_page`. **Plus `transfer_outcomes`** — how the caller's OWN offers ended (declined / expired / accepted) where they have not been shown yet, the only read of a finished transfer in the engine; `cancelled` is excluded (their own withdrawal, already answered by 07-K). Read advisorily, so a failure leaves it empty rather than taking the page down |
 | GET | `/subscriptions/subscriber-options` | `my_subscriber_options_api` | who a company's bill could move to (admins), each with a quote and inherited trials; blockers; the pending transfer; and `paid_through`, what the COMPANY is paid up until (the screen's footer needs it whether or not there is a candidate to quote) |
 | POST | `/subscriptions/invite-admin` | `my_invite_admin_api` | **forwarded to Flask** `POST /api/onboarding/invite` (the invitation is Flask's) |
 | POST | `/subscriptions/transfer` | `my_transfer_initiate_api` | offer a company's billing to another admin — **any** admin, with a saved card or without: being asked is not being charged, so the card is required at the accept, not here (the offer-time refusal was dropped 2026-09-24) |
@@ -43,14 +46,19 @@ already done, 5xx upstream. `billing/tests/test_contract.py` pins every table be
 | POST | `/subscriptions/transfer/seen` | — (**new; Flask had none**) | mark how one of MY offers ended as seen, `{transfer}`. The payer pressing Done on 07-I / A-07 / A-08. Stamps `subscription_transfer.outcome_seen_at` — from the click, not from the read that drew the modal and not from the email, which records that a message was SENT. Idempotent; the same answer for a transfer that does not exist and one that is not mine |
 | POST | `/subscriptions/transfer/cancel` | `my_transfer_cancel_api` | withdraw an offer |
 | GET | `/subscriptions/transfers` | `my_transfers_api` | offers made TO me |
-| GET | `/invoices` | `my_invoices_api` | my invoices, newest first; `entity`, `page`, `per_page` |
+| GET | `/invoices/{invoice_id}/breakdown` | — (**new**, 2026-09-25) | 08-B's "Billing Breakdown · Download csv": ONE invoice, company by company - a row per line it charged (the subscription, the monthly rate that line was priced at, the days it paid for, what was charged; a credit negative, a zero line left out). The days and rate are the ones the line RECORDED when it was issued (`subscription_invoice_line.period_start` / `period_end` / `unit_amount`, schema item 23, same day - written by whatever priced it: a renewal is the whole period at its plan's price; a mid-period start or upgrade, and the credit for the plan it replaced, run from the change to the period's end; a cancellation extension runs from the paid-through date to its access end at the rate the cancellation priced it at - the marginal step for a module leaving a bundle). An extension priced at two rates recorded none: its row shows the rate its days add up to. A line issued BEFORE then is read back from how its kind is priced (`portal.build_invoice_breakdown`) - an extension's end from the module's `app_access_until` while the row still holds it, left out (null) once a resume has cleared it, never guessed. Someone else's invoice, or a malformed id, is 404; the web writes the CSV |
+| GET | `/invoices` | `my_invoices_api` | my invoices, newest first; `entity`, `page`, `per_page`, and **`account`** (added 2026-09-25) — ONE billing account's invoices for 08-B; a pre-accounts invoice (no `billing_group_id`) belongs to the payer's OLDEST account, the attribution dunning already collects by; someone else's account matches nothing. Echoes `account_id` |
 | GET | `/billing/payment-methods` | `my_payment_methods_api` | my saved cards and the default |
 | POST | `/billing/payment-methods/setup-intent` | `my_payment_method_setup_intent_api` | a Stripe SetupIntent + the publishable key |
-| POST | `/billing/payment-methods/confirm` | `my_payment_method_confirm_api` | save the confirmed card, optionally as default |
+| POST | `/billing/payment-methods/confirm` | `my_payment_method_confirm_api` | save the confirmed card, optionally as default. **Plus the onboarding twin's account fields** (2026-09-25): `billing_group_id` puts the card on one of my accounts (08-B "Add payment method"); `billing_company` + `billing_email` OPEN one ("New billing account") and both are then required. Both checked in the ROUTE, before the card is attached — the service only reaches them after Stripe holds it. A retry after a lost answer re-answers the account it opened rather than opening a second on the same card |
 | POST | `/billing/payment-methods/default` | `my_payment_method_default_api` | change the default |
 | GET / POST | `/billing/entity-payment-method` | `my_entity_payment_method_api` | which card a company is billed to; nominate one |
 | POST | `/billing/payment-methods/update` | `my_payment_method_update_api` | expiry, name, address |
-| POST | `/billing/payment-methods/remove` | `my_payment_method_remove_api` | detach a card |
+| POST | `/billing/payment-methods/remove` | `my_payment_method_remove_api` | detach a card. **`account?`** (2026-09-25) — the billing account whose page asked: its own charged card is refused in its words, and when the card is the Stripe customer's default it is handed to that account's card instead of refused (08-B has no button for the customer default) |
+| GET | `/billing/accounts` | — (**new**) | my billing accounts, oldest first (the first is the one 08-A shows by default): each with `name` (the company it bills under, else me), `billing_company` / `billing_email` raw, `card` (the one it CHARGES, null when Stripe no longer holds it), `cards` (its shelf, `is_default` = THIS account's card), `address` (the charged card's Stripe billing address — accounts hold none), `companies` (`entity_id`, `entity_name`, `past_due`), `in_dunning`, `past_due`, and **`next_bill`** (2026-09-25, 08-B's "Amount (estimated)": `{amount, amount_minor, currency}` or null - what its next renewal will charge, priced by the renewal runner's own `build_renewal` for the period starting on the next billing date, with the trials that will have converted by then; `portal.next_bill_for_account`); plus the payer, ONE `next_billing` / `next_billing_iso` (every account renews on the payer's anchor), the flat wallet, and `countries` and **`publishable_key`** only with `?countries=1` (08-C, whose address form is Stripe's own `AddressElement`: the registry limits its countries, the key mounts it - null where this environment has no Stripe) |
+| POST | `/billing/accounts/update` | — (**new**) | `{account, billing_company?, billing_email?, address?, cardholder?}` — 08-C. Validated first (company not blank, email shaped, each at most 255 characters; address needs line 1 and a registered country; `cardholder` - the name Stripe's address form asks for with it - at most 255), then the address and cardholder to the charged card at Stripe in ONE `billing_details` write, then the name — Stripe first because it is the write that fails |
+| POST | `/billing/accounts/default-card` | — (**new**) | `{account, payment_method}` — the card the account CHARGES (08-B "Set as default", 08-N): both halves of the pair, and the Stripe customer default untouched |
+| POST | `/billing/accounts/move` | — (**new**) | `{entity, account}` — "Change billing account": the company moves to another of my accounts; nothing is charged and its paid days travel (`store.nominate_group_for_entity`, source `moved`). Refused (409): a company on no account, a PAST-DUE company (its debt, its retries and "Pay now" follow the account it is on), a target in dunning, a target whose card is gone. Answers the accounts plus `moved` (null when it was already there) |
 
 **Live since step 3 slice A (2026-09-21)** — `billing/api/me.py`, each view the port of its Flask
 twin. What the views keep is Flask's shell: `400 {"error": "<field> is required"}` for a missing
@@ -182,9 +190,9 @@ of `Minty/docs/schema/01_schema_rebased.sql`):
 |---|---|
 | `billing_plan` | the price catalog (`code` = module or the bundle `BILL+PETTY_CASH`; minor units) |
 | `billing_policy` | the singleton of windows: trial days, post-cancel access days, past-due window, retry offsets `1..13` |
-| `payer_billing_group` | a billing ACCOUNT: payer, the card it charges, `paid_through`, dunning state |
+| `payer_billing_group` | a billing ACCOUNT: payer, its name (`billing_company`) and `billing_email`, the card it charges, `paid_through`, dunning state. Several per payer, all renewing on the payer's one anchor; opened, renamed, re-carded and given companies from the portal (§2) |
 | `billing_account_payment_method` | the account's cards, one default |
-| `entity_billing_group` | which account pays for a company (one payer per company) |
+| `entity_billing_group` | which account pays for a company (one payer per company); `source` is how it got there — `capture`, `chosen`, `backfill`, `confirmed`, `transfer`, and `moved` for the portal's "Change billing account" |
 | `entity_billing_consent` | a member's consent to be billed for a company |
 | `entity_module_subscription` | THE subscription: company × module, phase, payer, `app_access_until`, trial/billing dates |
 | `user_stripe_customer` | a person's Stripe customer, billing anchor, currency |
@@ -262,10 +270,12 @@ the process environment — `settings_test` blanks the key so an unstubbed test 
 **Transactions — the rule step 3 inherits.** The engine runs on Django's autocommit, which is
 what Flask's per-helper commits were. `transaction.atomic()` appears in exactly three kinds of
 place: the store groups Flask staged with flush-only helpers (`create_billing_account`,
-`nominate_card_for_entity`, `set_group_default_card`) plus `transfers._complete` (payer flip,
+`nominate_card_for_entity`, `set_group_default_card`) and the account-keyed
+`nominate_group_for_entity`, plus `transfers._complete` (payer flip,
 consent, nomination clear and the offer's `accepted` land together — Flask could only ORDER
 them); the insert-then-catch-`IntegrityError` guards as savepoints (`store.reserve_invoice`,
-`transfers.offer_transfer`, `notify._claim`); and nowhere else. **Never a Stripe call inside
+`transfers.offer_transfer`, `notify._claim`, and `store._carry_paid_days`, whose writes are
+swallowed on failure and so must not poison the move around them); and nowhere else. **Never a Stripe call inside
 `atomic()`, never `ATOMIC_REQUESTS`**: the double-charge guard depends on the invoice
 reservation being COMMITTED before the processor is called, and a request-wide transaction
 would hold it back until after the charge.
@@ -317,7 +327,22 @@ after slice A) and on the Postgres built from `01` (`MINTY_TEST_PG_URI=… MINTY
 pytest`; 985 passed, 00:10). `e2e/test_smoke.py` against a running service, dark and live
 (`e2e/README.md`). After step 3 (2026-09-22): 1122 + 2 skipped on SQLite (00:09), 1124 on
 Postgres (00:14); `pytest e2e` live against `runserver` on the dev database with a replay
-payer: 8 passed, 3 dark-only skipped (00:05).
+payer: 8 passed, 3 dark-only skipped (00:05). After the billing accounts (2026-09-25): 1219 + 2
+skipped on SQLite (00:09), 1221 on Postgres (00:15), `pytest e2e` 9 passed + 3 dark-only skipped
+— `engine/test_portal_billing_accounts.py` (37: the read model, the three writes, and one pin per
+silent failure the work found, each proven to fail against the old code) and
+`api/test_billing_accounts_api.py` (19). After `next_bill`, the Ended-date fix and the invoice
+breakdown (same day): 1231 + 2 skipped on SQLite (00:11), 1233 on Postgres (00:23) —
+`engine/test_portal_billing_accounts.py` now 40, `engine/test_invoice_breakdown.py` (3) and
+`api/test_invoice_breakdown_api.py` (3). The harness enforces the `currency_info` foreign keys
+(`fk_si_currency`, `fk_usc_currency`) that SQLite never checks, so a test helper that writes a
+currency seeds it (`seed_currency`) — two breakdown tests passed on SQLite and failed only there.
+After schema item 23 and 08-C's Stripe address (same day): 1255 + 2 skipped on SQLite (00:26),
+1257 on Postgres (00:34) — `engine/test_invoice_line_terms.py` (15: every constructor's span
+and rate, the extension's one-rate rule, the row written; its Flask twin
+`tests/test_invoice_line_terms.py` the same 15, Flask then 1960 + 2 skipped), two recorded-line
+breakdown tests, and the cardholder / publishable key / 255-limit cases in
+`engine/test_portal_billing_accounts.py`.
 
 How the ported tests differ from Minty's, by rule: DB tests use pytest-django's `db` (a
 transaction per test) where Flask's `db_session` DELETEd tables afterwards — which is why the
@@ -393,5 +418,6 @@ about twice as long, which is the clock doing its job.
 |---|---|
 | 2 | DONE 2026-09-21: `billing/services/` — the 1:1 port of all 24 modules of `blueprints/subscription/services/` plus `entity_modules.py` (from `entity/services/modules.py`), `_context.py` (the request scope that replaced `flask.g`) and `_log.py`; the templates and images; 51 ported test files; the job bodies behind `manage.py subscriptions`; the scoped scheduler pass; `manage.py replay_scenarios` + `scripts/replay_diff.py`, the eight Angelika runs identical on both sides |
 | 3 | DONE 2026-09-22: all four routers filled from Flask's views — `me` (`billing/api/me.py`, `_json.py` = `jsonify`; the invitation forwarded with the caller's bearer), `modules` (the page model minty-web renders + the 19 actions behind one gate), `notice` (`NoticeBearerAuth`, Flask's claimless fallback), `onboarding` (the nine + `trials/start`, which fails loudly); `docs/openapi.json` committed and held current by `test_contract.py` / `manage.py export_openapi`; 173 route tests in `billing/tests/api/` (32 portal + 7 wallet, 84 module page, 12 notice, 38 onboarding); e2e smoke asserts the live shapes |
+| 4c+ | DONE 2026-09-25: **billing accounts in the portal** — `GET /billing/accounts` (`portal.build_billing_accounts`), `update` / `default-card` / `move` (`billing/services/billing_accounts.py`), the account fields on `confirm`, `account` on `invoices` and `remove`, `next_billing` on `subscriptions`. Five silent failures fixed on the way: the landing's "Next Billing Date" was the anchor (the FIRST charge); the removal guard stopped at the first account on a shared card; card-keyed nomination raised on a shared card (`_group_for_card`, oldest wins); a company moved onto an emptied account lost access (`_carry_paid_days`' idle branch); a blanked address field was dropped by the SDK instead of cleared. Flask not mirrored (dark there; Django replaces it). **Same day, later: `next_bill` per account** (08-B's "Amount (estimated)") - `portal.next_bill_for_account` prices the account's next renewal with `renewals.build_renewal(..., converting_by=period.start)`: the runner's own invoice for the period starting on the next billing date, plus the trials that will have converted by then (`renewals._trial_converts` - the trial-end job's conjunction of customer, card for the company and consent, read from the database alone, never Stripe). `converting_by` is the forecast's only; the runner never passes it, so what it bills is unchanged. A figure that cannot be priced is null and logged, never a failed page. **Later still: schema item 23** - `subscription_invoice_line` records what each line PAID FOR (`period_start` / `period_end` / `unit_amount`), written by BOTH engines at issue: `billing.Line` carries them from whatever priced the line (`paid_from` holds a mid-period start to the period as `prorate` does), and an extension's come from `checkout.pending_extension_terms` - the paid-through date to the access end, and the rate only when re-deriving it piece by piece (`_extension_pieces`, which `_segmented_extension` now sums) reproduces the billed amount at ONE rate; never a blend, never a failed renewal. The breakdown reads them first. Minty migration `x1a01_invoice_line_span` ALTERs a database already up; both local ones have it, Supabase does not yet. **And 08-C's address became Stripe's own form** (the user's call): `?countries=1` also answers `publishable_key`, `update` takes `cardholder` (written with the address in one `billing_details` update, the account's card required as for the address), and every field is held to 255 characters |
 | 5 | Flask's copies deleted; onboarding-backend proxies here; the Stripe keys leave Flask |
 | 7 | deployed dark beside the phase-C builds at the cutover; 8b switches it on |

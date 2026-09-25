@@ -2,7 +2,8 @@
 
 THE PATHS ARE FLASK'S, RE-HOMED UNDER ONE API.
 
-* ``/api/me/*`` - the payer portal, the fifteen routes of Flask's ``routes/portal.py``,
+* ``/api/me/*`` - the payer portal: the fifteen paths of Flask's ``routes/portal.py`` plus
+  this service's five (``transfer/seen``, the four ``billing/accounts`` routes),
   paths and JSON unchanged, so ``payerPortal.ts`` moves to minty-web with a new base URL
   and no path edits.
 * ``/api/entities/{id}/modules`` and ``/api/entities/{id}/modules/{action}`` - the module

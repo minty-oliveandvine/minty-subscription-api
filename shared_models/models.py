@@ -467,7 +467,9 @@ class BillingAccountPaymentMethod(UpdatedAtMixin):
 class EntityBillingGroup(UpdatedAtMixin):
     """Which billing account pays for a company. ``UNIQUE (entity_id, payer_user_id)`` is
     the one-payer-per-entity rule; ``source`` records how the link was made (``capture``,
-    ``chosen``, ``backfill``, ``confirmed`` - Flask's vocabulary, VARCHAR by choice)."""
+    ``chosen``, ``backfill``, ``confirmed`` - Flask's vocabulary - plus ``transfer`` for a
+    handover's accept and ``moved`` for the payer portal's "Change billing account";
+    VARCHAR by choice, so a new word needs no DDL)."""
 
     id = MintyUUIDField(primary_key=True, default=new_id)
     entity = models.ForeignKey(
@@ -614,6 +616,12 @@ class SubscriptionInvoiceLine(models.Model):
     amount = models.IntegerField()
     kind = models.CharField(max_length=20, default="full")
     at = models.DateTimeField(null=True, blank=True)
+    # What the line PAID FOR, written at issue (schema item 23): the days, half-open, and the
+    # price per period they were charged at. NULL on lines issued before 2026-09-25, and
+    # ``unit_amount`` NULL on an extension that had no single rate - see ``billing.Line``.
+    period_start = models.DateTimeField(null=True, blank=True)
+    period_end = models.DateTimeField(null=True, blank=True)
+    unit_amount = models.IntegerField(null=True, blank=True)
     created_at = models.DateTimeField(db_default=Now())
 
     class Meta:

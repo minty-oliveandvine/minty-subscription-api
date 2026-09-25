@@ -321,18 +321,18 @@ def _companies_billing_on(user_id, payment_method_id: str) -> list[str]:
     Fails CLOSED like ``_bills_forward``: if this cannot be read it claims the card is in
     use. A refusal the payer can retry is a far smaller harm than detaching the card three
     companies renew on.
+
+    EVERY ACCOUNT CHARGING THE CARD, not the first. Two accounts may charge one card since
+    ``v1a01_billing_account``, and stopping at the first let a card be detached while the
+    second account's companies still renewed on it.
     """
     from billing.services import access
 
     try:
-        group = None
+        entity_ids: set[str] = set()
         for candidate in sub_store.billing_groups_for_payer(user_id):
             if candidate.stripe_payment_method_id == payment_method_id:
-                group = candidate
-                break
-        if group is None:
-            return []
-        entity_ids = sub_store.entity_ids_in_group(group.id)
+                entity_ids |= sub_store.entity_ids_in_group(candidate.id)
         if not entity_ids:
             return []
         live = {
@@ -437,26 +437,19 @@ def accounts_for_user(user_id) -> dict:
     rather than shown as a blank row: it was detached at Stripe, and the shelf is a local
     copy of a fact Stripe owns.
     """
-    wallet = list_for_user(user_id)
-    by_id = {m["id"]: m for m in wallet["methods"]}
+    wallet, groups = _accounts_with_cards(user_id)
 
-    accounts = []
-    for group in sub_store.billing_groups_for_payer(user_id):
-        cards = [
-            by_id[row.stripe_payment_method_id]
-            for row in sub_store.cards_in_group(group.id)
-            if row.stripe_payment_method_id in by_id
-        ]
-        accounts.append(
-            {
-                "id": group.id,
-                "billing_email": group.billing_email,
-                "billing_company": group.billing_company,
-                "default_id": group.stripe_payment_method_id,
-                "cards": cards,
-                "total": len(cards),
-            }
-        )
+    accounts = [
+        {
+            "id": group.id,
+            "billing_email": group.billing_email,
+            "billing_company": group.billing_company,
+            "default_id": group.stripe_payment_method_id,
+            "cards": cards,
+            "total": len(cards),
+        }
+        for group, cards in groups
+    ]
 
     return {
         "has_account": wallet["has_account"],
@@ -467,6 +460,32 @@ def accounts_for_user(user_id) -> dict:
         "methods": wallet["methods"],
         "default_id": wallet["default_id"],
     }
+
+
+def _accounts_with_cards(user_id) -> tuple[dict, list[tuple]]:
+    """``(wallet, [(account, cards)])`` — the payer's accounts, oldest first, each with the
+    live card views on its shelf (default first).
+
+    The one Stripe read (``list_for_user``) behind both readers of accounts: the onboarding
+    picker (``accounts_for_user``) and the payer portal (``portal.build_billing_accounts``).
+    The card dicts are SHARED between accounts holding the same card, and their
+    ``is_default`` is the Stripe customer's default — a reader that marks a card per
+    account copies it first.
+    """
+    wallet = list_for_user(user_id)
+    by_id = {m["id"]: m for m in wallet["methods"]}
+    groups = [
+        (
+            group,
+            [
+                by_id[row.stripe_payment_method_id]
+                for row in sub_store.cards_in_group(group.id)
+                if row.stripe_payment_method_id in by_id
+            ],
+        )
+        for group in sub_store.billing_groups_for_payer(user_id)
+    ]
+    return wallet, groups
 
 
 # --- Adding ------------------------------------------------------------------
@@ -589,10 +608,11 @@ def confirm_setup(
     * neither — save the card and nothing else, exactly as before this existed. That is
       the payer-portal path, where an account is opened later by the nomination.
 
-    Not idempotent in the same sense as the card itself: a retried request that names no
-    group opens a SECOND account, because two accounts on one card are legal and the
-    service cannot tell a retry from a deliberate second one. The browser passes the
-    account id back on a retry, which is what makes the whole call safe to repeat.
+    A RETRY DOES NOT OPEN A SECOND ACCOUNT. Two accounts on one card are legal, but never
+    on a card this call has only just confirmed: a SetupIntent always makes a fresh
+    ``pm_...``, so an account of this payer already charging it can only be the one an
+    earlier attempt at this same request opened — whose answer was lost on the way back.
+    That account is renamed with what this attempt carried and answered again.
     """
     intent = retrieve_setup_intent(setup_intent_id)
     if not intent:
@@ -667,11 +687,9 @@ def _account_for_confirm(
     card that was declined is an account that can never be charged.
     """
     if billing_group_id:
-        account = sub_store.billing_group(billing_group_id)
         # THE OWNERSHIP CHECK. The id came from the browser; without this, naming
         # another payer's account moves a card onto it.
-        if account is None or str(account.payer_user_id) != str(user_id):
-            raise PaymentMethodError("That billing account couldn't be found.", status=404)
+        account = account_of(user_id, billing_group_id)
         sub_store.add_card_to_group(account.id, payment_method)
         # Commits the shelf row too — ``add_card_to_group`` deliberately leaves the unit
         # of work open so the two land together. With both fields None this only commits.
@@ -680,12 +698,44 @@ def _account_for_confirm(
         )
 
     if billing_email or billing_company:
+        retried = next(
+            (
+                group
+                for group in sub_store.billing_groups_for_payer(user_id)
+                if group.stripe_payment_method_id == payment_method
+            ),
+            None,
+        )
+        if retried is not None:
+            logger.info(
+                "payment methods: payer {} re-confirmed {}; answering account {} again",
+                user_id, payment_method, retried.id,
+            )
+            return sub_store.set_account_identity(
+                retried.id, billing_email=billing_email, billing_company=billing_company
+            )
         return sub_store.create_billing_account(
             user_id, payment_method,
             billing_email=billing_email, billing_company=billing_company,
         )
 
     return None
+
+
+def account_of(user_id, account_id):
+    """The caller's billing account ``account_id``, or a refusal the page can show.
+
+    THE OWNERSHIP CHECK for every account id that arrives from the browser — the same rule
+    ``_owned`` applies to a ``pm_...``: somebody else's account answers exactly like one
+    that does not exist, so a guessed id confirms nothing.
+    """
+    wanted = str(account_id or "").strip()
+    if not wanted:
+        raise PaymentMethodError("No billing account was given.", status=400)
+    account = sub_store.billing_group(wanted)
+    if account is None or str(account.payer_user_id) != str(user_id):
+        raise PaymentMethodError("That billing account couldn't be found.", status=404)
+    return account
 
 
 # --- Editing, promoting, removing --------------------------------------------
@@ -894,16 +944,10 @@ def update(
 
     details: dict = {}
     if name is not None:
-        details["name"] = name.strip() or None
+        # A blank is "", not None: see ``_clean_address``.
+        details["name"] = str(name).strip()
     if address is not None:
-        # Only the keys Stripe knows, and only the ones supplied — sending the whole shape
-        # with blanks would erase an address the payer did not touch.
-        allowed = ("line1", "line2", "city", "state", "postal_code", "country")
-        cleaned = {
-            key: (str(address.get(key)).strip() or None)
-            for key in allowed
-            if address.get(key) is not None
-        }
+        cleaned = _clean_address(address)
         if cleaned:
             details["address"] = cleaned
     if details:
@@ -916,14 +960,75 @@ def update(
     return list_for_user(user_id)
 
 
-def remove(user_id, payment_method_id: str) -> dict:
+#: The address keys Stripe knows. The billing account's address is the address of the card
+#: it charges (no column holds one), so this is the whole shape 08-C edits.
+ADDRESS_KEYS = ("line1", "line2", "city", "state", "postal_code", "country")
+
+
+def _clean_address(address: dict) -> dict:
+    """Only the keys Stripe knows, and only the ones SUPPLIED — sending the whole shape
+    with blanks would erase an address the payer did not touch.
+
+    A supplied BLANK is sent as ``""``, which is Stripe's "unset". It used to become
+    ``None``, and the SDK drops ``None`` from the request entirely (``stripe/_encode.py``),
+    so clearing a field reported success and changed nothing.
+    """
+    return {
+        key: str(address.get(key)).strip()
+        for key in ADDRESS_KEYS
+        if address.get(key) is not None
+    }
+
+
+def write_billing_address(
+    user_id, payment_method_id: str, address: dict | None, *, name: str | None = None
+) -> None:
+    """Put ``address`` - and the cardholder's ``name``, when given - on one of the caller's
+    cards at Stripe, in ONE write.
+
+    What a billing account's address IS: the billing address of the card it charges. The
+    account table holds no address (a user decision, 2026-09-25), so 08-C writes here and
+    08-B reads the card back. 08-C's address form is Stripe's own, which asks for the name
+    with the address, so the two travel together. Ownership is proven first, as for every
+    card write.
+    """
+    _owned(user_id, payment_method_id)
+    details: dict = {}
+    cleaned = _clean_address(address or {})
+    if cleaned:
+        details["address"] = cleaned
+    if name is not None:
+        # A blank is "", not None: see ``_clean_address``.
+        details["name"] = str(name).strip()
+    if not details:
+        raise PaymentMethodError("There was nothing to change.", status=422)
+    update_payment_method(payment_method_id, billing_details=details)
+
+
+def remove(user_id, payment_method_id: str, *, account_id=None) -> dict:
     """Detach a saved method. Returns the list.
 
     Two refusals, both about leaving the account unable to pay itself — see the module
     docstring. Neither is a permission check: they are guards on a live billing
     relationship, and each one names the fix.
+
+    ``account_id`` is the billing account whose page the payer is on (08-B). It changes
+    two things. The account's OWN charged card is refused in the account's words. And the
+    Stripe customer's default — which that page cannot set, since "Set as default" there
+    switches what the ACCOUNT charges — is handed to this account's card instead of
+    refusing with a fix the payer has no button for. The customer default still matters
+    (what a company with no nomination is put on at consent, what a handover nominates),
+    so it is moved rather than left to Stripe to clear. Without ``account_id`` nothing
+    here has changed.
     """
     customer_id, pm = _owned(user_id, payment_method_id)
+    account = account_of(user_id, account_id) if account_id else None
+    if account is not None and account.stripe_payment_method_id == payment_method_id:
+        raise PaymentMethodError(
+            "That's this billing account's default card. Make another card its default "
+            "first, then remove it.",
+            status=409,
+        )
 
     default_id = customer_default_payment_method(customer_id)
     others = [
@@ -941,10 +1046,18 @@ def remove(user_id, payment_method_id: str) -> dict:
             _still_billing_message(billing_on_it), status=409
         )
     if payment_method_id == default_id and others:
-        raise PaymentMethodError(
-            "That's the account's main payment method. Make another one the default "
-            "first, then remove it.",
-            status=409,
+        successor = account.stripe_payment_method_id if account is not None else None
+        if not successor or not any(m.get("id") == successor for m in others):
+            raise PaymentMethodError(
+                "That's the account's main payment method. Make another one the default "
+                "first, then remove it.",
+                status=409,
+            )
+        set_customer_default_payment_method(customer_id, successor)
+        logger.info(
+            "payment methods: payer {} removing default {}; customer default handed to "
+            "account {}'s card {}",
+            user_id, payment_method_id, account.id, successor,
         )
     if not others and _bills_forward(user_id):
         raise PaymentMethodError(

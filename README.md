@@ -2,8 +2,9 @@
 
 Minty's subscription engine and payer-portal API — Django 5.2 + django-ninja on Python 3.13,
 port **8004**. Part 2 of `Minty/docs/modernisation/modernisation_plan.md` moves the whole
-subscription domain out of the Flask app into this service: the fifteen `/api/me/*` portal
-routes, the module settings page's model and its nineteen actions, the dashboard notice, the
+subscription domain out of the Flask app into this service: the `/api/me/*` portal routes
+(Flask's fifteen paths, plus `transfer/seen` and the four `billing/accounts` routes this service
+added), the module settings page's model and its nineteen actions, the dashboard notice, the
 wizard's card and billing-account routes, the daily pass, the notification emails and the
 Stripe writer. Flask keeps identity and the company until Part 3 and reads five subscription
 facts through a read-only module; onboarding-backend proxies its money routes here.

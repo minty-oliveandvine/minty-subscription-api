@@ -118,6 +118,84 @@ def _iso(moment) -> str | None:
     return moment.isoformat() if moment else None
 
 
+# --- The payer's next billing date ---------------------------------------------
+#
+# ONE DATE FOR THE PAYER, whichever account is on screen. Every billing account renews on
+# the payer's anchor ("one cycle billed as several invoices" — the billing-groups note in
+# ``store``), so the accounts share it.
+
+
+def next_billing_from(anchor, now) -> datetime | None:
+    """The end of the anchor period ``now`` is inside — the next renewal boundary.
+
+    NOT the anchor itself. ``anchor_at`` is the payer's FIRST charge and never moves, so
+    printed as "Next Billing Date" it reads as a date in the past from the second month
+    on — which is what the portal's landing printed until this existed. Projected through
+    ``period_containing``, the arithmetic the renewal runner bills on, month-end clamp
+    included.
+
+    None when there is no cycle (nothing has ever been charged), or when the anchor cannot
+    be projected: a date on a card is never worth failing the page it sits on.
+    """
+    from billing.services.billing import period_containing
+
+    if not anchor:
+        return None
+    try:
+        return period_containing(anchor, now).end
+    except Exception:
+        logger.exception("portal: could not project the next billing date from {}", anchor)
+        return None
+
+
+def next_billing_at(user_id) -> datetime | None:
+    """``next_billing_from`` for one payer, now. Also what a company's settings page falls
+    back to (``panel.get_next_payment_date``), so the two cannot name different days."""
+    from billing.services import clock
+    from billing.services import store as sub_store
+
+    anchor, _currency = sub_store.billing_cycle_for_user(user_id)
+    return next_billing_from(anchor, clock.now())
+
+
+def next_bill_for_account(user_id, group_id, anchor, when) -> dict | None:
+    """What ONE billing account's next renewal will charge - 08-B's "Amount (estimated)".
+
+    Priced by the renewal runner's own ``build_renewal`` for the period that starts on the
+    payer's next billing date, so the estimate and the invoice cannot disagree about what
+    is charged or at what price: the account's companies billing forward, each on its own
+    plan line (the bundle when it carries both modules), its trials that will have
+    converted by then (``converting_by`` - the settings panel's rule), and any
+    cancellation extension riding the invoice. ESTIMATED because what changes before the
+    date - a trial lapsing, a module cancelled or added - changes the bill.
+
+    ``{"amount": "HKD 400.00", "amount_minor": 40000, "currency": "HKD"}``, or None when
+    there is no cycle yet, nothing to bill, or it cannot be priced (logged: a figure on a
+    page is never worth failing the page).
+    """
+    from billing.services import renewals
+    from billing.services.billing import period_containing
+
+    if not anchor or when is None:
+        return None
+    try:
+        period = period_containing(anchor, when)
+        invoice = renewals.build_renewal(
+            user_id, period, group_id=group_id, converting_by=period.start
+        )
+    except Exception:
+        logger.exception("portal: could not estimate the next bill of account {}", group_id)
+        return None
+    if invoice is None or invoice.total <= 0:
+        return None
+    currency = (invoice.currency or "").upper()
+    return {
+        "amount": _money(invoice.total, currency),
+        "amount_minor": invoice.total,
+        "currency": currency,
+    }
+
+
 def _module_names() -> dict[str, str]:
     """Display name per canonical module code, from the catalog.
 
@@ -235,8 +313,20 @@ def _module_state(row, *, now, paid_through, grace_days) -> dict:
             "date_label": "Trial ended",
         }
 
-    stopped = app_access_until or trial_end or paid_through
-    return {"status": STATUS_ENDED, "date": stopped, "date_label": "Ended"}
+    # The date it STOPPED, and only that: the row's own end (its access end, its trial's),
+    # else when its access ran out - a paid period that lapsed - once that has passed. Never a
+    # date still ahead. The old last resort was ``paid_through``, the billing ACCOUNT's, which
+    # keeps moving while the account renews for its other companies: a module terminated on
+    # the spot (access cut, nothing of its own kept) read "Ended 18 Oct 2026" - a date to come,
+    # under a word that says it is past. With no date of its own it now prints none.
+    stopped = app_access_until or trial_end or ends
+    if stopped is not None and stopped > now:
+        stopped = None
+    return {
+        "status": STATUS_ENDED,
+        "date": stopped,
+        "date_label": "Ended" if stopped is not None else None,
+    }
 
 
 def _next_date(modules) -> datetime | None:
@@ -452,16 +542,22 @@ def build_payer_subscriptions(
         logger.exception("portal: could not read finished handovers for %s", user_id)
         outcomes = []
 
+    next_billing = next_billing_from(anchor_at, now)
     return {
         "payer": subscriber,
         # Empty list rather than absent when there is nothing, the shape rule the rest of
         # this payload follows.
         "transfer_outcomes": outcomes,
         "billing": {
+            # The cycle's START, kept for the port's fidelity. Not a date to print as
+            # "next": that is ``next_billing``.
             "anchor": _fmt(anchor_at),
             "anchor_iso": _iso(anchor_at),
             "paid_through": _fmt(account_paid_through),
             "paid_through_iso": _iso(account_paid_through),
+            # Added over Flask's answer: the date the payer is next billed.
+            "next_billing": _fmt(next_billing),
+            "next_billing_iso": _iso(next_billing),
             "currency": currency,
         },
         "entities": window,
@@ -955,14 +1051,23 @@ def build_payer_invoices(
     user_id,
     *,
     entity_id: str | None = None,
+    account_id: str | None = None,
     page: int = 1,
     per_page: int = 10,
 ) -> dict:
-    """The payer's invoices, newest first, optionally narrowed to one entity.
+    """The payer's invoices, newest first, optionally narrowed to one entity or one
+    billing account.
 
     Filtered on ``payer_user_id``, so — like the rest of the portal — there is no id in
     the request that could reach another payer's history. ``entity_id`` narrows within
     that; an entity the caller does not pay for simply matches nothing.
+
+    ``account_id`` narrows to the invoices ONE billing account raised (08-B is one
+    account's page). An invoice raised before accounts existed carries no account, and
+    belongs to the payer's OLDEST — the attribution dunning already makes when it collects
+    them (``dunning._invoices_for_group``), so the page and the collection agree on whose
+    debt it is. An account that is not the caller's matches nothing. Narrowed in Python,
+    like the entity filter, over a set already fixed to the payer.
     """
     from shared_models.models import SubscriptionInvoice
 
@@ -971,6 +1076,21 @@ def build_payer_invoices(
         .order_by("-period_start", "-created_at")
         .prefetch_related("lines")
     )
+
+    wanted_account = str(account_id) if account_id else None
+    if wanted_account:
+        from billing.services import store as sub_store
+
+        owned = [str(g.id) for g in sub_store.billing_groups_for_payer(user_id)]
+        if wanted_account not in owned:
+            invoices = []
+        else:
+            oldest = owned[0]
+            invoices = [
+                inv
+                for inv in invoices
+                if str(getattr(inv, "billing_group_id", None) or oldest) == wanted_account
+            ]
 
     # The dropdown, from history rather than from current subscriptions.
     seen: dict[str, str] = {}
@@ -1044,8 +1164,322 @@ def build_payer_invoices(
         "invoices": rows[start:start + per_page],
         "entity_options": entity_options,
         "entity_id": wanted,
+        "account_id": wanted_account,
         "total": total,
         "page": page,
         "pages": pages,
         "per_page": per_page,
     }
+
+
+# --- One invoice, company by company (08-B's "Billing Breakdown") ----------------------
+
+#: How a cancellation extension's product is named on its line (``renewals._pending_extension_lines``).
+EXTENSION_SUFFIX = " (access after cancellation)"
+
+
+def build_invoice_breakdown(user_id, invoice_id) -> dict | None:
+    """One invoice, company by company - 08-B's "Billing Breakdown · Download csv".
+
+    A row per line the invoice charged (``subscription_invoice_line``, in its order): the
+    company, the subscription, what it costs a month, the days the line paid for and what
+    was charged for them (a credit is negative). The web writes the CSV. None when the
+    invoice is not this payer's - no id in the request reaches another payer's history.
+
+    WHAT A LINE CARRIES. The company, the product and the charge, captured at issue - and,
+    since 2026-09-25 (schema item 23), what the line PAID FOR: its days and the price per
+    period they were charged at, written by whatever priced it (``billing.Line``). Those are
+    read as they are. One of them can be missing on a recorded line: an access extension
+    whose rate stepped part-way (a bundle winding down) had no single rate, and its row
+    shows the rate that makes it add up over the days it recorded.
+
+    A LINE ISSUED BEFORE THEN recorded neither, and they are read back from how each kind of
+    line is priced (``billing.prorate`` / ``billing.extension_charge``):
+
+    * a renewal (``full``) pays for the invoice's whole period - its rate IS its charge;
+    * a module started or upgraded mid-period (``remaining``), and the credit for the plan
+      it replaced (``unused``), cover ``at`` to the period's end, prorated by the second - so
+      the rate is the charge scaled back up to the whole period, to the nearest whole unit
+      (every plan is priced in whole units);
+    * a cancellation extension (``… (access after cancellation)``) pays for the days of
+      access past the paid period: from the invoice's start to the module's access end, priced
+      against the period BEFORE the invoice (the one the paid days belonged to). The end is
+      the module row's ``app_access_until`` while it still says so; the rate is the charge
+      scaled back up over that period - so a module leaving a bundle shows the MARGINAL rate
+      it was actually charged at (Super Minty less the module kept), not the catalogue's
+      price, and the row adds up. A module resumed since has cleared its access end: the day
+      is then left out rather than guessed, and the rate falls back to the catalogue's -
+      the gap the recorded columns exist to close.
+
+    A zero line is left out: the gateway never sent it, so it is on no invoice anyone saw.
+    """
+    import uuid
+    from datetime import timedelta
+
+    from billing.services import money
+    from billing.services import store as sub_store
+    from billing.services.billing import period_containing
+    from billing.services.renewals import _extension_product
+    from shared_models.models import BillingPlan, SubscriptionInvoice
+
+    try:
+        wanted = str(uuid.UUID(str(invoice_id)))
+    except ValueError:
+        return None
+    invoice = (
+        SubscriptionInvoice.objects.filter(id=wanted, payer_user_id=str(user_id))
+        .prefetch_related("lines")
+        .first()
+    )
+    if invoice is None:
+        return None
+
+    start, end = invoice.period_start, invoice.period_end
+    period_seconds = (end - start).total_seconds()
+    unit = 10 ** money.decimal_places(invoice.currency)
+
+    def rate(amount: int, whole: float, part: float) -> int | None:
+        """The monthly rate a prorated charge was priced at, to the nearest whole unit."""
+        return round(abs(amount) * whole / part / unit) * unit if part > 0 else None
+
+    def recorded(line) -> bool:
+        return line.period_start is not None and line.period_end is not None
+
+    lines = [line for line in invoice.lines.all() if int(line.amount or 0) != 0]
+    # Only an extension that recorded nothing, or no single rate, needs the period before
+    # the invoice (and the first kind the catalogue and its module's row too).
+    derived = [
+        ln for ln in lines
+        if (ln.product_name or "").strip().endswith(EXTENSION_SUFFIX)
+        and not (recorded(ln) and ln.unit_amount is not None)
+    ]
+    catalogue: dict[str, int] = {}
+    module_for: dict[str, str] = {}
+    before_seconds = period_seconds
+    if derived:
+        catalogue = {
+            (plan.display_name or "").strip().lower(): plan.amount
+            for plan in BillingPlan.objects.all()
+        }
+        module_for = {_extension_product(code).lower(): code for code in MODULE_CODES}
+        # The period an extension was priced against: the one the paid days belonged to.
+        anchor, _currency = sub_store.billing_cycle_for_user(user_id)
+        if anchor is not None:
+            before = period_containing(anchor, start - timedelta(seconds=1))
+            before_seconds = (before.end - before.start).total_seconds()
+
+    rows = []
+    for line in lines:
+        amount = int(line.amount)
+        product = (line.product_name or "").strip()
+        extension = product.endswith(EXTENSION_SUFFIX)
+        name = product[: -len(EXTENSION_SUFFIX)] if extension else product
+        kind = "extension" if extension else (line.kind or "full").lower()
+
+        if recorded(line):
+            # As the line was priced, recorded at issue (schema item 23).
+            line_start, line_end, monthly = line.period_start, line.period_end, line.unit_amount
+            if monthly is None:
+                # No single rate (an extension whose rate stepped part-way): the one that
+                # makes the row add up over its days, against the period they were priced on.
+                whole = before_seconds if extension else period_seconds
+                monthly = rate(amount, whole, (line_end - line_start).total_seconds())
+        else:
+            # Issued before lines recorded their days: read back from the kind (above).
+            line_start, line_end, monthly = start, end, abs(amount)
+            if extension:
+                code = module_for.get(name.lower())
+                row = sub_store.module_row(line.entity_id, code) if code else None
+                until = getattr(row, "app_access_until", None)
+                if until is not None and until > start:
+                    line_end = until
+                    monthly = rate(amount, before_seconds, (until - start).total_seconds())
+                else:
+                    line_end, monthly = None, catalogue.get(name.lower())
+            elif kind in ("remaining", "unused") and line.at is not None:
+                line_start = line.at
+                monthly = rate(amount, period_seconds, (end - line_start).total_seconds())
+
+        rows.append(
+            {
+                "entity_id": str(line.entity_id),
+                "entity_name": line.entity_name or "",
+                "subscription": name,
+                "kind": kind,
+                "monthly_minor": monthly,
+                "period_start": _iso(line_start),
+                "period_end": _iso(line_end),
+                "charged_minor": amount,
+            }
+        )
+
+    return {
+        "invoice": {
+            "id": str(invoice.id),
+            "reference": _reference(invoice),
+            "currency": (invoice.currency or "").upper(),
+            "period_start": _iso(start),
+            "period_end": _iso(end),
+            "total_minor": invoice.total or 0,
+        },
+        "rows": rows,
+    }
+
+
+# --- Billing accounts (08-A / 08-B / 08-C) ---------------------------------------------
+#
+# A BILLING ACCOUNT is a ``payer_billing_group`` row: the name it bills under ("Bill to"),
+# a billing email, the cards on it, the ONE card it charges, the companies it pays for and
+# its own dunning clock. The portal shows one at a time — 08-A the chosen one, 08-B its
+# profile — and every account carries what those pages print, so neither page has to join
+# anything itself.
+
+
+def account_name(group, payer: dict) -> str:
+    """What "Bill to" reads for one account: the company the payer named it after, else
+    the payer — which is what every account opened before accounts had names renders as,
+    and what the Stripe customer is called for them (``checkout._payer_identity``)."""
+    company = (getattr(group, "billing_company", None) or "").strip()
+    return company or payer.get("name") or payer.get("email") or ""
+
+
+def _countries() -> list[dict]:
+    """Every country in the registry, in its display order — the 08-C Country list.
+
+    NOT filtered on ``is_active``: that flag says where Minty operates, and a card can be
+    billed from anywhere.
+    """
+    return [
+        {"code": row.country_code, "name": row.country_name_en or row.country_code}
+        for row in CountryInfo.objects.order_by("display_order", "country_name_en")
+    ]
+
+
+def build_billing_accounts(user_id, *, countries: bool = False) -> dict:
+    """The payer's billing accounts, oldest first — the first is the one shown by default.
+
+    ONE STRIPE READ for the page (``payment_methods._accounts_with_cards``) and one query
+    each for the nominations, the module rows and the company names.
+
+    Per account:
+
+    * ``name`` — ``account_name``; ``billing_company`` / ``billing_email`` stay raw so a
+      form can tell "unnamed" from "named after the payer";
+    * ``card`` — the card the account CHARGES, or null when Stripe no longer holds it (a
+      detached card is an account that cannot pay, and the page says so);
+    * ``cards`` — the shelf, default first, with ``is_default`` marking THIS account's card.
+      The shared card views mark the Stripe CUSTOMER default instead, so each is copied
+      and re-marked here — two accounts on one card would otherwise disagree about it;
+    * ``address`` — the charged card's billing address. The account holds none of its own
+      (the user's decision): the address IS the card's, which 08-C writes;
+    * ``companies`` — the companies nominated onto it that this payer still pays for (a
+      nomination outlives a handover as history, and history is not shown);
+    * ``in_dunning`` / ``past_due`` — the account's collection clock, and whether anything
+      on it is owed (the clock, or any of its companies past due);
+    * ``next_bill`` — what its next renewal will charge, estimated (``next_bill_for_account``).
+
+    ``next_billing`` is the payer's, once: every account renews on the same anchor.
+    ``countries`` (the registry) and ``publishable_key`` only when asked — 08-C is the one
+    screen that needs them: its address form is Stripe's own (the AddressElement), limited to
+    the registry's countries and mounted with the key.
+    """
+    from billing.services import clock, payment_methods
+    from billing.services import store as sub_store
+
+    anchor, _currency = sub_store.billing_cycle_for_user(user_id)
+    when = next_billing_from(anchor, clock.now())
+    wallet, groups = payment_methods._accounts_with_cards(user_id)
+    live = {m["id"]: m for m in wallet["methods"]}
+    payer = _person(_by_pk(User, user_id), user_id)
+
+    phases: dict[str, set[str]] = {}
+    for row in sub_store.module_rows_for_payer(user_id):
+        phases.setdefault(str(row.entity_id), set()).add(getattr(row, "phase", None) or "")
+
+    on_account: dict[str, list[str]] = {}
+    for nomination in sub_store.nominations_for_payer(user_id):
+        entity_id = str(nomination.entity_id)
+        if entity_id in phases:
+            on_account.setdefault(str(nomination.billing_group_id), []).append(entity_id)
+
+    named = {entity_id for ids in on_account.values() for entity_id in ids}
+    names = (
+        {str(e.id): (e.name or "") for e in Entity.objects.filter(id__in=sorted(named))}
+        if named
+        else {}
+    )
+
+    charged_cards = {
+        str(group.id): live.get(group.stripe_payment_method_id) for group, _ in groups
+    }
+    country_names = _country_names(
+        ((card or {}).get("address") or {}).get("country")
+        for card in charged_cards.values()
+    )
+
+    accounts = []
+    for group, cards in groups:
+        charging = group.stripe_payment_method_id
+        charged = charged_cards[str(group.id)]
+        shelf = [dict(card, is_default=card["id"] == charging) for card in cards]
+        if charged is not None and not any(card["id"] == charging for card in shelf):
+            # A charged card missing from its own shelf is the divergence
+            # ``billing_account_payment_method`` exists to prevent; show what is charged.
+            shelf.insert(0, dict(charged, is_default=True))
+        shelf.sort(key=lambda card: 0 if card["is_default"] else 1)
+
+        address = None
+        if charged is not None:
+            address = dict(charged.get("address") or {})
+            code = address.get("country")
+            address["country_name"] = country_names.get(code or "", code) if code else None
+
+        companies = sorted(
+            (
+                {
+                    "entity_id": entity_id,
+                    "entity_name": names.get(entity_id, ""),
+                    "past_due": PHASE_PAST_DUE in phases.get(entity_id, set()),
+                }
+                for entity_id in on_account.get(str(group.id), [])
+            ),
+            key=lambda company: (company["entity_name"] or "").lower(),
+        )
+        in_dunning = group.dunning_started_at is not None
+        accounts.append(
+            {
+                "id": str(group.id),
+                "name": account_name(group, payer),
+                "billing_company": group.billing_company,
+                "billing_email": group.billing_email,
+                "default_id": charging,
+                "card": dict(charged, is_default=True) if charged is not None else None,
+                "cards": shelf,
+                "total": len(shelf),
+                "address": address,
+                "companies": companies,
+                "in_dunning": in_dunning,
+                "past_due": in_dunning or any(c["past_due"] for c in companies),
+                "next_bill": next_bill_for_account(user_id, group.id, anchor, when),
+            }
+        )
+
+    payload = {
+        "has_account": wallet["has_account"],
+        "payer": payer,
+        "next_billing": _fmt(when),
+        "next_billing_iso": _iso(when),
+        "accounts": accounts,
+        "total": len(accounts),
+        # The flat wallet as well: a card on no account is still the payer's, and the
+        # Stripe customer default still decides what pickers offer first.
+        "methods": wallet["methods"],
+        "default_id": wallet["default_id"],
+    }
+    if countries:
+        payload["countries"] = _countries()
+        # Public by definition (it is what the browser loads Stripe.js with). None when this
+        # environment has no Stripe: the form then says the address cannot be changed here,
+        # and the name and email still can.
+        payload["publishable_key"] = payment_methods.get_publishable_key() or None
+    return payload

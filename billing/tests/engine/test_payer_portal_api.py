@@ -143,9 +143,36 @@ def test_lapsed_paid_module_reads_ended_not_not_subscribed(app):
     )
     assert state["status"] == portal.STATUS_ENDED
     assert state["date_label"] == "Ended"
+    # The day it really stopped: the paid period it ran out of, already behind us.
+    assert state["date"] == NOW - timedelta(days=30)
     # The mirror image of the test below: a module that was PAID for must never be
     # described as an expired trial, which would deny the purchase outright.
     assert state["status"] != portal.STATUS_TRIAL_EXPIRED
+
+
+def test_a_module_cut_off_early_prints_no_date_rather_than_the_accounts(app):
+    """Terminated on the spot: ``cancelled``, access cut, no ``app_access_until`` of its own.
+    The last date to fall back on was the billing ACCOUNT's paid-through - still ahead,
+    because the account renews for its other companies - so the list read "Ended 18 Oct
+    2026", a date to come under a word that says it is past. It prints none instead."""
+    from billing.services import portal
+
+    state = _state(
+        _row("PETTY_CASH", "cancelled", first_billed_at=NOW - timedelta(days=60)),
+        paid_through=NOW + timedelta(days=23),
+    )
+    assert state["status"] == portal.STATUS_ENDED
+    assert state["date"] is None
+    assert state["date_label"] is None
+
+    # Its own access end, once passed, is still printed.
+    until = NOW - timedelta(days=4)
+    ran_out = _state(
+        _row("PETTY_CASH", "cancelled", first_billed_at=NOW - timedelta(days=60),
+             app_access_until=until),
+        paid_through=NOW + timedelta(days=23),
+    )
+    assert (ran_out["date_label"], ran_out["date"]) == ("Ended", until)
 
 
 def test_a_trial_that_ran_out_says_so_rather_than_just_ended(app):
@@ -469,6 +496,94 @@ def test_an_invoice_with_no_line_for_that_entity_drops_out(app, payer_invoices):
 
     assert result["total"] == 1
     assert result["invoices"][0]["reference"] == "in_2"
+
+
+def _on(invoice, group_id):
+    """An invoice raised by one billing account (``billing_group_id``); left unset it is a
+    pre-accounts invoice, which carries none."""
+    invoice.billing_group_id = group_id
+    return invoice
+
+
+@pytest.fixture
+def two_accounts(monkeypatch):
+    """The payer's accounts, oldest first — the order legacy invoices are attributed by."""
+    from billing.services import store as sub_store
+
+    monkeypatch.setattr(
+        sub_store, "billing_groups_for_payer",
+        lambda _u: [SimpleNamespace(id="g_old"), SimpleNamespace(id="g_new")],
+    )
+
+
+def test_an_account_shows_the_invoices_it_raised(app, payer_invoices, two_accounts):
+    """08-B is ONE account's page. A pre-accounts invoice belongs to the OLDEST account —
+    where dunning collects it — so the page and the collection agree whose debt it is."""
+    portal = payer_invoices(
+        [
+            _on(_invoice("in_new", ident="i1"), "g_new"),
+            _on(_invoice("in_old", ident="i2"), "g_old"),
+            _invoice("in_legacy", ident="i3"),
+        ]
+    )
+
+    with app.app_context():
+        old = portal.build_payer_invoices("u1", account_id="g_old")
+        new = portal.build_payer_invoices("u1", account_id="g_new")
+
+    assert [r["reference"] for r in old["invoices"]] == ["in_old", "in_legacy"]
+    assert [r["reference"] for r in new["invoices"]] == ["in_new"]
+    assert (old["account_id"], new["account_id"]) == ("g_old", "g_new")
+
+
+def test_someone_elses_account_shows_no_invoices(app, payer_invoices, two_accounts):
+    """A filter, not a permission — but an account that is not the caller's must match
+    nothing rather than fall through to everything."""
+    portal = payer_invoices([_on(_invoice("in_1"), "g_new"), _invoice("in_2", ident="i2")])
+
+    with app.app_context():
+        result = portal.build_payer_invoices("u1", account_id="g_somebody_elses")
+
+    assert result["invoices"] == []
+    assert result["entity_options"] == []
+
+
+def test_the_entity_filter_narrows_within_an_account(app, payer_invoices, two_accounts):
+    portal = payer_invoices(
+        [
+            _on(_invoice("in_1", lines=[_line("e1", "Acme", "Petty Cash", 28000)]), "g_new"),
+            _on(
+                _invoice("in_2", ident="i2", lines=[_line("e2", "Beta", "Petty Cash", 28000)]),
+                "g_new",
+            ),
+            _on(
+                _invoice("in_3", ident="i3", lines=[_line("e2", "Beta", "Petty Cash", 28000)]),
+                "g_old",
+            ),
+        ]
+    )
+
+    with app.app_context():
+        result = portal.build_payer_invoices("u1", account_id="g_new", entity_id="e2")
+
+    assert [r["reference"] for r in result["invoices"]] == ["in_2"]
+    assert [e["name"] for e in result["entity_options"]] == ["Acme", "Beta"]
+
+
+def test_the_next_billing_date_is_ahead_of_the_anchor(app, payer_portal):
+    """The anchor is the FIRST charge and never moves; the landing printed it as "Next
+    Billing Date". ``next_billing`` is the boundary ahead — NOW is 6 Aug, anchored 28 Jun,
+    so 28 Aug."""
+    from billing.services import portal
+
+    payer_portal(rows=[], entities=[], anchor=datetime(2026, 6, 28, 13, tzinfo=UTC))
+
+    with app.app_context():
+        billing = portal.build_payer_subscriptions("u1")["billing"]
+
+    assert billing["anchor"] == "28 Jun 2026"
+    assert billing["next_billing"] == "28 Aug 2026"
+    assert billing["next_billing_iso"].startswith("2026-08-28")
 
 
 def test_the_entity_dropdown_comes_from_history_not_current_subscriptions(
