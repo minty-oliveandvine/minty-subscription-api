@@ -56,8 +56,14 @@ class BillingError(Exception):
         self.invoice_id = invoice_id
 
 
-def find_invoice_by_metadata(customer_id: str, key: str, value: str) -> dict | None:
+def find_invoice_by_metadata(customer_id: str, key: str, value: str, *,
+                             live_only: bool = False) -> dict | None:
     """An existing invoice for this customer carrying ``metadata[key] == value``.
+
+    ``live_only`` skips VOID invoices. Off by default, and deliberately: for a renewal or a
+    transfer a void invoice is still evidence the period was dealt with - re-billing a period
+    somebody voided on purpose is the wrong answer. ``refresh_invoice`` wants the opposite: a
+    replacement that was withdrawn is not one to collect on.
 
     NO LONGER the routine double-billing guard. That is now the UNIQUE index on
     ``subscription_invoice.idempotency_key``, claimed before the charge (see
@@ -76,6 +82,8 @@ def find_invoice_by_metadata(customer_id: str, key: str, value: str) -> dict | N
     # which here means re-issuing an invoice that already exists.
     listing = get_stripe().Invoice.list(customer=customer_id, limit=100)
     for candidate in listing.auto_paging_iter():
+        if live_only and candidate.get("status") == "void":
+            continue
         if (candidate.get("metadata") or {}).get(key) == value:
             return candidate
     return None
@@ -374,6 +382,45 @@ def issue_invoice(customer_id: str, invoice: Invoice, *, memo: str | None = None
         ) from exc
 
 
+#: What ``retry_invoice`` reports for an invoice the processor will no longer collect: a
+#: marker for ``dunning``, which re-issues the invoice (``refresh_invoice``) and charges the
+#: replacement instead. Never a message - nothing a customer reads may carry it.
+DEAD_PAYMENT = "payment_intent_canceled"
+
+#: The metadata a replacement carries naming the invoice it replaces.
+REPLACES = "replaces"
+
+
+def _payment_is_dead(invoice) -> bool:
+    """Whether the processor has cancelled this OPEN invoice's payment for good.
+
+    Stripe cancels a PaymentIntent once it has been confirmed too many times - "a variable
+    upper limit on how many times a PaymentIntent can be confirmed", ten declines in our
+    account - and cancellation "can't be undone": the invoice keeps pointing at the dead one,
+    and every later pay is refused ("This invoice can no longer be paid"). ``payment_intent``
+    has to be EXPANDED for this to see it.
+    """
+    if (invoice.get("status") or "") != "open":
+        return False
+    intent = invoice.get("payment_intent")
+    return isinstance(intent, dict) and intent.get("status") == "canceled"
+
+
+def _died(invoice_id: str) -> bool:
+    """Re-read after a failed pay: did THAT call cancel the payment? Never raises.
+
+    The call that crosses the processor's limit is the one that cancels - and it fails with an
+    invalid-request error, not a decline - so the invoice's STATE decides, not the error.
+    """
+    try:
+        return _payment_is_dead(
+            get_stripe().Invoice.retrieve(invoice_id, expand=["payment_intent"])
+        )
+    except Exception:
+        logger.warning("dunning: could not re-check invoice {} after a failed retry", invoice_id)
+        return False
+
+
 def retry_invoice(invoice_id: str,
                   payment_method: str | None = None) -> tuple[bool, str | None]:
     """Attempt payment on an already-finalized invoice. Returns ``(paid, reason)``.
@@ -394,18 +441,29 @@ def retry_invoice(invoice_id: str,
     An invoice that is already paid returns ``(True, None)``: someone may have paid it
     out of band between the attempt being scheduled and it running.
 
+    An invoice the processor will NEVER collect returns ``(False, DEAD_PAYMENT)`` - checked
+    before the attempt, and again after a failed one, because the call that crosses the
+    processor's confirmation limit is itself the one that cancels. Nothing is paid or
+    recorded for it here; ``dunning`` re-issues it and charges the replacement.
+
     Whatever the outcome, the local record is brought up to date. A recovered invoice
     that still reads "open" months later would make the table lie about the one thing it
     is for — a declined renewal is precisely the case someone asks "was I charged?" of.
     """
     stripe = get_stripe()
     try:
-        invoice = stripe.Invoice.retrieve(invoice_id)
+        invoice = stripe.Invoice.retrieve(invoice_id, expand=["payment_intent"])
         if invoice.get("status") == "paid":
             record = _local(invoice_id)
             _settle(record, **_record_of(invoice))
             _capture_payment_method(record, invoice_id)
             return True, None
+        if _payment_is_dead(invoice):
+            # Not paid, and not settled either: an earlier refresh may already have marked
+            # the local row void, and that must not be overwritten with "open".
+            logger.info("dunning: invoice {} can no longer be paid (its payment was "
+                        "cancelled by the processor)", invoice_id)
+            return False, DEAD_PAYMENT
         paid = stripe.Invoice.pay(
             invoice_id, **({"payment_method": payment_method} if payment_method else {})
         )
@@ -422,6 +480,8 @@ def retry_invoice(invoice_id: str,
     except Exception as exc:
         reason = getattr(exc, "user_message", None) or str(exc)
         logger.info("dunning: retry of invoice {} failed: {}", invoice_id, reason)
+        if _died(invoice_id):
+            return False, DEAD_PAYMENT
         return False, reason
 
 
@@ -462,3 +522,190 @@ def void_invoice(invoice_id: str) -> None:
     else:
         stripe.Invoice.void_invoice(invoice_id)
     _settle(_local(invoice_id), status="void")
+
+
+def _items_of(stripe, invoice_id: str) -> list:
+    """Every invoice item on ``invoice_id``, as the processor lists them (newest first)."""
+    return list(stripe.InvoiceItem.list(invoice=invoice_id, limit=100).auto_paging_iter())
+
+
+def _signature(item) -> tuple:
+    """What makes two invoice items the same charge, for not copying one twice."""
+    return (int(item.get("amount") or 0), item.get("description"),
+            (item.get("metadata") or {}).get("entity_id"))
+
+
+def refresh_invoice(invoice_id: str, payment_method: str | None = None) -> dict | None:
+    """Re-issue an invoice the processor will no longer collect. Returns the replacement.
+
+    Stripe cancels an invoice's payment for good once it has been confirmed too many times
+    (see ``_payment_is_dead``), and from then on the invoice can never be paid - so the
+    customer who fixes their card on day eleven could not pay us at all. The only way to
+    collect is a NEW invoice: the same lines, the same period, the same metadata (the renewal
+    key dunning and the renewal run find it by) plus ``replaces``, on the card named here.
+
+    The steps, in the ORDER that makes every interruption resumable:
+
+      1. claim the replacement locally under ``store.refresh_key`` - a copy of the dead one's
+         recorded lines, never re-priced (a cancellation's extension, already marked
+         invoiced, would be lost to a rebuild);
+      2. create it at the processor (found by ``replaces`` if an earlier attempt already did),
+         copy the dead invoice's items onto it, and finalize it - which does not charge;
+      3. hand the dead one's key to it and mark the dead one void (``store.supersede_invoice``);
+      4. only THEN void the dead one at the processor.
+
+    The dead invoice is voided only after the replacement is open, so the processor's open
+    list always holds one of the two: dunning's "nothing open, so the debt was settled
+    elsewhere" can never see a half-finished refresh and restore access unpaid. And every
+    interrupted state still has the dead invoice open with its payment cancelled, so the next
+    attempt - scheduled or pressed - walks back in through the same door and finishes the job.
+
+    Returns the replacement, open and not yet charged (or already paid, when an interrupted
+    refresh is resumed after the payment went through); ``None`` when it cannot be re-issued
+    automatically - no local record of what was sent, or a record that disagrees with the
+    processor's - which is logged as an ERROR naming the invoice to fix by hand. Raises when
+    the processor or the database cannot be reached; calling again resumes.
+    """
+    from collections import Counter
+
+    from billing.services import store
+    from billing.services.billing import Line, Period
+
+    stripe = get_stripe()
+    claim = store.refresh_key(invoice_id)
+    dead = stripe.Invoice.retrieve(invoice_id, expand=["payment_intent"])
+    record = _local(invoice_id)
+    if record is None:
+        logger.error(
+            "billing: invoice {} can no longer be paid and has no local record to re-issue "
+            "it from - void and re-issue it by hand", invoice_id,
+        )
+        return None
+    customer = dead.get("customer") or record.stripe_customer_id
+
+    row = store.replacement_of(record)
+    if row is None:
+        if not _payment_is_dead(dead):
+            logger.warning(
+                "billing: asked to re-issue invoice {}, but it is {} and its payment is not "
+                "cancelled; leaving it", invoice_id, dead.get("status"),
+            )
+            return None
+        lines = store.invoice_lines(record.id)
+        items = _items_of(stripe, invoice_id)
+        recorded = sum(int(line.amount) for line in lines)
+        sent = sum(int(item.get("amount") or 0) for item in items)
+        if not lines or len(items) != len(lines) or recorded != sent \
+                or recorded != int(record.total or 0):
+            logger.error(
+                "billing: invoice {} can no longer be paid, and what was recorded does not "
+                "match what was sent ({} line(s) totalling {} here, {} item(s) totalling {} at "
+                "the processor) - void and re-issue it by hand",
+                invoice_id, len(lines), recorded, len(items), sent,
+            )
+            return None
+        row = store.reserve_invoice(
+            payer_user_id=record.payer_user_id,
+            stripe_customer_id=record.stripe_customer_id,
+            period=Period(record.period_start, record.period_end),
+            currency=record.currency,
+            lines=[
+                Line(
+                    entity_id=str(line.entity_id), entity_name=line.entity_name,
+                    product_name=line.product_name, amount=int(line.amount), kind=line.kind,
+                    at=line.at, period_start=line.period_start, period_end=line.period_end,
+                    unit_amount=line.unit_amount,
+                )
+                for line in lines
+            ],
+            memo=record.memo,
+            idempotency_key=claim,
+            billing_group_id=record.billing_group_id,
+        )
+        # Claimed, THEN looked at again. A run that finished the whole refresh between the
+        # check above and this claim has moved the key off ``record`` - and released the
+        # refresh key doing it, which is exactly why this claim could succeed. Ours is then a
+        # second claim on a replacement that already exists: dropped, since the processor
+        # never saw it.
+        fresh = store.invoice_for_external_id(invoice_id)
+        if row is not None and fresh is not None \
+                and fresh.idempotency_key != record.idempotency_key:
+            store.discard_invoice(row.id)
+            row = None
+        if row is None:
+            row = store.replacement_of(fresh or record)
+        if row is None:
+            raise BillingError(f"could not claim a replacement for invoice {invoice_id}")
+
+    if not row.external_id:
+        replacement = find_invoice_by_metadata(customer, REPLACES, invoice_id, live_only=True)
+        if replacement is None:
+            options = {"idempotency_key": claim}
+            if payment_method:
+                options["default_payment_method"] = payment_method
+            replacement = stripe.Invoice.create(
+                customer=customer,
+                currency=dead.get("currency"),
+                auto_advance=False,
+                collection_method="charge_automatically",
+                pending_invoice_items_behavior="exclude",
+                description=dead.get("description"),
+                metadata={**dict(dead.get("metadata") or {}), REPLACES: invoice_id},
+                **options,
+            )
+        # Straight to the store, not ``_settle``: no money has moved, so a failure to record
+        # is a reason to STOP - the reservation stays, and the next attempt resumes from it.
+        store.settle_invoice(row.id, external_id=replacement["id"],
+                             status=replacement.get("status"))
+    else:
+        replacement = stripe.Invoice.retrieve(row.external_id)
+
+    if replacement.get("status") == "draft":
+        # Created in the dead invoice's order (it lists newest first), so the replacement
+        # reads exactly as the original did. Items already on it - an interrupted copy - are
+        # skipped; the per-item keys stop a concurrent copy from adding them twice.
+        on_it = Counter(_signature(item) for item in _items_of(stripe, replacement["id"]))
+        for index, item in enumerate(reversed(_items_of(stripe, invoice_id))):
+            signature = _signature(item)
+            if on_it[signature]:
+                on_it[signature] -= 1
+                continue
+            period = item.get("period") or {}
+            stripe.InvoiceItem.create(
+                customer=customer,
+                invoice=replacement["id"],
+                currency=item.get("currency") or dead.get("currency"),
+                amount=item["amount"],
+                description=item.get("description"),
+                metadata=dict(item.get("metadata") or {}),
+                period={"start": period.get("start"), "end": period.get("end")},
+                idempotency_key=f"{claim}-item-{index}",
+            )
+        # Finalizing does not charge: the replacement is ``auto_advance=False``, like every
+        # invoice raised here. The caller charges it, in the same attempt.
+        replacement = stripe.Invoice.finalize_invoice(
+            replacement["id"], idempotency_key=f"{claim}-finalize"
+        )
+
+    store.settle_invoice(row.id, **_record_of(replacement))
+    if replacement.get("status") not in ("open", "paid"):
+        logger.error(
+            "billing: the replacement {} for invoice {} is {}, not collectable - void and "
+            "re-issue it by hand", replacement["id"], invoice_id, replacement.get("status"),
+        )
+        return None
+
+    store.supersede_invoice(record.id, row.id)
+    if (dead.get("status") or "") == "open":
+        try:
+            stripe.Invoice.void_invoice(invoice_id)
+        except Exception:
+            # It can never be paid, and the replacement is the debt now; the next attempt
+            # that meets it voids it again.
+            logger.exception(
+                "billing: re-issued invoice {} as {}, but could not void the original",
+                invoice_id, replacement["id"],
+            )
+    logger.info("billing: invoice {} could no longer be paid; re-issued as {}",
+                invoice_id, replacement["id"])
+    return replacement

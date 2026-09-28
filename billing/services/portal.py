@@ -1048,7 +1048,10 @@ def _describe(invoice, lines) -> tuple[str, str]:
 
 
 #: An invoice whose charge was made and declined. Nothing leaves one ``open`` without trying:
-#: an invoice issued without collecting stays a DRAFT (``billing_gateway.issue_invoice``).
+#: an invoice issued without collecting stays a DRAFT (``billing_gateway.issue_invoice``). The
+#: one brief exception is a RE-ISSUE (``billing_gateway.refresh_invoice``): the replacement is
+#: open a moment before it is charged, in the same attempt - and if that attempt dies between
+#: the two, the next one charges it.
 FAILED_INVOICE_STATUSES = ("open", "uncollectible")
 
 

@@ -402,3 +402,109 @@ def test_the_invoice_a_row_names_is_charged_only_if_the_rules_pick_it(app, monke
 
     assert dunning.retry_now("u1", group_id="g1", expect_invoice="in_1")["status"] == "paid"
     assert calls["retried"] == ["in_1"]
+
+
+# --- an invoice the processor will no longer collect (``dunning._charge``) --------------------
+#
+# Stripe cancels an invoice's payment once it has been confirmed too many times. Pay now is
+# exactly when a customer who has just fixed their card meets that invoice - so it re-issues it
+# and charges the replacement, in the same press.
+
+
+def _dead_first(monkeypatch, *, pays=True, replacement="in_2", raises=None):
+    """``in_1`` can no longer be paid; re-issuing it yields ``replacement``, which ``pays``."""
+    from billing.services import billing_gateway
+
+    seen = {"retried": [], "refreshed": []}
+
+    def _retry(invoice_id, payment_method=None):
+        seen["retried"].append(invoice_id)
+        if invoice_id == "in_1":
+            return False, billing_gateway.DEAD_PAYMENT
+        return (True, None) if pays else (False, "Your card was declined.")
+
+    def _refresh(invoice_id, payment_method=None):
+        seen["refreshed"].append(invoice_id)
+        if raises is not None:
+            raise raises
+        return {"id": replacement, "metadata": {"replaces": invoice_id}} if replacement else None
+
+    monkeypatch.setattr(billing_gateway, "retry_invoice", _retry)
+    monkeypatch.setattr(billing_gateway, "refresh_invoice", _refresh)
+    return seen
+
+
+def test_pay_now_on_a_dead_invoice_refreshes_and_charges_the_replacement(app, monkeypatch):
+    dunning, calls = _wire(app, monkeypatch, account=_Account(), invoices=INVOICES)
+    seen = _dead_first(monkeypatch)
+
+    with app.app_context():
+        result = dunning.retry_now("u1")
+
+    assert (result["status"], result["invoice"], result["refreshed"]) == ("paid", "in_2", "in_1")
+    assert seen == {"retried": ["in_1", "in_2"], "refreshed": ["in_1"]}
+    assert calls["settled"] == ["in_2"]
+    assert calls["attempts"] == 1
+
+
+def test_pay_now_reports_the_replacements_decline_never_the_marker(app, monkeypatch):
+    from billing.services import billing_gateway
+
+    dunning, calls = _wire(app, monkeypatch, account=_Account(), invoices=INVOICES)
+    _dead_first(monkeypatch, pays=False)
+
+    with app.app_context():
+        result = dunning.retry_now("u1")
+
+    assert (result["status"], result["reason"]) == ("failed", "Your card was declined.")
+    assert billing_gateway.DEAD_PAYMENT not in map(str, result.values())
+    assert calls["ended"] == []
+
+
+def test_pay_now_on_an_invoice_that_cannot_be_refreshed_is_not_collectable(app, monkeypatch):
+    """Not a decline - nothing was charged - so not the decline's words either."""
+    dunning, calls = _wire(app, monkeypatch, account=_Account(), invoices=INVOICES)
+    _dead_first(monkeypatch, replacement=None)
+
+    with app.app_context():
+        result = dunning.retry_now("u1")
+
+    assert result == {"status": "not_collectable", "attempts": 1, "invoice": "in_1",
+                      "reason": None}
+    assert (calls["ended"], calls["settled"]) == ([], [])
+
+
+def test_pay_now_lets_a_processor_failure_during_the_refresh_raise(app, monkeypatch):
+    """The routes answer that as "couldn't reach the card processor"; the next press resumes
+    the refresh where it stopped."""
+    import pytest
+
+    dunning, _calls = _wire(app, monkeypatch, account=_Account(), invoices=INVOICES)
+    _dead_first(monkeypatch, raises=RuntimeError("processor unreachable"))
+
+    with app.app_context(), pytest.raises(RuntimeError):
+        dunning.retry_now("u1")
+
+
+def test_a_row_showing_the_replacement_collects_while_the_original_is_still_open(
+    app, monkeypatch
+):
+    """Between the replacement being raised and the original voided, both are open: the row
+    shows the replacement (it holds the period key), the rules pick the original (the older of
+    two invoices for one period). Charging the original finishes the refresh and collects on
+    exactly the replacement the row shows."""
+    from billing.services import renewals
+
+    account = _Account()
+    key = renewals.period_key(
+        "u1", renewals.next_period(account.anchor_at, account.paid_through), "g1"
+    )
+    both = [{"id": "in_1", "metadata": {"renewal_key": key}},
+            {"id": "in_2", "metadata": {"renewal_key": key, "replaces": "in_1"}}]
+    dunning, _calls = _wire(app, monkeypatch, account=account, invoices=both)
+    _dead_first(monkeypatch)
+
+    with app.app_context():
+        result = dunning.retry_now("u1", group_id="g1", expect_invoice="in_2")
+
+    assert (result["status"], result["invoice"]) == ("paid", "in_2")

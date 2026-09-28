@@ -247,3 +247,55 @@ def test_only_a_failed_invoice_of_the_callers(app, monkeypatch):
         billing_accounts.retry_invoice(payer.id, paid.id)
     assert caught.value.status == 409
     assert asked == [], "nothing reached the engine"
+
+
+# --- after a re-issue (``billing_gateway.refresh_invoice``) ----------------------------------
+#
+# Stripe cancels an invoice's payment once it has been confirmed too many times; the engine
+# re-issues it and moves the period key onto the replacement (``store.supersede_invoice``). The
+# button follows the key, because the key is how a row says which period it bills.
+
+
+def _refreshed(payer, account, *, key):
+    """The rows a finished refresh leaves: the original void under a retired key, the
+    replacement open and holding the period key."""
+    from billing.services import store
+
+    dead = _invoice(payer, account, external="in_dead", key=key, age_days=12)
+    replacement = _invoice(payer, account, external="in_new", key=store.refresh_key("in_dead"))
+    store.supersede_invoice(dead.id, replacement.id)
+    return dead, replacement
+
+
+def test_after_a_refresh_the_button_moves_to_the_replacement(app, monkeypatch):
+    payer, account = _payer(monkeypatch)
+    _refreshed(payer, account, key=_key(payer, account))
+
+    assert _retryable(payer) == {"in_dead": False, "in_new": True}
+
+
+def test_while_a_refresh_is_unfinished_the_button_stays_on_the_original(app, monkeypatch):
+    """Replacement raised, key not yet moved: the rules still pick the original - it holds the
+    key and is the older - so that is where the button is, and pressing it finishes the job."""
+    from billing.services import store
+
+    payer, account = _payer(monkeypatch)
+    _invoice(payer, account, external="in_dead", key=_key(payer, account), age_days=12)
+    _invoice(payer, account, external="in_new", key=store.refresh_key("in_dead"))
+
+    assert _retryable(payer) == {"in_dead": True, "in_new": False}
+
+
+def test_a_stale_page_retrying_a_replaced_invoice_is_told_to_look_again(app, monkeypatch):
+    """Drawn before the re-issue, pressed after: the debt is still there, on another row - so
+    "refresh the page", not "that invoice isn't waiting for a payment"."""
+    from billing.services import billing_accounts
+
+    payer, account = _payer(monkeypatch)
+    dead, _replacement = _refreshed(payer, account, key=_key(payer, account))
+    asked = _engine(monkeypatch)
+
+    result = billing_accounts.retry_invoice(payer.id, dead.id)
+
+    assert result["status"] == "not_this_invoice"
+    assert asked == [], "nothing reached the engine"

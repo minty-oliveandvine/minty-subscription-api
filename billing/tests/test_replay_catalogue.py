@@ -127,7 +127,7 @@ def test_a_declining_account_default_is_refused():
 
 
 @pytest.mark.parametrize(
-    "shape", ["LIFECYCLE", "LIFECYCLE_SPLIT", "L1_GIVES_UP", "CATALOGUE"],
+    "shape", ["LIFECYCLE", "LIFECYCLE_SPLIT", "L1_GIVES_UP", "L2_REFRESHED", "CATALOGUE"],
 )
 def test_every_shape_meant_to_fail_puts_a_declining_card_under_a_group(shape):
     script = [event for _name, events in getattr(rs, shape) for event in events]
@@ -142,3 +142,19 @@ def test_every_shape_meant_to_fail_puts_a_declining_card_under_a_group(shape):
 )
 def test_a_tagged_failing_card_is_still_a_failing_card(spec, declines):
     assert rs._declines(spec) is declines
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("L2_FIXED", 30 + 9),     # fixed before Stripe gave up: nothing to re-issue
+        ("L2_FIXED", 30 + 14),    # fixed after the last retry: dunning gave up first
+        ("L2_FAILS", 30),         # failed on the renewal day, not before it
+    ],
+)
+def test_L2_is_a_card_fixed_after_stripe_gave_up_and_before_dunning_did(monkeypatch, name, value):
+    """The whole point of L2 lives in its days: the renewal plus nine retries are the ten
+    declines Stripe allows, so the fix has to land after day 40 and by day 43."""
+    monkeypatch.setattr(rs, name, value)
+    with pytest.raises(SystemExit, match="L2 offsets are broken"):
+        rs._check_scripts()

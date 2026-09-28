@@ -34,6 +34,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 # Day 0 of the scenario. Pinned to a 30-day month for the same reason the harness pins
 # ``anchor_30``: the arithmetic below is about which company is on which invoice, and a
 # month that changes length underneath it would move the renewal dates without changing
@@ -137,10 +139,13 @@ class _Reserved:
 class _World:
     """The account, its cards, and every invoice the engine raised against it."""
 
-    def __init__(self, layout, *, failing=()):
+    def __init__(self, layout, *, failing=(), cap=10):
         """``layout`` is {group_id: (card, [company keys])}; ``failing`` are the cards
         that decline while they are the group's card. Every group starts paid through the
-        anchor, so the first renewal due is the period the anchor opens."""
+        anchor, so the first renewal due is the period the anchor opens.
+
+        ``cap`` is Stripe's confirmation limit - ten declines in our account - after which
+        the next call cancels the invoice's payment for good (see ``retry_invoice``)."""
         self.account = _Account(ANCHOR)
         self.rows = [
             _Row(key, code)
@@ -156,6 +161,9 @@ class _World:
         self.blast_radius: set[str] = set()  # companies a failure took past due
         self.by_key: dict[str, dict] = {}
         self.counter = 0
+        self.cap = cap
+        self.refreshes: list[tuple[str, str]] = []   # (dead invoice, its replacement)
+        self.presses: list[dict] = []                # what each Pay now answered
 
     # -- the shape of the account ---------------------------------------------
 
@@ -252,6 +260,9 @@ class _World:
             "total": invoice.total,
             "period_start": invoice.period.start,
             "entities": sorted({line.entity_id for line in invoice.lines}),
+            # The charge at issue is the payment's first confirmation.
+            "confirms": 1,
+            "dead": False,
         }
         self.invoices.append(record)
         key = (kw.get("metadata") or {}).get("renewal_key")
@@ -272,13 +283,49 @@ class _World:
         still names the card that declined, so a retry that does not say otherwise keeps
         trying it — for the whole schedule, however many times the payer replaced it.
         """
-        record = next(i for i in self.invoices if i["id"] == invoice_id)
+        from billing.services import billing_gateway
+
+        record = self.record(invoice_id)
+        if record["dead"]:
+            return False, billing_gateway.DEAD_PAYMENT
+        if self.cap is not None and record["confirms"] >= self.cap:
+            # Stripe's limit: the call after the tenth decline cancels the payment for good,
+            # whatever card it names.
+            record["dead"] = True
+            return False, billing_gateway.DEAD_PAYMENT
+        record["confirms"] += 1
         card = payment_method or record["card"]
         if card in self.failing:
             return False, "card_declined"
         record["status"] = "paid"
         record["paid_by"] = card
         return True, None
+
+    def refresh_invoice(self, invoice_id, payment_method=None):
+        """The re-issue, as ``billing_gateway.refresh_invoice`` leaves it: the same invoice
+        raised again on the card named, the original void, the period key moved over."""
+        dead = self.record(invoice_id)
+        self.counter += 1
+        replacement = {
+            **dead,
+            "id": f"in_{self.counter}",
+            "status": "open",
+            "card": payment_method or dead["card"],
+            "metadata": {**dead["metadata"], "replaces": invoice_id},
+            "confirms": 0,
+            "dead": False,
+        }
+        replacement.pop("paid_by", None)
+        dead["status"] = "void"
+        self.invoices.append(replacement)
+        key = dead["metadata"].get("renewal_key")
+        if key:
+            self.by_key[key] = _Reserved(replacement)
+        self.refreshes.append((invoice_id, replacement["id"]))
+        return replacement
+
+    def record(self, invoice_id):
+        return next(i for i in self.invoices if i["id"] == invoice_id)
 
     # -- reading the result ---------------------------------------------------
 
@@ -337,10 +384,15 @@ def _install(monkeypatch, world):
     monkeypatch.setattr(billing_gateway, "issue_invoice", world.issue_invoice)
     monkeypatch.setattr(billing_gateway, "open_invoices", world.open_invoices)
     monkeypatch.setattr(billing_gateway, "retry_invoice", world.retry_invoice)
+    monkeypatch.setattr(billing_gateway, "refresh_invoice", world.refresh_invoice)
+    # Pay now asks whether there is a card to charge at all; the world's group always has one.
+    from billing.services import stripe_client
+
+    monkeypatch.setattr(stripe_client, "customer_default_payment_method", lambda cid: CARD_GOOD)
     return renewals, dunning
 
 
-def _live(monkeypatch, world, months=4, card_events=()):
+def _live(monkeypatch, world, months=4, card_events=(), presses=()):
     """Run the lifecycle: four monthly renewals, with dunning running every day between.
 
     Days, not months, because dunning is a daily job and the retry schedule is what
@@ -351,11 +403,19 @@ def _live(monkeypatch, world, months=4, card_events=()):
     shape. Replacing a card is the group's ``stripe_payment_method_id`` changing and
     nothing else: the group keeps its cycle, its dunning clock and its companies, which
     is exactly what replacing a card does.
+
+    ``presses`` is ``(day, group_id, card)``: the customer replaces the card AFTER that day's
+    scheduled run and presses Pay now (``dunning.retry_now``); each answer lands in
+    ``world.presses``.
     """
+    from billing.services import clock
     from billing.services.billing import add_months
 
     renewals, dunning = _install(monkeypatch, world)
     schedule = {(d.date(), gid): card for d, gid, card in card_events}
+    pressed: dict = {}
+    for d, gid, card in presses:
+        pressed.setdefault(d.date(), []).append((gid, card))
     day = ANCHOR
     # Whole PERIODS, not 30-day blocks: the periods are calendar months re-derived from
     # the anchor, so counting days would stop part-way through the fourth one on some
@@ -368,6 +428,10 @@ def _live(monkeypatch, world, months=4, card_events=()):
                 group.stripe_payment_method_id = card
         renewals.run_renewals(day, scope=["u1"], issue=True)
         dunning.collect_due(day)
+        for gid, card in pressed.get(day.date(), ()):
+            world.group(gid).stripe_payment_method_id = card
+            monkeypatch.setattr(clock, "now", lambda at=day: at)
+            world.presses.append(dunning.retry_now("u1", group_id=gid))
         day += timedelta(days=1)
     return world
 
@@ -605,3 +669,75 @@ def test_report_the_difference(monkeypatch):
     assert len(one.invoices) < len(two.invoices)
     assert one.blast_radius == set(COMPANIES)
     assert two.blast_radius == {"churn", "comeback"}
+
+
+# --- Stripe's confirmation limit ------------------------------------------------------------
+#
+# Stripe cancels an invoice's payment once it has been confirmed too many times - ten declines
+# in our account - and it can never be paid after that. ``_World`` counts: the call after an
+# invoice's tenth decline kills it. Scenario 1's card is fixed on day 97, five retries in, so
+# none of the tests above ever reach the limit; these do. Before the refresh, a card fixed on
+# the tenth day or later could never pay: every retry was refused until the give-up.
+
+
+def _third_renewal():
+    """The day-92 renewal Scenario 1's card has to break."""
+    from billing.services.billing import add_months
+
+    return add_months(ANCHOR, 3)
+
+
+def _dies_and_is_fixed(group_id, days_after_renewal):
+    return ((FAILS_ON, group_id, CARD_FAIL),
+            (_third_renewal() + timedelta(days=days_after_renewal), group_id, CARD_GOOD))
+
+
+@pytest.mark.parametrize("late", [10, 11, 12, 13])
+def test_a_card_fixed_after_stripe_gave_up_is_still_collected(monkeypatch, late):
+    """THE POINT. The renewal plus nine retries are ten declines; the tenth retry finds the
+    invoice dead, re-issues it, and from then on the replacement is what is charged - so a
+    card fixed on day ten, eleven, twelve or thirteen still pays."""
+    world = _World(ONE_CARD, failing={CARD_FAIL})
+    _live(monkeypatch, world, card_events=_dies_and_is_fixed("gA", late))
+
+    assert len(world.refreshes) == 1
+    dead, replacement = world.refreshes[0]
+    assert world.record(dead)["status"] == "void"
+    assert world.record(replacement)["paid_by"] == CARD_GOOD
+    assert world.phases() == {key: "active" for key in COMPANIES}
+    # Nothing given away, nothing charged twice: the same four months as a card fixed in time.
+    assert world.collected() == MONTHLY_TOTAL * 4
+
+
+def test_a_card_never_fixed_is_refreshed_once_and_abandoned_at_give_up(monkeypatch):
+    """One replacement, not one a day - and at the give-up it is left open, exactly as the
+    original was before."""
+    world = _World(ONE_CARD, failing={CARD_FAIL})
+    _live(monkeypatch, world, card_events=((FAILS_ON, "gA", CARD_FAIL),))
+
+    assert len(world.refreshes) == 1
+    dead, replacement = world.refreshes[0]
+    assert world.record(dead)["status"] == "void"
+    assert world.record(replacement)["status"] == "open"
+    assert world.record(replacement)["confirms"] == 4        # retries ten to thirteen
+
+
+def test_a_card_fixed_before_stripe_gave_up_never_refreshes(monkeypatch):
+    """Scenario 1 as it always was: fixed five retries in, well inside the limit."""
+    world = _World(ONE_CARD, failing={CARD_FAIL})
+    _live(monkeypatch, world, card_events=_breaks_and_is_fixed("gA"))
+
+    assert world.refreshes == []
+
+
+def test_pay_now_after_stripe_gave_up_refreshes_and_collects(monkeypatch):
+    """The customer fixes the card after the tenth decline and presses Pay now that same day:
+    the press is the call that finds the invoice dead, and it collects on the replacement."""
+    world = _World(ONE_CARD, failing={CARD_FAIL})
+    press = _third_renewal() + timedelta(days=9)     # after the renewal and nine retries
+    _live(monkeypatch, world, card_events=((FAILS_ON, "gA", CARD_FAIL),),
+          presses=((press, "gA", CARD_GOOD),))
+
+    assert [answer["status"] for answer in world.presses] == ["paid"]
+    assert world.presses[0]["refreshed"] == world.refreshes[0][0]
+    assert world.phases() == {key: "active" for key in COMPANIES}

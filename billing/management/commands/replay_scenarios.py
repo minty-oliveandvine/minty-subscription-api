@@ -24,7 +24,7 @@ login works in Flask. Run it against the DEV database and clone to a fresh payer
 …``) when the Flask script has run the same shape today: Stripe remembers an idempotency key for
 24 hours and the keys are per payer.
 
-EIGHT SHAPES, and a payer for each person who needs to see one. ``RUNS`` is that pairing
+NINE SHAPES, and a payer for each person who needs to see one. ``RUNS`` is that pairing
 and nothing more — the shapes themselves are the lists below. Three of them carry the
 bulk of the work:
 
@@ -42,7 +42,7 @@ bulk of the work:
                   and the decline stops at the card that failed instead of taking the
                   whole account down. The only shape with more than one card on it.
 
-The other five are the edge shapes further down, each driving one account-level outcome.
+The other six are the edge shapes further down, each driving one account-level outcome.
 
 A SHAPE NEVER SHARES A PAYER, with another shape or with another person running the same
 one. The ANCHOR is payer-scoped — every card the payer holds renews on it — so a second
@@ -589,7 +589,7 @@ LIFECYCLE_SPLIT = [
 # clock, one card, one invoice per period covering every entity. Two of them on the same
 # payer would not be two tests, it would be one confused one.
 #
-# Four of the five share ONE anchor helper. They do not share a payer — they share a
+# Five of the six share ONE anchor helper. They do not share a payer — they share a
 # SHAPE: buy on the anchor day, let exactly one renewal fall, and watch what that renewal
 # does. Anchoring them all on the same day of the same 30-day month keeps their timelines
 # directly comparable when two runs are read side by side, and keeps each span down to
@@ -622,6 +622,38 @@ L1_GIVES_UP = [
         # (the payer's default) it broke nothing from the per-entity-cards cutover until
         # 2026-09-28: every run in between renewed on a working card and never gave up.
         ("recard", CARD_FAIL, after(EDGE_ANCHOR, 26)),
+    ]),
+]
+
+# The other half of L1, and the reason re-issuing exists. Stripe cancels an invoice's payment
+# once it has been confirmed too many times - "a variable upper limit", TEN declines in our
+# account - and a cancelled payment can never be taken: before the re-issue
+# (``billing_gateway.refresh_invoice``), a customer who fixed their card after the tenth decline
+# could not pay us at all, and was given up on anyway.
+#
+# Mender Co's card dies before the day-30 renewal and is fixed on day 42. The renewal and nine
+# retries are the ten declines; the tenth retry (day 40) finds the invoice dead and re-issues
+# it (``dunning REFRESHED``); day 41 declines on the replacement; day 42's retry collects it.
+# Leaver Co cancelled on day 14, so its extension rides the very invoice that dies - the line
+# a re-priced invoice would lose, and a copied one keeps.
+#
+# The limit is OBSERVED, not documented (Stripe gives no number), so the days hang off it and
+# ``_check_scripts`` holds them to it: fixed after Stripe gives up, before dunning does.
+STRIPE_CONFIRMATION_LIMIT = 10
+EDGE_RENEWAL_DAY = 30      # EDGE_ANCHOR is in a 30-day month, so its renewal is day 30
+L2_FAILS = 26
+L2_FIXED = 42
+
+L2_REFRESHED = [
+    ("L2 Mender Co", [("buy", "PETTY_CASH", EDGE_ANCHOR)]),
+    ("L2 Leaver Co", [
+        ("buy", "PETTY_CASH", EDGE_ANCHOR),
+        ("cancel", "PETTY_CASH", after(EDGE_ANCHOR, 14)),
+    ]),
+    ("L2 Mender Co", [
+        # The card under the account's one group, so Leaver Co's line goes down with it.
+        ("recard", CARD_FAIL, after(EDGE_ANCHOR, L2_FAILS)),
+        ("recard", CARD_GOOD, after(EDGE_ANCHOR, L2_FIXED)),
     ]),
 ]
 
@@ -740,8 +772,8 @@ def clone_run(base: dict, tag: str, email: str, *, user_id: str | None = None,
               name: tuple | None = None, notify_to: str | None = None) -> dict:
     """One shape, a different payer — the whole of what the entries in ``RUNS`` vary.
 
-    Every run below is one of EIGHT shapes (the catalogue, the lifecycle, the split, and
-    the five edges) pointed at a payer. Nothing else differs, so a new payer for an
+    Every run below is one of NINE shapes (the catalogue, the lifecycle, the split, and
+    the six edges) pointed at a payer. Nothing else differs, so a new payer for an
     existing shape does not need a new entry: ``--as`` and ``--tag`` build it at the
     command line.
 
@@ -849,7 +881,7 @@ RUNS = {
         "tag": "S1B",
         "scenarios": LIFECYCLE_SPLIT,
     },
-    # The edge set. Five payers on Angelika's address family — one per account-level
+    # The edge set. Six payers on Angelika's address family — one per account-level
     # outcome, since a give-up, a clean renewal and a 31st anchor cannot coexist on one
     # account. Same password as the rest.
     "L1": {
@@ -859,6 +891,14 @@ RUNS = {
         "name": ("Angelika", "GiveUp"),
         "tag": "L1",
         "scenarios": L1_GIVES_UP,
+    },
+    "L2": {
+        "label": "A card fixed after Stripe gave up on the invoice - collected by re-issuing it",
+        "user_id": "b2b2b2b2-0000-1111-2222-333333333333",
+        "email": "angelika.tardaguela+l2@oliveandvinehk.com",
+        "name": ("Angelika", "Refresh"),
+        "tag": "L2",
+        "scenarios": L2_REFRESHED,
     },
     "C1": {
         "label": "Two conversions on the anchor day beside a plain renewer",
@@ -1029,6 +1069,16 @@ def _check_scripts() -> None:
     for key, run in RUNS.items():
         _check_script(key, run["scenarios"])
     _check_catalogue(CATALOGUE, UNREACHABLE_05A)
+    # L2 is a card fixed AFTER Stripe gave up on the invoice and BEFORE dunning does: the
+    # renewal plus nine retries are the ten declines, and the last retry is day 13 after it.
+    last_retry = EDGE_RENEWAL_DAY + 13
+    if not (L2_FAILS < EDGE_RENEWAL_DAY < EDGE_RENEWAL_DAY + STRIPE_CONFIRMATION_LIMIT
+            < L2_FIXED <= last_retry):
+        raise SystemExit(
+            f"L2 offsets are broken: the card must fail before day {EDGE_RENEWAL_DAY} and be "
+            f"fixed after day {EDGE_RENEWAL_DAY + STRIPE_CONFIRMATION_LIMIT}, by day "
+            f"{last_retry} (fails {L2_FAILS}, fixed {L2_FIXED})"
+        )
 
 
 _check_scripts()
@@ -1727,6 +1777,10 @@ def _daily_jobs(run: dict, today: datetime, log: list[str]) -> None:
     # (``retry_invoice`` returns ``(False, None)``) has no reason to give.
     recovered = {str(r.get("billing_group_id")) for r in (result or {}).get("recovered", [])}
     for item in (result or {}).get("retried", []):
+        if item.get("refreshed"):
+            # The processor would no longer collect the invoice, so dunning re-issued it and
+            # charged the replacement (``billing_gateway.refresh_invoice``).
+            log.append(f"    dunning REFRESHED {item['refreshed']} -> {item.get('invoice')}")
         outcome = ("paid" if str(item.get("billing_group_id")) in recovered
                    else item.get("reason") or "not paid")
         log.append(f"    dunning retry -> {outcome}")

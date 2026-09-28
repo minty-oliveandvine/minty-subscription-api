@@ -24,6 +24,7 @@ constant without the other fails loudly rather than drifting.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from typing import NamedTuple
 
 # Days after the FIRST failure at which each retry runs. EVERY day from the first to the
 # thirteenth: most failures are transient — an expired card that has already been
@@ -349,6 +350,71 @@ def _manual_target(invoices: list[dict], key: str | None) -> dict | None:
     return None
 
 
+def _replaced_by(invoices: list[dict], invoice_id: str) -> dict | None:
+    """The open invoice that re-issued ``invoice_id`` (``billing_gateway.refresh_invoice``), or
+    None.
+
+    Both can be open at once - between the replacement being raised and the original being
+    voided, a moment a crash can stretch until the next attempt. A page drawn then shows the
+    REPLACEMENT (it holds the period's key) while these rules still pick the original (the
+    older of two invoices for one period), so the row's invoice and the rules' invoice differ
+    without anything being wrong: charging the original finishes the re-issue and collects on
+    the replacement, the very document the row shows.
+    """
+    from billing.services import billing_gateway
+
+    for invoice in invoices:
+        if (invoice.get("metadata") or {}).get(billing_gateway.REPLACES) == invoice_id:
+            return invoice
+    return None
+
+
+class _Charge(NamedTuple):
+    """What one charge attempt came to - see ``_charge``."""
+
+    paid: bool
+    reason: str | None
+    invoice: dict
+    refreshed: str | None = None
+    stuck: bool = False
+
+
+def _charge(group, invoice: dict) -> _Charge:
+    """Charge ONE invoice on the group's current card, re-issuing it first if the processor will
+    no longer collect it. The one place both the scheduled run and Pay now charge.
+
+    Stripe cancels an invoice's payment for good once it has been confirmed too many times (ten
+    declines in our account); after that no retry can ever succeed, so a customer who fixed
+    their card on day eleven could not pay at all. A dead invoice is therefore re-issued as an
+    identical replacement and THAT is charged, inside the same attempt: the caller counted the
+    slot once, and the card is hit once.
+
+    ``invoice`` on the result is what was actually charged - the replacement when there was a
+    refresh, with ``refreshed`` naming the one it replaced - so the caller settles and reports
+    the right document. ``stuck`` means the invoice can no longer be paid and could not be
+    re-issued automatically (the gateway has logged which, as an ERROR): nothing was charged,
+    and it is not a decline.
+
+    The gateway's ``DEAD_PAYMENT`` marker never leaves here. A raise does - the processor or the
+    database could not be reached mid-refresh - and the next attempt resumes where it stopped.
+    """
+    from billing.services import billing_gateway
+
+    card = group.stripe_payment_method_id
+    paid, reason = billing_gateway.retry_invoice(invoice["id"], card)
+    if reason != billing_gateway.DEAD_PAYMENT:
+        return _Charge(paid, reason, invoice)
+    replacement = billing_gateway.refresh_invoice(invoice["id"], card)
+    if replacement is None:
+        return _Charge(False, None, invoice, stuck=True)
+    paid, reason = billing_gateway.retry_invoice(replacement["id"], card)
+    if reason == billing_gateway.DEAD_PAYMENT:
+        # A fresh invoice cannot have had its payment cancelled before it was ever tried; if
+        # it somehow has, the customer is still owed a sentence, not a marker.
+        reason = None
+    return _Charge(paid, reason, replacement, refreshed=invoice["id"])
+
+
 def _restore_access(user_id) -> None:
     """Switch this payer's modules back on now that the balance is settled.
 
@@ -391,7 +457,9 @@ def collect_due(now, limit: int | None = None) -> dict:
     for into the grace window and then terminated them.
 
     Returns ``{"retried": [...], "recovered": [...], "collected": [...],
-    "given_up": [...]}``.
+    "given_up": [...]}``. A ``retried`` entry names the ``invoice`` it charged; when that had to
+    be re-issued first because the processor would no longer collect it (``_charge``),
+    ``refreshed`` names the one it replaced.
 
     ``collected`` is the fourth outcome and the one that is easy to miss: the charge went
     through, but on an invoice that is not the period the payer is behind on, so the
@@ -547,6 +615,12 @@ def retry_now(user_id, entity_id=None, *, group_id=None, expect_invoice=None) ->
                         attempt is spent, and ``invoice`` names the old debt
         not_this_invoice ``expect_invoice`` names an open invoice other than the
                         one this would charge — nothing is charged or counted
+        not_collectable the invoice can no longer be paid and could not be re-issued
+                        automatically (logged for a person to fix) — nothing was charged
+
+    When the invoice had to be re-issued first - the processor had cancelled its payment for
+    good (``_charge``) - ``invoice`` names the replacement that was charged, and ``refreshed``
+    the one it replaced.
 
     ``group_id`` names the CARD outright instead of reaching it through a company - the
     payer portal's invoice row knows its billing account, not a company. It must be one
@@ -554,7 +628,7 @@ def retry_now(user_id, entity_id=None, *, group_id=None, expect_invoice=None) ->
     invoice that row shows: it is collected only if it is the one the rules below pick,
     so a button can never pay a different bill from the one it sits beside.
     """
-    from billing.services import billing_gateway, store
+    from billing.services import store
     from billing.services._log import logger
     from billing.services.stripe_client import (
         customer_default_payment_method,
@@ -579,10 +653,15 @@ def retry_now(user_id, entity_id=None, *, group_id=None, expect_invoice=None) ->
     # up by mistake and the single open invoice is what they came to pay.
     key = _current_period_key(account, group)
     target = _manual_target(invoices, key)
-    if expect_invoice and (target is None or target["id"] != expect_invoice):
+    if expect_invoice and (target is None or (
+        target["id"] != expect_invoice
+        and (_replaced_by(invoices, target["id"]) or {}).get("id") != expect_invoice
+    )):
         # Asked to collect ONE invoice and it is not the one these rules charge - a page
         # read before something else moved. Refused before a slot is spent: the row's
         # button is only offered on the invoice this picks, so it cannot pay another.
+        # (The one exception is the replacement of the invoice they pick, mid-refresh - see
+        # ``_replaced_by``: charging the pick collects on exactly that replacement.)
         return {"status": "not_this_invoice", "attempts": attempts,
                 "invoice": expect_invoice, "reason": None}
     if target is None:
@@ -609,17 +688,21 @@ def retry_now(user_id, entity_id=None, *, group_id=None, expect_invoice=None) ->
     # mid-retry the slot is spent rather than replayed. A double-charge is far worse
     # than a skipped retry.
     attempts = store.record_group_dunning_attempt(group.id)
-    invoice_id = target["id"]
-    paid, reason = billing_gateway.retry_invoice(
-        invoice_id, group.stripe_payment_method_id
-    )
+    charged = _charge(group, target)
+    invoice_id = charged.invoice["id"]
+    refreshed = {"refreshed": charged.refreshed} if charged.refreshed else {}
     logger.info(
         "dunning: manual retry for payer {} invoice {} -> {} ({})",
-        user_id, invoice_id, "paid" if paid else "failed", reason,
+        user_id, invoice_id,
+        "paid" if charged.paid else "not collectable" if charged.stuck else "failed",
+        charged.reason,
     )
+    if charged.stuck:
+        return {"status": "not_collectable", "attempts": attempts,
+                "invoice": invoice_id, "reason": None}
 
-    if paid:
-        _settle_period(account, group, target)
+    if charged.paid:
+        _settle_period(account, group, charged.invoice)
         # Only ends collection if it was running; a payer who paid an open invoice
         # without ever being dunned has nothing to clear.
         if started is not None:
@@ -632,10 +715,10 @@ def retry_now(user_id, entity_id=None, *, group_id=None, expect_invoice=None) ->
         # because dunning was normally running by the time anyone pressed the button.
         _restore_access(user_id)
         return {"status": "paid", "attempts": attempts,
-                "invoice": invoice_id, "reason": reason}
+                "invoice": invoice_id, "reason": charged.reason, **refreshed}
 
     return {"status": "failed", "attempts": attempts,
-            "invoice": invoice_id, "reason": reason}
+            "invoice": invoice_id, "reason": charged.reason, **refreshed}
 
 
 def _collect_one_group(group, now, offsets, window) -> dict[str, list]:
@@ -725,15 +808,20 @@ def _collect_one_group(group, now, offsets, window) -> dict[str, list]:
         # slot is spent rather than replayed, which is the safe direction: a
         # double-charge is far worse than a skipped retry.
         store.record_group_dunning_attempt(group.id)
-        target = invoices[0]
-        # THE GROUP'S CURRENT CARD, not the one the invoice was raised against.
-        # A payer whose card declined usually recovers by replacing it, and the
-        # document still names the dead one.
-        paid, reason = billing_gateway.retry_invoice(
-            target["id"], group.stripe_payment_method_id
-        )
+        # THE GROUP'S CURRENT CARD, not the one the invoice was raised against (see
+        # ``_charge``). A payer whose card declined usually recovers by replacing it,
+        # and the document still names the dead one.
+        charged = _charge(group, invoices[0])
+        target = charged.invoice
+        if charged.refreshed and current is not None and current["id"] == charged.refreshed:
+            # The invoice for the period they are behind on was re-issued: the
+            # replacement IS that period's invoice now, so paying it recovers them.
+            current = target
+        paid = charged.paid
         entry["invoice"] = target["id"]
-        entry["reason"] = reason
+        entry["reason"] = charged.reason
+        if charged.refreshed:
+            entry["refreshed"] = charged.refreshed
         out["retried"].append(entry)
 
         if paid:

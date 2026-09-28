@@ -529,3 +529,139 @@ def test_a_replay_scoped_renewal_for_another_period_is_still_stale(monkeypatch):
     dunning.collect_due(day(1))
 
     assert calls["paid_through"] == []
+
+
+# --- an invoice the processor will no longer collect (``dunning._charge``) --------------------
+#
+# Stripe cancels an invoice's payment once it has been confirmed too many times (ten declines
+# in our account), and no retry can ever succeed after that. ``_charge`` re-issues the invoice
+# and charges the replacement - inside the same attempt, so the slot is counted once.
+
+REPLACEMENT = {"id": "in_r2", "metadata": {**RENEWAL_INV["metadata"], "replaces": "in_r"}}
+
+
+def _dead_renewal(monkeypatch, *, pays=True, replacement=REPLACEMENT, refresh_raises=None):
+    """``in_r`` can no longer be paid; re-issuing it yields ``replacement``, which ``pays``."""
+    from billing.services import billing_gateway
+
+    seen = {"retried": [], "refreshed": []}
+
+    def _retry(invoice_id, payment_method=None):
+        seen["retried"].append(invoice_id)
+        if invoice_id == RENEWAL_INV["id"]:
+            return False, billing_gateway.DEAD_PAYMENT
+        return (True, None) if pays else (False, "Your card was declined.")
+
+    def _refresh(invoice_id, payment_method=None):
+        seen["refreshed"].append(invoice_id)
+        if refresh_raises is not None:
+            raise refresh_raises
+        return replacement
+
+    monkeypatch.setattr(billing_gateway, "retry_invoice", _retry)
+    monkeypatch.setattr(billing_gateway, "refresh_invoice", _refresh)
+    return seen
+
+
+def _marker_free(result) -> bool:
+    """The gateway's DEAD_PAYMENT marker is for ``_charge`` alone - never in what it reports."""
+    from billing.services import billing_gateway
+
+    return all(
+        billing_gateway.DEAD_PAYMENT not in map(str, entry.values())
+        for entries in result.values() for entry in entries
+    )
+
+
+def test_a_dead_invoice_is_refreshed_and_the_replacement_RECOVERS_the_period(monkeypatch):
+    account = _Account(started=day(0), attempts=0, paid_through=PAID_TO, anchor=ANCHOR)
+    dunning, calls = _wire_runner(monkeypatch, account=account, invoices=[RENEWAL_INV])
+    seen = _dead_renewal(monkeypatch)
+
+    result = dunning.collect_due(day(1))
+
+    assert seen == {"retried": ["in_r", "in_r2"], "refreshed": ["in_r"]}
+    # The replacement carries the renewal key, so paying it advances the cycle and ends it.
+    assert calls["paid_through"] == [("u1", NEXT_PERIOD_END)]
+    assert calls["ended"] == [("u1", "active")]
+    assert result["recovered"][0]["invoice"] == "in_r2"
+    assert result["retried"][0]["refreshed"] == "in_r"
+
+
+def test_the_refresh_and_the_replacement_share_ONE_attempt(monkeypatch):
+    """Counted once, before anything runs - the card is hit once."""
+    account = _Account(started=day(0), attempts=0, paid_through=PAID_TO, anchor=ANCHOR)
+    dunning, calls = _wire_runner(monkeypatch, account=account, invoices=[RENEWAL_INV])
+    _dead_renewal(monkeypatch)
+
+    dunning.collect_due(day(1))
+
+    assert calls["attempts"] == 1
+
+
+def test_a_declining_replacement_reports_the_processors_words_never_the_marker(monkeypatch):
+    account = _Account(started=day(0), attempts=0, paid_through=PAID_TO, anchor=ANCHOR)
+    dunning, calls = _wire_runner(monkeypatch, account=account, invoices=[RENEWAL_INV])
+    _dead_renewal(monkeypatch, pays=False)
+
+    result = dunning.collect_due(day(1))
+
+    entry = result["retried"][0]
+    assert (entry["invoice"], entry["reason"]) == ("in_r2", "Your card was declined.")
+    assert (calls["ended"], calls["paid_through"]) == ([], [])
+    assert _marker_free(result)
+
+
+def test_an_invoice_that_cannot_be_refreshed_is_a_plain_failed_attempt(monkeypatch):
+    """Nothing to charge and no replacement: a failed attempt with no reason to give (the
+    gateway has logged which invoice needs a person), not a decline and not a crash."""
+    account = _Account(started=day(0), attempts=0, paid_through=PAID_TO, anchor=ANCHOR)
+    dunning, calls = _wire_runner(monkeypatch, account=account, invoices=[RENEWAL_INV])
+    _dead_renewal(monkeypatch, replacement=None)
+
+    result = dunning.collect_due(day(1))
+
+    entry = result["retried"][0]
+    assert (entry["invoice"], entry["reason"], "refreshed" in entry) == ("in_r", None, False)
+    assert (calls["ended"], calls["attempts"]) == ([], 1)
+    assert _marker_free(result)
+
+
+def test_a_refresh_that_raises_is_contained_and_resumed_next_run(monkeypatch):
+    """The processor unreachable half-way: this card's cycle fails quietly, the next run
+    finishes the refresh and collects."""
+    account = _Account(started=day(0), attempts=0, paid_through=PAID_TO, anchor=ANCHOR)
+    dunning, calls = _wire_runner(monkeypatch, account=account, invoices=[RENEWAL_INV])
+    _dead_renewal(monkeypatch, refresh_raises=RuntimeError("processor unreachable"))
+
+    dunning.collect_due(day(1))
+    assert (calls["ended"], calls["attempts"]) == ([], 1)
+
+    _dead_renewal(monkeypatch)
+    dunning.collect_due(day(2))
+    assert calls["ended"] == [("u1", "active")]
+
+
+def test_a_refreshed_STALE_invoice_is_collected_not_recovered(monkeypatch):
+    """Dunning chases the oldest debt, and a dead one is re-issued like any other - but
+    paying an abandoned period's bill still does not recover the current period."""
+    from billing.services import billing_gateway
+
+    stale = {"id": "in_s", "metadata": {"renewal_key": "renewal-u1-20270208-g1"}}
+    account = _Account(started=day(0), attempts=0, paid_through=PAID_TO, anchor=ANCHOR)
+    dunning, calls = _wire_runner(monkeypatch, account=account, invoices=[stale, RENEWAL_INV])
+    monkeypatch.setattr(
+        billing_gateway, "retry_invoice",
+        lambda iid, pm=None: (False, billing_gateway.DEAD_PAYMENT) if iid == "in_s"
+        else (True, None),
+    )
+    monkeypatch.setattr(
+        billing_gateway, "refresh_invoice",
+        lambda iid, pm=None: {"id": "in_s2",
+                              "metadata": {**stale["metadata"], "replaces": "in_s"}},
+    )
+
+    result = dunning.collect_due(day(1))
+
+    assert result["collected"][0]["invoice"] == "in_s2"
+    assert (result["recovered"], calls["ended"], calls["paid_through"]) == ([], [], [])

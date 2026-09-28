@@ -1651,3 +1651,95 @@ def discard_invoice(invoice_id) -> None:
     if record is None:
         return
     record.delete()
+
+
+# --- re-issuing an invoice the processor will no longer collect -----------------------------
+#
+# Stripe cancels an invoice's PaymentIntent once it has been confirmed too many times ("a
+# variable upper limit" - ten declines in our account), and a cancelled one can never be paid
+# again: every later attempt, scheduled or pressed, is refused. ``billing_gateway.
+# refresh_invoice`` re-issues it as an identical replacement; these are the rows' half of that.
+
+
+def refresh_key(external_id) -> str:
+    """The claim - locally, and at the processor as its idempotency key - of the replacement
+    for ``external_id``.
+
+    Derived from the DEAD invoice, so every attempt at the same refresh (a crash resumed, the
+    scheduled run racing a button) claims the same key and at most one replacement can exist.
+    """
+    return f"refresh-{external_id}"
+
+
+def retired_key(key, external_id) -> str:
+    """The key a replaced invoice keeps once its own has moved to the replacement.
+
+    ``~``, not ``-``: ``dunning._names_period`` reads ``<key>-...`` as the SAME period (a replay
+    scopes its keys that way), so a retired key joined with a dash would go on claiming the
+    period it has handed over. Still unique, and still says which period it was.
+    """
+    return f"{key}~{external_id}"
+
+
+def invoice_lines(invoice_id) -> list[SubscriptionInvoiceLine]:
+    """The lines recorded for one invoice - what it was actually sent with."""
+    return list(
+        SubscriptionInvoiceLine.objects.filter(invoice_id=str(invoice_id)).order_by(
+            "created_at", "id"
+        )
+    )
+
+
+def replacement_of(record) -> SubscriptionInvoice | None:
+    """The invoice that replaced ``record``, or None if it has not been re-issued.
+
+    Two ways to find it, depending on how far the refresh got. Before the key moves, the
+    replacement still holds its own claim (``refresh_key``). After, ``record`` holds a
+    ``retired_key`` and the key it gave up names whatever is live NOW - which, after a second
+    refresh, is the replacement's own replacement, the one that can still be paid.
+    """
+    external_id = getattr(record, "external_id", None)
+    if not external_id:
+        return None
+    key = record.idempotency_key or ""
+    suffix = f"~{external_id}"
+    if key.endswith(suffix):
+        return invoice_for_key(key[: -len(suffix)])
+    return invoice_for_key(refresh_key(external_id))
+
+
+def supersede_invoice(dead_id, replacement_id) -> None:
+    """Hand a dead invoice's key to its replacement, and mark the dead one void. One transaction.
+
+    The key is what every reader asks by - the renewal run's "is this period invoiced?", the
+    invoice list's Retry button - so it has to name the document that can still be paid. It
+    is RELEASED before it is re-claimed, in two ordered writes, because ``idempotency_key`` is
+    unique: the other order collides with itself.
+
+    A dead invoice with no key (a charge raised without one) is only marked void; its
+    replacement keeps its ``refresh_key``, which is how ``replacement_of`` finds it. Safe to run
+    twice: a key already retired is left where it is.
+    """
+    with transaction.atomic():
+        rows = {
+            str(row.id): row
+            for row in SubscriptionInvoice.objects.select_for_update().filter(
+                id__in=[str(dead_id), str(replacement_id)]
+            )
+        }
+        dead = rows.get(str(dead_id))
+        replacement = rows.get(str(replacement_id))
+        if dead is None or replacement is None:
+            raise ValueError(f"no invoice rows {dead_id} / {replacement_id} to supersede")
+        if not replacement.external_id:
+            raise ValueError(f"replacement {replacement_id} has no processor invoice yet")
+        key = dead.idempotency_key
+        moving = bool(key) and not key.endswith(f"~{dead.external_id}")
+        dead.status = "void"
+        if moving:
+            dead.idempotency_key = retired_key(key, dead.external_id)
+            dead.save(update_fields=["idempotency_key", "status"])
+            replacement.idempotency_key = key
+            replacement.save(update_fields=["idempotency_key"])
+        else:
+            dead.save(update_fields=["status"])

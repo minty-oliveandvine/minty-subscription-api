@@ -114,3 +114,13 @@ def test_a_decline_never_repeats_itself(reason, message):
 
     answer = retry_answer({"status": "failed", "reason": reason})
     assert answer == {"ok": False, "status": "failed", "message": message}
+
+
+def test_an_invoice_that_cannot_be_reissued_is_not_called_a_decline():
+    """``not_collectable``: the processor will no longer collect it and it could not be re-issued
+    automatically. Nothing was charged, so the decline's words would be false."""
+    from billing.api._retry import retry_answer
+
+    answer = retry_answer({"status": "not_collectable", "reason": None})
+    assert answer == {"ok": False, "status": "not_collectable",
+                      "message": "Payment could not be completed."}

@@ -324,6 +324,12 @@ def retry_invoice(user_id, invoice_id) -> dict | None:
     if invoice is None:
         return None
     if (invoice.status or "").lower() not in FAILED_INVOICE_STATUSES or not invoice.external_id:
+        # Re-issued since the page was drawn (the processor would no longer collect it, so
+        # dunning voided it and raised an identical replacement): the debt is still there,
+        # on another row - not "nothing to pay" but "look again".
+        if sub_store.replacement_of(invoice) is not None:
+            return {"status": "not_this_invoice", "attempts": 0,
+                    "invoice": invoice.external_id, "reason": None}
         raise PaymentMethodError(NOT_WAITING, status=409)
     if str(invoice.id) not in retryable_invoice_ids(user_id):
         return {"status": "not_this_invoice", "attempts": 0,

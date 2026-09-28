@@ -72,7 +72,7 @@ class _FakeStripe:
             return {"id": invoice_id, "status": self.outer.status, "total": 40000,
                     "created": 1800000000, "status_transitions": transitions}
 
-        def retrieve(self, invoice_id):
+        def retrieve(self, invoice_id, **kw):
             self.outer._step("stripe.retrieve")
             return {"id": invoice_id, "status": "draft", "total": 40000,
                     "created": 1800000000}
