@@ -618,24 +618,12 @@ def _cancel_preview(request, entity, user, payload):
     )
 
 
-_RETRY_MESSAGES = {
-    "paid": "Payment received — your subscription is active again.",
-    "no_card": "There's no card on file to charge. Add a payment method, then try again.",
-    "gave_up": "This subscription is past its payment deadline and has been closed.",
-    "nothing_owed": "Nothing is outstanding — your subscription is up to date.",
-    # Deliberately not "nothing is outstanding": something is, and the customer can see it
-    # sitting Unpaid on the Invoices tab. It is simply not this period's (``dunning.retry_now``).
-    "older_debt_only": (
-        "There's nothing due for the current period. An earlier unpaid invoice is "
-        "still outstanding — contact us and we'll sort it out with you."
-    ),
-}
-
-
 def _retry_payment(request, entity, user, payload):
     """Collect a past-due payer's outstanding invoice right now. No body. Answers
-    ``{"ok", "status", "message"}``. Charges against the same budget and deadline as the
-    scheduled run; the debt settled is the one on the card THIS company is billed to."""
+    ``{"ok", "status", "message"}`` (the words are ``api._retry``'s, shared with the payer
+    portal's invoice row). Charges against the same budget and deadline as the scheduled run;
+    the debt settled is the one on the card THIS company is billed to."""
+    from billing.api._retry import retry_answer
     from billing.services import store as sub_store
     from billing.services.dunning import retry_now
 
@@ -647,19 +635,7 @@ def _retry_payment(request, entity, user, payload):
     except Exception:
         logger.exception("retry-payment: collection failed for entity {}", entity.id)
         return error("We couldn't reach the card processor. Try again shortly.", 502)
-
-    status = result["status"]
-    if status == "failed":
-        # The processor's own words when there are any: "insufficient funds" and "card
-        # expired" need different things from the customer.
-        reason = (result.get("reason") or "").strip()
-        message = (
-            f"That card was declined: {reason}" if reason
-            else "That card was declined. Try a different payment method."
-        )
-    else:
-        message = _RETRY_MESSAGES.get(status, "Payment could not be completed.")
-    return _respond({"ok": status in ("paid", "nothing_owed"), "status": status, "message": message})
+    return _respond(retry_answer(result))
 
 
 def _cancel(request, entity, user, payload):

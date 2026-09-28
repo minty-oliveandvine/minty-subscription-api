@@ -50,6 +50,7 @@ ROUTES = (
     ("GET", "/subscriptions/transfers"),
     ("GET", "/invoices"),
     ("GET", "/invoices/{invoice_id}/breakdown"),  # 08-B's "Billing Breakdown" (Flask had none)
+    ("POST", "/invoices/{invoice_id}/retry"),  # 08-B's "Retry payment" (Flask had none)
     ("GET", "/billing/payment-methods"),
     ("POST", "/billing/payment-methods/setup-intent"),
     ("POST", "/billing/payment-methods/confirm"),
@@ -326,6 +327,30 @@ def my_invoice_breakdown(request, invoice_id: str):
     if payload is None:
         return error("That invoice couldn't be found.", 404)
     return respond(payload)
+
+
+@me_router.post("/invoices/{invoice_id}/retry", summary="Retry a failed invoice's payment now")
+def my_invoice_retry(request, invoice_id: str):
+    """08-B's *Retry payment*: collect this failed invoice now, on its account's card
+    (``billing_accounts.retry_invoice``). Answers ``{"ok", "status", "message"}`` in the words
+    the module page's retry uses (``api._retry``): ``paid``, ``failed`` (with the processor's
+    reason), ``no_card``, ``gave_up``, ``nothing_owed``, ``older_debt_only``,
+    ``not_this_invoice``. Someone else's invoice is 404; one not waiting for a payment, 409."""
+    from billing.api._retry import retry_answer
+    from billing.services import billing_accounts
+    from billing.services.payment_methods import PaymentMethodError
+
+    uid = user_id(request)
+    try:
+        result = billing_accounts.retry_invoice(uid, invoice_id)
+    except PaymentMethodError as exc:
+        return error(exc.message, exc.status)
+    except Exception:
+        logger.exception("invoice retry failed for user {} invoice {}", uid, invoice_id)
+        return error("We couldn't reach the card processor. Try again shortly.", 502)
+    if result is None:
+        return error("That invoice couldn't be found.", 404)
+    return respond(retry_answer(result))
 
 
 # --- Saved payment methods --------------------------------------------------------------

@@ -347,7 +347,7 @@ def _live(monkeypatch, world, months=4, card_events=()):
     decides whether a declining card recovers — stepping a month at a time would skip
     every retry slot and prove nothing about either world.
 
-    ``card_events`` is ``(day, group_id, card)``, the harness's own ``("card", CARD, day)``
+    ``card_events`` is ``(day, group_id, card)``, the harness's own ``("recard", CARD, day)``
     shape. Replacing a card is the group's ``stripe_payment_method_id`` changing and
     nothing else: the group keeps its cycle, its dunning clock and its companies, which
     is exactly what replacing a card does.

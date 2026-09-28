@@ -545,6 +545,37 @@
         ]
       }
     },
+    "/api/me/invoices/{invoice_id}/retry": {
+      "post": {
+        "description": "08-B's *Retry payment*: collect this failed invoice now, on its account's card\n(``billing_accounts.retry_invoice``). Answers ``{\"ok\", \"status\", \"message\"}`` in the words\nthe module page's retry uses (``api._retry``): ``paid``, ``failed`` (with the processor's\nreason), ``no_card``, ``gave_up``, ``nothing_owed``, ``older_debt_only``,\n``not_this_invoice``. Someone else's invoice is 404; one not waiting for a payment, 409.",
+        "operationId": "billing_api_me_my_invoice_retry",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "invoice_id",
+            "required": true,
+            "schema": {
+              "title": "Invoice Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "SelfBearerAuth": []
+          }
+        ],
+        "summary": "Retry a failed invoice's payment now",
+        "tags": [
+          "Payer portal"
+        ]
+      }
+    },
     "/api/me/subscriptions": {
       "get": {
         "description": "Query params, all optional: ``q``, ``sort`` (one of ``portal.SORT_FIELDS``, default\n``entity``), ``direction`` (``asc``/``desc``), ``page`` (1-based), ``per_page`` (clamped to\n``portal.MAX_PER_PAGE``). An unknown sort field falls back to entity name rather than\nerroring: this drives a column header, and an unrecognised one means the client is newer\nthan the server, which should degrade to a sensible order and not a broken table.",

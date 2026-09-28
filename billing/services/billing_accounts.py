@@ -288,3 +288,51 @@ def move_company(user_id, entity_id, account_id) -> dict:
         "to_account": {"id": str(target.id), "name": _name(target, person)},
     }
     return payload
+
+
+# --- retrying a failed invoice (08-B's invoice row) --------------------------------------
+
+NOT_WAITING = "That invoice isn't waiting for a payment."
+
+
+def retry_invoice(user_id, invoice_id) -> dict | None:
+    """Collect ONE failed invoice now, on the card of the account it belongs to (08-B's
+    *Retry payment*). None when it is not the caller's, or not an invoice id at all.
+
+    The engine's manual collection, unchanged (``dunning.retry_now``): the same attempt
+    budget and give-up deadline as the scheduled retries, the period settled and access
+    switched back on when it is paid. Two things are pinned from the row: the CARD - the
+    invoice's account, or the payer's oldest for one raised before accounts (the attribution
+    dunning collects by) - and the INVOICE, charged only if it is the one those rules pick;
+    otherwise ``not_this_invoice``, with nothing charged and no attempt spent.
+
+    And only one the page OFFERS it on (``portal.retryable_invoice_ids``): a page read before
+    something moved, or a direct call, cannot reach a bill the business does not chase - the
+    abandoned renewal of an account whose access has run out.
+    """
+    import uuid
+
+    from billing.services.dunning import retry_now
+    from billing.services.portal import FAILED_INVOICE_STATUSES, retryable_invoice_ids
+    from shared_models.models import SubscriptionInvoice
+
+    try:
+        wanted = str(uuid.UUID(str(invoice_id)))
+    except ValueError:
+        return None
+    invoice = SubscriptionInvoice.objects.filter(id=wanted, payer_user_id=str(user_id)).first()
+    if invoice is None:
+        return None
+    if (invoice.status or "").lower() not in FAILED_INVOICE_STATUSES or not invoice.external_id:
+        raise PaymentMethodError(NOT_WAITING, status=409)
+    if str(invoice.id) not in retryable_invoice_ids(user_id):
+        return {"status": "not_this_invoice", "attempts": 0,
+                "invoice": invoice.external_id, "reason": None}
+
+    groups = sub_store.billing_groups_for_payer(user_id)
+    group_id = invoice.billing_group_id or (groups[0].id if groups else None)
+    return retry_now(
+        user_id,
+        group_id=str(group_id) if group_id else None,
+        expect_invoice=invoice.external_id,
+    )

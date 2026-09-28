@@ -262,7 +262,7 @@ def _settle_period(account, group, invoice) -> None:
     # the cycle sits in August would advance August, handing over a free month for a bill
     # belonging to a period that ended long ago. Chained renewals still advance one at a
     # time, because the oldest unpaid period IS the one this computes.
-    if paid_key != renewals.period_key(account.user_id, period, group.id):
+    if not _names_period(paid_key, renewals.period_key(account.user_id, period, group.id)):
         logger.info(
             "dunning: payer {} paid {} which covers an earlier period; leaving "
             "paid_through at {}",
@@ -291,6 +291,21 @@ def _current_period_key(account, group) -> str | None:
     )
 
 
+def _names_period(renewal_key: str | None, key: str | None) -> bool:
+    """Whether an invoice's ``renewal_key`` names the period ``key`` does.
+
+    Exact, in production: ``renewals.period_key`` is never rewritten there. A REPLAY
+    (``replay_scenarios``) scopes every key it issues to its run - ``<key>-<the customer's
+    last 12 characters>``, so same-day replays do not collide on Stripe's idempotency keys -
+    and the data it lives stays on the database afterwards, read by an engine whose keys are
+    plain. The scoped form is the same period. Nothing else can start with ``key + "-"``: a
+    key ends with the card's id, and another period differs in its date.
+    """
+    if not renewal_key or not key:
+        return False
+    return renewal_key == key or renewal_key.startswith(f"{key}-")
+
+
 def _current_period_invoice(invoices: list[dict], key: str | None) -> dict | None:
     """The open invoice for the CURRENT period, or None if none of them is.
 
@@ -302,7 +317,7 @@ def _current_period_invoice(invoices: list[dict], key: str | None) -> dict | Non
     if not key:
         return None
     for invoice in invoices:
-        if ((invoice.get("metadata") or {}).get("renewal_key")) == key:
+        if _names_period((invoice.get("metadata") or {}).get("renewal_key"), key):
             return invoice
     return None
 
@@ -479,7 +494,7 @@ def _notify_dunning(retried: list[dict], recovered: list[dict],
         entry.pop("_collected", None)
 
 
-def retry_now(user_id, entity_id=None) -> dict:
+def retry_now(user_id, entity_id=None, *, group_id=None, expect_invoice=None) -> dict:
     """Collect the outstanding invoice IMMEDIATELY, at the payer's own request.
 
     ``entity_id`` names the company the button was pressed from, and through it the CARD
@@ -530,6 +545,14 @@ def retry_now(user_id, entity_id=None) -> dict:
         nothing_owed    no open invoice at all, so there is nothing to collect
         older_debt_only something is open, but nothing for the current period — no
                         attempt is spent, and ``invoice`` names the old debt
+        not_this_invoice ``expect_invoice`` names an open invoice other than the
+                        one this would charge — nothing is charged or counted
+
+    ``group_id`` names the CARD outright instead of reaching it through a company - the
+    payer portal's invoice row knows its billing account, not a company. It must be one
+    of this payer's, or nothing is charged. ``expect_invoice`` (the processor's id) is the
+    invoice that row shows: it is collected only if it is the one the rules below pick,
+    so a button can never pay a different bill from the one it sits beside.
     """
     from billing.services import billing_gateway, store
     from billing.services._log import logger
@@ -537,7 +560,7 @@ def retry_now(user_id, entity_id=None) -> dict:
         customer_default_payment_method,
     )
 
-    _ctx, _refusal = _retry_context(user_id, entity_id)
+    _ctx, _refusal = _retry_context(user_id, entity_id, group_id=group_id)
     if _refusal is not None:
         return _refusal
     account = _ctx["account"]
@@ -556,6 +579,12 @@ def retry_now(user_id, entity_id=None) -> dict:
     # up by mistake and the single open invoice is what they came to pay.
     key = _current_period_key(account, group)
     target = _manual_target(invoices, key)
+    if expect_invoice and (target is None or target["id"] != expect_invoice):
+        # Asked to collect ONE invoice and it is not the one these rules charge - a page
+        # read before something else moved. Refused before a slot is spent: the row's
+        # button is only offered on the invoice this picks, so it cannot pay another.
+        return {"status": "not_this_invoice", "attempts": attempts,
+                "invoice": expect_invoice, "reason": None}
     if target is None:
         # Something IS open, but nothing for the period they are behind on — an
         # abandoned renewal from a give-up, or a mid-period charge. Charging it would
@@ -743,7 +772,7 @@ def _collect_one_group(group, now, offsets, window) -> dict[str, list]:
     return out
 
 
-def _retry_context(user_id, entity_id):
+def _retry_context(user_id, entity_id, group_id=None):
     """Resolve WHICH card to collect on, or the reason there is nothing to collect.
 
     Returns ``(context, refusal)`` with exactly one of them set. The four refusals are
@@ -768,9 +797,18 @@ def _retry_context(user_id, entity_id):
     # entity the caller gets the card that has been in collection longest, which is the
     # one closest to being given up on.
     groups = store.billing_groups_for_payer(user_id)
-    group = (
-        store.billing_group_for_entity(entity_id, user_id) if entity_id else None
-    )
+    if group_id is not None:
+        # The card named outright (the portal's invoice row). Only this payer's: an id
+        # that is not one of theirs charges nothing rather than falling back to a card
+        # nobody asked about.
+        group = next((g for g in groups if str(g.id) == str(group_id)), None)
+        if group is None:
+            return None, {"status": "no_card", "attempts": 0,
+                          "invoice": None, "reason": None}
+    else:
+        group = (
+            store.billing_group_for_entity(entity_id, user_id) if entity_id else None
+        )
     if group is None:
         in_dunning = [g for g in groups if g.dunning_started_at is not None]
         group = (

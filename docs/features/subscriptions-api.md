@@ -47,7 +47,8 @@ already done, 5xx upstream. `billing/tests/test_contract.py` pins every table be
 | POST | `/subscriptions/transfer/cancel` | `my_transfer_cancel_api` | withdraw an offer |
 | GET | `/subscriptions/transfers` | `my_transfers_api` | offers made TO me |
 | GET | `/invoices/{invoice_id}/breakdown` | — (**new**, 2026-09-25) | 08-B's "Billing Breakdown · Download csv": ONE invoice, company by company - a row per line it charged (the subscription, the monthly rate that line was priced at, the days it paid for, what was charged; a credit negative, a zero line left out). The days and rate are the ones the line RECORDED when it was issued (`subscription_invoice_line.period_start` / `period_end` / `unit_amount`, schema item 23, same day - written by whatever priced it: a renewal is the whole period at its plan's price; a mid-period start or upgrade, and the credit for the plan it replaced, run from the change to the period's end; a cancellation extension runs from the paid-through date to its access end at the rate the cancellation priced it at - the marginal step for a module leaving a bundle). An extension priced at two rates recorded none: its row shows the rate its days add up to. A line issued BEFORE then is read back from how its kind is priced (`portal.build_invoice_breakdown`) - an extension's end from the module's `app_access_until` while the row still holds it, left out (null) once a resume has cleared it, never guessed. Someone else's invoice, or a malformed id, is 404; the web writes the CSV |
-| GET | `/invoices` | `my_invoices_api` | my invoices, newest first; `entity`, `page`, `per_page`, and **`account`** (added 2026-09-25) — ONE billing account's invoices for 08-B; a pre-accounts invoice (no `billing_group_id`) belongs to the payer's OLDEST account, the attribution dunning already collects by; someone else's account matches nothing. Echoes `account_id` |
+| POST | `/invoices/{invoice_id}/retry` | — (**new**, 2026-09-28) | 08-B's *Retry payment* on a declined invoice's row (08-K): collect THIS invoice now, on its account's card (`billing_accounts.retry_invoice` → `dunning.retry_now(group_id=…, expect_invoice=…)` - the engine's own manual collection: the same attempt budget and give-up deadline as the scheduled retries, the period settled and access switched back on when paid). Pinned from the row: the CARD (the invoice's account; the payer's oldest for one from before accounts) and the INVOICE (charged only if it is the one the engine's rules pick - else `not_this_invoice`, nothing charged, no attempt spent). Refused before the engine unless the list marks it `retryable`. Answers `{ok, status, message}` in the module page's own words (`api/_retry.py`, shared with `retry-payment`): `paid`, `failed` (the processor's reason), `no_card`, `gave_up`, `nothing_owed`, `older_debt_only`, `not_this_invoice`. Someone else's invoice or a malformed id is 404; one not waiting for a payment is 409; a processor failure is 502 |
+| GET | `/invoices` | `my_invoices_api` | my invoices, newest first; `entity`, `page`, `per_page`, and **`account`** (added 2026-09-25) — ONE billing account's invoices for 08-B; a pre-accounts invoice (no `billing_group_id`) belongs to the payer's OLDEST account, the attribution dunning already collects by; someone else's account matches nothing. Echoes `account_id`. Each row carries **`retryable`** (2026-09-28): whether *Retry payment* would charge it now - per card, the ONE open invoice `dunning.retry_now` picks (`portal.retryable_invoice_ids`, calling `dunning._manual_target` over our own rows: the current period's renewal, else an open mid-period charge, never an abandoned give-up bill), and nothing on a card past its give-up deadline or whose access has run out - with or without a dunning stamp, since giving up leaves `paid_through` where it stopped. Judged over ALL the payer's failed invoices, before the `account` / `entity` narrowing (narrowed first, a company's own charge could be offered while the engine would collect the renewal), from the rows the list already read; a list with nothing failed reads nothing more. No Stripe call, no writes |
 | GET | `/billing/payment-methods` | `my_payment_methods_api` | my saved cards and the default |
 | POST | `/billing/payment-methods/setup-intent` | `my_payment_method_setup_intent_api` | a Stripe SetupIntent + the publishable key |
 | POST | `/billing/payment-methods/confirm` | `my_payment_method_confirm_api` | save the confirmed card, optionally as default. **Plus the onboarding twin's account fields** (2026-09-25): `billing_group_id` puts the card on one of my accounts (08-B "Add payment method"); `billing_company` + `billing_email` OPEN one ("New billing account") and both are then required. Both checked in the ROUTE, before the card is attached — the service only reaches them after Stripe holds it. A retry after a lost answer re-answers the account it opened rather than opening a second on the same card |
@@ -377,6 +378,115 @@ keys are per payer; the same length because the report truncates names to fixed 
 `python scripts/replay_diff.py <flask log> <django log> --tags <run tag>=<clone tag>` — IDENTICAL is
 the only acceptable answer. Keys: `X1 C1 L1 R1 E1 angelika angelika-lifecycle angelika-split`.
 
+### The replay catalogue — Figma 05·A
+
+The `angelika` and `digitalisation` runs share one shape, `CATALOGUE`. It is Figma
+section **05·A** "Subscription Summary — all 36 module-status combinations" (file
+`43YI3MYtTfX5Xzz6dRoRuT`, node `1521:1292`). Down is Petty Cash and across is Payment Request, over
+1 NOT_STARTED, 2 TRIAL, 3 TRIAL_EXPIRED, 4 ACTIVE, 5 CANCELLATION_PENDING and 6 SUSPENDED:
+
+- **M11..M66** are the 36 cells, with every trial unconfirmed.
+- **The N-frames** show a trial *confirmed*: a = Petty Cash's trial, b = Payment Request's.
+- **Section 05·B** (every tick and untick) needs no data of its own. Each of its frames is one of
+  these states after a click.
+
+It replaced Scenario 2-12 on 2026-09-28, and with them the hand-seeded Scenario 13 (past due, now
+M66) and Scenario 14 (nothing started, now M11); `seed_past_due.py` and `seed_no_trial.py` are
+gone. Each company is named `"<frame> <the design's company>"`, and the run's tag is prefixed as
+usual ("Ang - M44 Nexora Health Limited"). `_check_scripts` refuses at import:
+- an unknown event kind, a code that doesn't fit its kind, or a future offset;
+- a name without its frame code, or a frame seeded twice;
+- any 05·A frame that is neither lived nor listed in `UNREACHABLE_05A`;
+- a broken relation between the offsets below.
+
+`billing/tests/test_replay_catalogue.py` pins all of these.
+
+**Offsets.** They are in days before the run's last day, which is noon UTC:
+
+| Name | Offset | Meaning |
+|---|---|---|
+| `ANCHOR_BUY` | -35 | M44's buys: the payer's first charge, so its anchor. Renewal R falls a calendar month later, between -7 and -4 depending on month length. |
+| `BOUGHT` | -20 | An ordinary purchase. |
+| `RUNNING` | -16 | A trial start. It ends at +14 and the card reads "Trial Active". |
+| `LAPSED` | -50 | A trial start. It expires at -20 with no consent. |
+| `AFTER_LAPSE` | -18 | A buy or consent beside a lapsed sibling. It must come after -20, because consent is per company and would otherwise convert the sibling. |
+| `CONSENTED` | -15 | Consent on a running trial. |
+| `CANCELLED` | -15 | Access runs to max(R, +15) = +15, which is the design's "Ends in 15 days". |
+| `FAILING` | -8 | A `nominate` onto one shared declining card (`FAILING_CARD`, tagged `F:`). R declines; that card's ACTIVE rows go past due and stay SUSPENDED until R+15. Trials and cancellations keep their phase. |
+
+The run covers 52 days.
+
+**The two billing accounts are named for what happens to them**: **Success** (the working
+card, which 20 companies renew on) and **Failed** (the declining card the 9 suspended
+companies are on). Unnamed, an account reads as its payer (`portal.account_name`), so the two
+read the same in the 08-A picker. The event is `rename` (the store write 08-C's "Save billing
+account" makes, `store.set_account_identity`). It sorts after `buy`, `consent` and `nominate`
+on the same day, so a rename on the day of a move names the account moved to. `_check_catalogue`
+refuses a rename that comes before its company's last move.
+
+| Frame | Company | Script |
+|---|---|---|
+| M11 | Harbour & Vine | none (`--setup` creates the company only; it is never in the payer's *list*, which is built from module rows, so open its module settings page) |
+| M12 / M21 | Kestrel Foods / Ashcroft | trial RUNNING |
+| M13 / M31 | Mino Market / Beacon Hill | trial LAPSED |
+| M14 / M41 | Lantern Bay / Driftwood | buy BOUGHT |
+| M15 / M51 | Orchid Lane / Glasswater | buy BOUGHT; cancel CANCELLED |
+| M16 / M61 | Willow Court / Kingsmead | buy BOUGHT; nominate FAILING |
+| M22 | Pier 9 Trading | trial both RUNNING |
+| M23 / M32 | Quarry Hill / Cobblestone | trial the other LAPSED; trial RUNNING |
+| M33 | Ember & Co | trial both LAPSED |
+| M34 / M43 | Thread & Craft / Fernbank | trial the other LAPSED; buy AFTER_LAPSE |
+| M35 / M53 | Saltwater Studio / Ironvale | as M34/M43, then cancel CANCELLED |
+| M36 / M63 | Copperline / Meadowfield | as M34/M43, then nominate FAILING |
+| M44 | Nexora Health | buy both ANCHOR_BUY (the anchor); rename its account **Success** |
+| M45 / M54 | Solera Group / Juniper Row | buy both BOUGHT; cancel one CANCELLED |
+| M55 | Tidal Works | buy both BOUGHT; cancel both CANCELLED |
+| M56 / M65 | Northgate / Oakhaven | buy both BOUGHT; cancel one CANCELLED; nominate FAILING (the extension rides the declined invoice) |
+| M66 | Halcyon Labs | buy both BOUGHT; nominate FAILING; rename that account **Failed** |
+| N12b / N21a | Rosewood / Silverbrook | trial RUNNING; consent CONSENTED |
+| N23a / N32b | Vantage Point / Amberton | trial the other LAPSED; trial RUNNING; consent CONSENTED |
+| N24a / N42b | Westbay / Birchwood | buy the other BOUGHT; trial RUNNING (the buy's consent confirms it) |
+| N25a / N52b | Yardley / Cedarcroft | as N24a/N42b, then cancel the bought one CANCELLED |
+| N26a / N62b | Zephyr Lane / Dunmore | as N24a/N42b, then nominate FAILING |
+
+**The ten frames not lived.** Each is in `UNREACHABLE_05A` with its reason:
+
+- **M24, M42, M25, M52, M26, M62.** A trial beside a paid module is always confirmed.
+  - `will_convert` is card AND consent (`cards.py:74-80`). Consent is per company, it has no
+    revoke, and every purchase records it.
+  - The card belongs to the whole account. Removing it is only possible once nothing bills, and it
+    would unconfirm every trial the payer has.
+  - minty-web's `?summary=M24` fixture draws a state the engine never produces.
+- **M46, M64.** One module past due beside one paid up needs two paid-through dates on one company,
+  and one card group cannot hold them.
+  - The only route is a probable engine bug: `payment_methods.set_for_entity` moves a past-due
+    company onto a working card without `billing_accounts.move_company`'s past-due refusal. The new
+    card renews it, the row stays `past_due` for good, and the old card's open invoice is still
+    chased.
+  - The recipe, if it is ever wanted: buy; nominate FAILING at -8; nominate onto a working card at
+    -2; buy the other module at -1.
+- **N22a, N22b.** `will_convert` is computed once per company, so two trials are confirmed together
+  or not at all. A cancelled trial renders CANCELLATION_PENDING, so it doesn't help.
+
+**Where it differs from the drawings, knowingly:**
+- Cards read Visa 4242 (`tok_visa`) instead of 4121.
+- Trials read "Trial Active" rather than "3 days remaining". Longer trials keep the catalogue alive.
+- The footer dates are the design's fixed text.
+- minty-web lists newest-created first, so Figma's neighbouring rows are not reproduced.
+- The suspended companies make `payer_is_dunning` true, which blocks handovers for this payer, and
+  08-A shows the payment-failed state.
+
+**Shelf life.** About eight days. SUSPENDED lapses at R+15 (+8 to +11); trials end at +14 and
+turn red from +7; cancellations end at +15. Re-run to refresh:
+`--run angelika --reset --teardown --setup --replay --report`.
+
+`replay()` refuses a payer that still holds an anchor (run `--reset`). `reset()` deletes the payer's
+nominations *by payer*: a company nominated onto one of its cards by hand once blocked the group
+delete, rolled the reset back and left the old anchor in place.
+
+**Rename a scenario only after `--teardown`.** `_entities` matches on name, so a renamed company is
+orphaned beside a freshly seeded one.
+
 **Not ported, and where the behaviour lives on.** Tests that render Flask's Jinja templates,
 walk Flask route source or use Flask-Login's session stay in Minty until step 5 deletes the
 partials (`test_consent_takeover`, `test_subscription_templates`, `test_past_due_card_action`,
@@ -412,12 +522,25 @@ non-event day logged `!! test clock: …`) and every renewal after the last even
 event's Stripe stamp in `issued_at`. It reads the payer's billing groups now; the runs take
 about twice as long, which is the clock doing its job.
 
+**Also fixed on both sides, 2026-09-28: the lifecycle's and L1's card failures had stopped
+happening.**
+- **The cause.** Both shapes failed their card with a `("card", CARD_FAIL, …)` event, which
+  changes only the payer's *default* card. Since the per-entity-cards cutover a renewal charges
+  each company's own group, so the event declined nothing. Every run in between renewed on a
+  working card: Scenario 1's day-92 failure and L1's give-up never happened.
+- **Why the golden missed it.** Flask and Django agreed, so the golden could not see it.
+- **The fix.** Both now use `recard`, which replaces the card under the group, as Scenario 1B
+  always did.
+- **The guard.** `_check_script` refuses a declining `card` event at import.
+  `billing/tests/test_replay_catalogue.py` pins that every shape meant to fail puts a declining
+  card under a group.
+
 ## 9. What arrives when
 
 | Step | Lands here |
 |---|---|
 | 2 | DONE 2026-09-21: `billing/services/` — the 1:1 port of all 24 modules of `blueprints/subscription/services/` plus `entity_modules.py` (from `entity/services/modules.py`), `_context.py` (the request scope that replaced `flask.g`) and `_log.py`; the templates and images; 51 ported test files; the job bodies behind `manage.py subscriptions`; the scoped scheduler pass; `manage.py replay_scenarios` + `scripts/replay_diff.py`, the eight Angelika runs identical on both sides |
 | 3 | DONE 2026-09-22: all four routers filled from Flask's views — `me` (`billing/api/me.py`, `_json.py` = `jsonify`; the invitation forwarded with the caller's bearer), `modules` (the page model minty-web renders + the 19 actions behind one gate), `notice` (`NoticeBearerAuth`, Flask's claimless fallback), `onboarding` (the nine + `trials/start`, which fails loudly); `docs/openapi.json` committed and held current by `test_contract.py` / `manage.py export_openapi`; 173 route tests in `billing/tests/api/` (32 portal + 7 wallet, 84 module page, 12 notice, 38 onboarding); e2e smoke asserts the live shapes |
-| 4c+ | DONE 2026-09-25: **billing accounts in the portal** — `GET /billing/accounts` (`portal.build_billing_accounts`), `update` / `default-card` / `move` (`billing/services/billing_accounts.py`), the account fields on `confirm`, `account` on `invoices` and `remove`, `next_billing` on `subscriptions`. Five silent failures fixed on the way: the landing's "Next Billing Date" was the anchor (the FIRST charge); the removal guard stopped at the first account on a shared card; card-keyed nomination raised on a shared card (`_group_for_card`, oldest wins); a company moved onto an emptied account lost access (`_carry_paid_days`' idle branch); a blanked address field was dropped by the SDK instead of cleared. Flask not mirrored (dark there; Django replaces it). **Same day, later: `next_bill` per account** (08-B's "Amount (estimated)") - `portal.next_bill_for_account` prices the account's next renewal with `renewals.build_renewal(..., converting_by=period.start)`: the runner's own invoice for the period starting on the next billing date, plus the trials that will have converted by then (`renewals._trial_converts` - the trial-end job's conjunction of customer, card for the company and consent, read from the database alone, never Stripe). `converting_by` is the forecast's only; the runner never passes it, so what it bills is unchanged. A figure that cannot be priced is null and logged, never a failed page. **Later still: schema item 23** - `subscription_invoice_line` records what each line PAID FOR (`period_start` / `period_end` / `unit_amount`), written by BOTH engines at issue: `billing.Line` carries them from whatever priced the line (`paid_from` holds a mid-period start to the period as `prorate` does), and an extension's come from `checkout.pending_extension_terms` - the paid-through date to the access end, and the rate only when re-deriving it piece by piece (`_extension_pieces`, which `_segmented_extension` now sums) reproduces the billed amount at ONE rate; never a blend, never a failed renewal. The breakdown reads them first. Minty migration `x1a01_invoice_line_span` ALTERs a database already up; both local ones have it, Supabase does not yet. **And 08-C's address became Stripe's own form** (the user's call): `?countries=1` also answers `publishable_key`, `update` takes `cardholder` (written with the address in one `billing_details` update, the account's card required as for the address), and every field is held to 255 characters |
+| 4c+ | DONE 2026-09-25: **billing accounts in the portal** — `GET /billing/accounts` (`portal.build_billing_accounts`), `update` / `default-card` / `move` (`billing/services/billing_accounts.py`), the account fields on `confirm`, `account` on `invoices` and `remove`, `next_billing` on `subscriptions`. Five silent failures fixed on the way: the landing's "Next Billing Date" was the anchor (the FIRST charge); the removal guard stopped at the first account on a shared card; card-keyed nomination raised on a shared card (`_group_for_card`, oldest wins); a company moved onto an emptied account lost access (`_carry_paid_days`' idle branch); a blanked address field was dropped by the SDK instead of cleared. Flask not mirrored (dark there; Django replaces it). **Same day, later: `next_bill` per account** (08-B's "Amount (estimated)") - `portal.next_bill_for_account` prices the account's next renewal with `renewals.build_renewal(..., converting_by=period.start)`: the runner's own invoice for the period starting on the next billing date, plus the trials that will have converted by then (`renewals._trial_converts` - the trial-end job's conjunction of customer, card for the company and consent, read from the database alone, never Stripe). `converting_by` is the forecast's only; the runner never passes it, so what it bills is unchanged. A figure that cannot be priced is null and logged, never a failed page. **Later still: schema item 23** - `subscription_invoice_line` records what each line PAID FOR (`period_start` / `period_end` / `unit_amount`), written by BOTH engines at issue: `billing.Line` carries them from whatever priced the line (`paid_from` holds a mid-period start to the period as `prorate` does), and an extension's come from `checkout.pending_extension_terms` - the paid-through date to the access end, and the rate only when re-deriving it piece by piece (`_extension_pieces`, which `_segmented_extension` now sums) reproduces the billed amount at ONE rate; never a blend, never a failed renewal. The breakdown reads them first. Minty migration `x1a01_invoice_line_span` ALTERs a database already up; both local ones have it, Supabase does not yet. **And 08-C's address became Stripe's own form** (the user's call): `?countries=1` also answers `publishable_key`, `update` takes `cardholder` (written with the address in one `billing_details` update, the account's card required as for the address), and every field is held to 255 characters. **2026-09-28: 08-K** - `POST /invoices/{invoice_id}/retry` and `retryable` on the invoice rows (above); `retry_now` gained `group_id` / `expect_invoice` in BOTH engines. And the engine now recognises a REPLAY-SCOPED renewal key (`dunning._names_period`: `<key>` or `<key>-<suffix>` - `replay_scenarios` scopes every key it issues so same-day runs do not collide at Stripe) where it picks the current period's invoice and where it settles one, so the dev database's lived past-due accounts can be retried and settle; production keys are never scoped. NOT covered: the renewal runner's duplicate guard (`_already_invoiced`) still matches keys exactly, so the live scheduler re-bills a replay-lived period (seen 2026-09-28 07:00 UTC on the catalogue's two 'Failed' accounts) |
 | 5 | Flask's copies deleted; onboarding-backend proxies here; the Stripe keys leave Flask |
 | 7 | deployed dark beside the phase-C builds at the cutover; 8b switches it on |

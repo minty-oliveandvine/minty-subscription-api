@@ -486,3 +486,46 @@ def test_giving_up_does_not_advance_the_cycle(monkeypatch):
 
     assert calls["paid_through"] == []
     assert calls["ended"] == [("u1", "closed")]
+
+
+# --- a replay's scoped keys (the dev database's lived data) ----------------------------
+
+
+def test_a_key_names_its_period_exactly_or_with_a_replays_scope_suffix():
+    """A replay issues ``<key>-<suffix>`` so same-day runs do not collide at Stripe, and its
+    data stays behind for the live engine, whose keys are plain. The same period - never
+    another one."""
+    from billing.services import dunning
+
+    key = "renewal-u1-20270308-g1"
+    assert dunning._names_period(key, key)
+    assert dunning._names_period(f"{key}-ENwIm8kHRqpJ", key)
+    # Another period, another card, the payer-wide key of old, nothing at all: never.
+    assert not dunning._names_period("renewal-u1-20270208-g1-ENwIm8kHRqpJ", key)
+    assert not dunning._names_period("renewal-u1-20270308-g2", key)
+    assert not dunning._names_period("renewal-u1-20270308", key)
+    assert not dunning._names_period(None, key)
+    assert not dunning._names_period(key, None)
+
+
+def test_a_replay_scoped_renewal_recovers_and_advances_the_cycle(monkeypatch):
+    """The dev database's past-due payers were lived by the replay harness: their declined
+    renewal is this period's, scoped. Collected, it settles the period like any other."""
+    account = _Account(started=day(0), attempts=0, paid_through=PAID_TO, anchor=ANCHOR)
+    scoped = {"id": "in_s", "metadata": {"renewal_key": "renewal-u1-20270308-g1-ENwIm8kHRqpJ"}}
+    dunning, calls = _wire_runner(monkeypatch, account=account, invoices=[scoped])
+
+    dunning.collect_due(day(1))
+
+    assert calls["paid_through"] == [("u1", NEXT_PERIOD_END)]
+    assert calls["ended"] == [("u1", "active")]
+
+
+def test_a_replay_scoped_renewal_for_another_period_is_still_stale(monkeypatch):
+    account = _Account(started=day(0), attempts=0, paid_through=PAID_TO, anchor=ANCHOR)
+    old = {"id": "in_o", "metadata": {"renewal_key": "renewal-u1-20261208-g1-ENwIm8kHRqpJ"}}
+    dunning, calls = _wire_runner(monkeypatch, account=account, invoices=[old])
+
+    dunning.collect_due(day(1))
+
+    assert calls["paid_through"] == []

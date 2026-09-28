@@ -1047,6 +1047,89 @@ def _describe(invoice, lines) -> tuple[str, str]:
     return headline, " · ".join(parts)
 
 
+#: An invoice whose charge was made and declined. Nothing leaves one ``open`` without trying:
+#: an invoice issued without collecting stays a DRAFT (``billing_gateway.issue_invoice``).
+FAILED_INVOICE_STATUSES = ("open", "uncollectible")
+
+
+def retryable_invoice_ids(user_id, failed=None) -> set[str]:
+    """The invoices 08-B's *Retry payment* is offered on: per card, the ONE open invoice
+    ``dunning.retry_now`` would charge right now. Read from our own rows - no Stripe call, and
+    nothing written (``retry_now``'s own context closes spent episodes; a list must not).
+
+    ``failed`` is the payer's failed invoices when the caller has read them already (the
+    invoice list has: all of them, before any narrowing); left out, they are read here. No
+    failed invoice, nothing else is read - most payers, most of the time.
+
+    The engine's rule decides, called rather than restated (``dunning._manual_target``): the
+    current period's renewal, else an open mid-period charge, never an abandoned give-up bill -
+    and nothing on a card past its give-up deadline, or whose access has already run out. That
+    last holds with or without a dunning stamp: an episode closed by giving up leaves
+    ``paid_through`` where it stopped, so its abandoned renewal IS "the current period" by
+    key, and the business does not chase those (2026-08-11). A renewal's ``idempotency_key`` IS
+    its ``renewal_key`` (``renewals.period_key`` feeds both), so a row answers what Stripe's
+    metadata would. A failed invoice not in this set is shown failed, with no button that could
+    only refuse.
+    """
+    from datetime import timedelta
+
+    from billing.services import clock, dunning, policy
+    from billing.services import store as sub_store
+    from shared_models.models import SubscriptionInvoice
+
+    if failed is None:
+        failed = SubscriptionInvoice.objects.filter(
+            payer_user_id=str(user_id), status__in=FAILED_INVOICE_STATUSES
+        )
+    # Oldest first, as ``_manual_target``'s fallback wants them; a reservation Stripe never
+    # confirmed has no invoice to charge.
+    open_rows = sorted(
+        (
+            row
+            for row in failed
+            if (row.status or "").lower() in FAILED_INVOICE_STATUSES and row.external_id
+        ),
+        key=lambda row: row.created_at,
+    )
+    if not open_rows:
+        return set()
+    account = sub_store.customer_mapping_for_user(user_id)
+    groups = sub_store.billing_groups_for_payer(user_id)
+    if account is None or not groups:
+        return set()
+
+    first = str(groups[0].id)  # an invoice from before accounts is the oldest one's
+    by_card: dict[str, list[dict]] = {}
+    for row in open_rows:
+        key = row.idempotency_key or ""
+        # What ``_manual_target`` reads off a Stripe invoice: a renewal's idempotency key IS
+        # its renewal key; any other charge has none.
+        by_card.setdefault(str(row.billing_group_id or first), []).append(
+            {"id": str(row.id),
+             "metadata": {"renewal_key": key if key.startswith("renewal-") else None}}
+        )
+
+    now = clock.now()
+    window = policy.current().past_due_window_days
+    retryable: set[str] = set()
+    for group in groups:
+        mine = by_card.get(str(group.id))
+        if not mine:
+            continue
+        started = group.dunning_started_at
+        access_ends_at = (
+            group.paid_through + timedelta(days=window) if group.paid_through else None
+        )
+        if started is not None and dunning.should_give_up(now, started, window, access_ends_at):
+            continue
+        if access_ends_at is not None and now >= access_ends_at:
+            continue  # access has run out: a lapsed account's bill, not one to chase
+        target = dunning._manual_target(mine, dunning._current_period_key(account, group))
+        if target is not None:
+            retryable.add(target["id"])
+    return retryable
+
+
 def build_payer_invoices(
     user_id,
     *,
@@ -1076,6 +1159,10 @@ def build_payer_invoices(
         .order_by("-period_start", "-created_at")
         .prefetch_related("lines")
     )
+    # Which row *Retry payment* sits on, judged per card over ALL the payer's failed invoices
+    # (as the engine judges), so before the narrowing below. None failed: nothing more is read.
+    failed = [inv for inv in invoices if (inv.status or "").lower() in FAILED_INVOICE_STATUSES]
+    retryable = retryable_invoice_ids(user_id, failed) if failed else set()
 
     wanted_account = str(account_id) if account_id else None
     if wanted_account:
@@ -1125,6 +1212,13 @@ def build_payer_invoices(
                 "reference": _reference(invoice),
                 "date": _fmt(issued),
                 "date_iso": _iso(issued),
+                # WHEN IT WAS PAID, which is not when it was issued. Null while an
+                # invoice is open and on one that failed, and the grid prints "—"
+                # rather than borrowing `date` — a settlement date that is really an
+                # issue date is wrong quietly, which is the worst way to be wrong
+                # about money.
+                "paid": _fmt(invoice.paid_at),
+                "paid_iso": _iso(invoice.paid_at),
                 "period_start": _fmt(invoice.period_start),
                 "period_end": _fmt(invoice.period_end),
                 # What happened, then over which days and for which company. The memo
@@ -1140,6 +1234,9 @@ def build_payer_invoices(
                 "status_label": INVOICE_STATUS_LABELS.get(
                     status, (status or "unknown").title()
                 ),
+                # The one invoice per card that *Retry payment* would charge right now
+                # (``retryable_invoice_ids``); every other failed one is shown failed only.
+                "retryable": str(invoice.id) in retryable,
                 # A SNAPSHOT taken when the charge settled — never the account's current
                 # default, which is a different card the moment anyone updates one, and
                 # the invoice it would be wrong about first is a failed one. Null for

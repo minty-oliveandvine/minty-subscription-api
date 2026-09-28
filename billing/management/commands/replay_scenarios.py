@@ -28,9 +28,11 @@ EIGHT SHAPES, and a payer for each person who needs to see one. ``RUNS`` is that
 and nothing more — the shapes themselves are the lists below. Three of them carry the
 bulk of the work:
 
-  the catalogue   Scenarios 2-12 — one state each, the shapes the UI has to render. Ten
-                  weeks: long enough for a module to be cancelled AND have run out the
-                  days that bought, the longest thing any of these eleven states needs.
+  the catalogue   Figma 05·A — one company per module-status combination the Subscription
+                  Summary draws (38 of its 48 frames; ``UNREACHABLE_05A`` says why the
+                  other ten are not here), each named for its frame ("M44 Nexora Health
+                  Limited"). Seven and a half weeks, and faithful for about eight days
+                  after the run: its suspended companies lapse then.
   the lifecycle   Scenario 1 — four companies living four months on one account: trials
                   that convert and trials that lapse, a module added mid-period,
                   cancellations, monthly renewals, and a card that starts declining and is
@@ -43,10 +45,9 @@ bulk of the work:
 The other five are the edge shapes further down, each driving one account-level outcome.
 
 A SHAPE NEVER SHARES A PAYER, with another shape or with another person running the same
-one, because almost everything in this domain is PAYER-scoped: one anchor, one
-paid-through, one dunning clock, one invoice per period covering every entity. Putting
-scenario 1's deliberate payment failure on a catalogue payer would drag all eleven
-catalogue entities into dunning with it.
+one. The ANCHOR is payer-scoped — every card the payer holds renews on it — so a second
+shape's first charge would move the renewal day every catalogue offset is chosen around;
+and the invoices, the portal and its payment-failed banner are all read per payer.
 
 A NEW payer for an existing shape needs no entry here — see ``clone_run``:
 
@@ -136,6 +137,12 @@ CARD_FAIL = "tok_chargeCustomerFail"
 #
 # tok_mastercard mints 5555 5555 5555 4444, so card B reads "Mastercard 4444" everywhere.
 CARD_B = "B:tok_mastercard"
+
+
+def _declines(spec: str) -> bool:
+    """Whether a card spec mints a card that declines. The TOKEN decides: comparing the
+    whole spec logged every TAGGED failing card ("F:tok_chargeCustomerFail") as working."""
+    return spec.rpartition(":")[2] == CARD_FAIL
 
 
 # --- dates ------------------------------------------------------------------
@@ -233,17 +240,28 @@ def after(base, days: int):
     return lambda end: _day(base, end) + timedelta(days=days)
 
 
-# Event kinds a scenario script may use:
-#   trial   code   start a card-free trial
-#   buy     code   subscribe (paid) — bundles automatically if the entity holds the other
-#   cancel  code   in-app cancellation; queues the prorated extension
-#   uncancel code  undo a cancellation ("Renew"). Free while the extension is still
-#                  PENDING — nobody was billed, so it deletes a number; once the
-#                  extension has been INVOICED it charges the uncovered window
-#                  (app_access_until -> period end) at the MARGINAL price.
-#   consent -      authorise billing for THIS entity, without buying anything
-#   card    good|fail   swap the PAYER's default card (account-level, so it is written
-#                       against the run rather than an entity)
+# Event kinds a scenario script may use, and what its CODE column holds:
+#   trial    module     start a card-free trial
+#   buy      module     subscribe (paid) — bundles automatically if the entity holds the other
+#   cancel   module     in-app cancellation; queues the prorated extension
+#   uncancel module     undo a cancellation ("Renew"). Free while the extension is still
+#                       PENDING — nobody was billed, so it deletes a number; once the
+#                       extension has been INVOICED it charges the uncovered window
+#                       (app_access_until -> period end) at the MARGINAL price.
+#   consent  -          authorise billing for THIS entity, without buying anything
+#   card     card spec  make a card the PAYER's default. Account-level, and since the
+#                       per-entity cards it no longer changes what any company is CHARGED
+#                       (see ``_set_card``) — it cannot put anybody into dunning
+#   nominate card spec  put ONE company on a card of its own (``_nominate_card``)
+#   recard   card spec  replace the card under a company's whole group (``_replace_group_card``)
+#   rename   name       name the billing account this company is billed on — the store write
+#                       08-C's "Save billing account" makes (``store.set_account_identity``)
+#
+# A card spec is a test token, optionally TAGGED ("F:tok_chargeCustomerFail") so that
+# several events share one card — see ``_new_card``.
+#
+# Same-day events run in (kind, code) order, and ``rename`` sorts after buy, consent,
+# nominate and recard: a rename on the day of a move names the account moved TO.
 #
 # `consent` is not decoration. A trial converts to paid only if the payer has a card AND
 # has agreed to be billed for that specific entity — the card is shared across every
@@ -251,111 +269,172 @@ def after(base, days: int):
 # (`checkout._convert_due_trials`). Without a consent event a trial can only ever EXPIRE,
 # which is what the first run of this scenario did: Growth Co was supposed to convert and
 # quietly lapsed instead. In the product this event is the "Confirm billing" button.
+MODULES = ("PETTY_CASH", "PAYMENT_REQUEST")
+PC, PR = MODULES
+CARD_SPEC = "a card spec"          # checked by its token, see ``_check_script``
+ACCOUNT_NAME = "an account name"   # free text, 1-255 characters
+EVENT_CODES = {
+    "trial": MODULES, "buy": MODULES, "cancel": MODULES, "uncancel": MODULES,
+    "consent": ("-",),
+    "card": CARD_SPEC, "nominate": CARD_SPEC, "recard": CARD_SPEC,
+    "rename": ACCOUNT_NAME,
+}
 
-# The catalogue is eleven END STATES, so every offset here is chosen backwards from the
-# last day. Three windows decide all of them: a trial meant to be RUNNING starts less than
-# 30 days out and one meant to have EXPIRED more than 30; a CANCELLED module is one still
-# inside the 30 days its cancellation bought, and a TERMINATED one is the same module
-# after those days ran out and the access sweep closed it.
+# THE CATALOGUE IS FIGMA 05·A — "Subscription Summary — all 36 module-status combinations"
+# (file 43YI3MYtTfX5Xzz6dRoRuT, node 1521:1292). Down is Petty Cash, across is Payment
+# Request, over six statuses: 1 NOT_STARTED, 2 TRIAL, 3 TRIAL_EXPIRED, 4 ACTIVE,
+# 5 CANCELLATION_PENDING, 6 SUSPENDED. M11..M66 are the 36 cells with every trial
+# UNCONFIRMED; the N-frames are a trial CONFIRMED (billing consent given, so it will
+# convert) — a is Petty Cash's trial, b is Payment Request's. Each company is named for its
+# frame and for the company the design draws in it, so the list, the report and the design
+# read against each other. Section 05·B (every tick / untick) needs no rows of its own: each
+# of its frames is one of these states after a click.
 #
-# Two offsets are load-bearing beyond their own scenario, and they pull against each
-# other. The payer's anchor is set by the FIRST charge on the account, which is scenario
-# 12's buy at -65 — it has to be the earliest, because terminating means being cancelled
-# for a full 30 days before today. That anchor then gives the whole catalogue renewals at
-# about -35 and -5. Scenario 10 needs one of those to fall after ITS cancellation while
-# the module is still resumable, which is a nine-day window; buying at -50 and cancelling
-# at -25 puts the second renewal squarely inside it, and leaves the module live across the
-# first one so that renewal has something to bill besides scenario 12's extension.
+# 38 of the 48 frames are lived below. The other ten cannot be, and ``UNREACHABLE_05A`` says
+# why for each — leaving a frame out is a decision, recorded where the frames are.
+#
+# Every offset comes from the constants here, and the relations between them are
+# load-bearing. ``_check_catalogue`` asserts each relation at import instead of trusting
+# this comment to be kept true.
+ANCHOR_BUY = -35    # M44's two buys: the payer's FIRST charge, so its anchor. The renewal R
+                    # falls a calendar month later — between -7 and -4 with the month lengths
+BOUGHT = -20        # an ordinary purchase: a mid-period change that joins the anchor's cycle
+RUNNING = -16       # a trial still running on the last day: it ends at +14 ("Trial Active")
+LAPSED = -50        # a trial that has run out: it ends at -20 and, with no consent, EXPIRES
+AFTER_LAPSE = -18   # a buy or consent beside a LAPSED sibling. It must come after -20, or the
+                    # sibling CONVERTS instead: consent is per ENTITY, and a day's events run
+                    # before that day's close-trials
+CONSENTED = -15     # "Confirm billing" on a RUNNING trial
+CANCELLED = -15     # inside R's period, so access runs to max(R, -15 + 30) = +15 — the
+                    # design's own "Ends in 15 days". The extension rides R's invoice
+FAILING = -8        # onto the declining card BEFORE R. R declines, that card's ACTIVE rows go
+                    # past due (trials and cancellations keep their phase) and read SUSPENDED
+                    # until R + 15 — the catalogue's shelf life, roughly eight days
+FAILING_CARD = f"F:{CARD_FAIL}"   # ONE card for every suspended company: one invoice, one
+                                  # retry stream, and the rest of the account unaffected
+# The two billing accounts are NAMED for what happens to them. Unnamed, an account reads as
+# its payer (``portal.account_name``), so both read "Angelika Tardaguela" and the 08-A
+# picker cannot tell them apart.
+WORKING_ACCOUNT = "Success"
+FAILING_ACCOUNT = "Failed"
+
 CATALOGUE = [
-    ("Scenario 2: 1 Trial + Not started", [
-        ("trial", "PAYMENT_REQUEST", -14),
-        # Authorised the day after starting, which is the ordinary flow: start the trial,
-        # then confirm billing. Safe anywhere in this scenario because the trial does not
-        # end until +16 — consent only changes what happens AT trial end, and this one has
-        # not reached it.
-        ("consent", "-", -13),
+    # Nothing started. `--setup` creates the company and that is all it has, which is the
+    # state: no module row and no gate. It never appears in the payer's LIST (that is built
+    # from module rows) — open it from its module settings page.
+    ("M11 Harbour & Vine Limited", []),
+    ("M12 Kestrel Foods Limited", [("trial", PR, RUNNING)]),
+    ("M13 Mino Market Limited", [("trial", PR, LAPSED)]),
+    ("M14 Lantern Bay Limited", [("buy", PR, BOUGHT)]),
+    ("M15 Orchid Lane Limited", [("buy", PR, BOUGHT), ("cancel", PR, CANCELLED)]),
+    ("M16 Willow Court Limited", [("buy", PR, BOUGHT), ("nominate", FAILING_CARD, FAILING)]),
+    ("M21 Ashcroft Limited", [("trial", PC, RUNNING)]),
+    ("M22 Pier 9 Trading Limited", [("trial", PC, RUNNING), ("trial", PR, RUNNING)]),
+    ("M23 Quarry Hill Limited", [("trial", PR, LAPSED), ("trial", PC, RUNNING)]),
+    ("M31 Beacon Hill Limited", [("trial", PC, LAPSED)]),
+    ("M32 Cobblestone Limited", [("trial", PC, LAPSED), ("trial", PR, RUNNING)]),
+    ("M33 Ember & Co Limited", [("trial", PC, LAPSED), ("trial", PR, LAPSED)]),
+    ("M34 Thread & Craft Limited", [("trial", PC, LAPSED), ("buy", PR, AFTER_LAPSE)]),
+    ("M35 Saltwater Studio Limited", [
+        ("trial", PC, LAPSED), ("buy", PR, AFTER_LAPSE), ("cancel", PR, CANCELLED),
     ]),
-    ("Scenario 3 - Free Trial Without Billing Consent", [
-        ("trial", "PETTY_CASH", -12),
-        ("trial", "PAYMENT_REQUEST", -12),
+    ("M36 Copperline Limited", [
+        ("trial", PC, LAPSED), ("buy", PR, AFTER_LAPSE), ("nominate", FAILING_CARD, FAILING),
     ]),
-    ("Scenario 4 - Free Trial Different Dates", [
-        # Both still running, started nineteen days apart. The absolute version of this
-        # could not be written: its intended BILL start was in the future, so it fell back
-        # to starting on the final day and ending short. Counting backwards, there is
-        # nothing to fudge.
-        ("trial", "PETTY_CASH", -19),
-        # ONE consent covers both modules — it is per ENTITY, not per module — so this
-        # authorises the BILL trial started seventeen days later too. Both end in the
-        # future (+11 and +28), so nothing converts inside the run.
-        ("consent", "-", -18),
-        ("trial", "PAYMENT_REQUEST", -2),
+    ("M41 Driftwood Limited", [("buy", PC, BOUGHT)]),
+    ("M43 Fernbank Limited", [("trial", PR, LAPSED), ("buy", PC, AFTER_LAPSE)]),
+    # THE ANCHOR. Payment Request sorts first, so it is the account's first charge (280)
+    # and Petty Cash then swaps the company to the bundle (a 120 change). The billing
+    # account those buys open is the one every working company joins.
+    ("M44 Nexora Health Limited", [
+        ("buy", PC, ANCHOR_BUY), ("buy", PR, ANCHOR_BUY),
+        ("rename", WORKING_ACCOUNT, ANCHOR_BUY),
     ]),
-    ("Scenario 5 - Free trial + Active", [
-        ("trial", "PETTY_CASH", -16),
-        ("buy", "PAYMENT_REQUEST", -9),
+    ("M45 Solera Group Limited", [
+        ("buy", PC, BOUGHT), ("buy", PR, BOUGHT), ("cancel", PR, CANCELLED),
     ]),
-    ("Scenario 6 - Expired + Free trial", [
-        ("trial", "PAYMENT_REQUEST", -40),          # ended at -10
-        ("trial", "PETTY_CASH", -12),
-        # AFTER the BILL trial has already expired, and that is not a detail — it is the
-        # only window this event has. Consent is per ENTITY, so a consent recorded before
-        # -10 would have been in force when `close-trials` reached BILL, and BILL would
-        # have CONVERTED TO PAID instead of expiring. The scenario is named for that
-        # expiry; consenting a day earlier silently turns it into scenario 5.
-        #
-        # So it sits five days after, which also leaves margin if the trial length in
-        # `billing_policy` is ever raised: the constraint is "after BILL's trial_end", not
-        # "at -5". PETTY_CASH is untouched — its trial runs to +18, so this consent means
-        # it will convert then, which is the contrast scenario 3 has no consent for.
-        ("consent", "-", -5),
+    ("M51 Glasswater Limited", [("buy", PC, BOUGHT), ("cancel", PC, CANCELLED)]),
+    ("M53 Ironvale Limited", [
+        ("trial", PR, LAPSED), ("buy", PC, AFTER_LAPSE), ("cancel", PC, CANCELLED),
     ]),
-    ("Scenario 7 - Both Trial Expired", [
-        ("trial", "PETTY_CASH", -40),
-        ("trial", "PAYMENT_REQUEST", -40),
+    ("M54 Juniper Row Limited", [
+        ("buy", PC, BOUGHT), ("buy", PR, BOUGHT), ("cancel", PC, CANCELLED),
     ]),
-    ("Scenario 8 - Both Active", [
-        ("buy", "PETTY_CASH", -20),
-        ("buy", "PAYMENT_REQUEST", -20),
+    ("M55 Tidal Works Limited", [
+        ("buy", PC, BOUGHT), ("buy", PR, BOUGHT),
+        ("cancel", PC, CANCELLED), ("cancel", PR, CANCELLED),
     ]),
-    ("Scenario 9 - Modules Cancelled On Different Dates", [
-        ("buy", "PETTY_CASH", -20),
-        ("buy", "PAYMENT_REQUEST", -20),
-        ("cancel", "PETTY_CASH", -12),
-        ("cancel", "PAYMENT_REQUEST", -11),
+    # Cancelled BEFORE the card fails, the order the UI allows (a past-due module offers
+    # only Reactivate). The extension rides the declined invoice.
+    ("M56 Northgate Limited", [
+        ("buy", PC, BOUGHT), ("buy", PR, BOUGHT), ("cancel", PC, CANCELLED),
+        ("nominate", FAILING_CARD, FAILING),
     ]),
-    ("Scenario 10 - Resume Module After A Renewal", [
-        # Cancelled late enough that the 30 days it bought have not run out, and bought
-        # early enough that a renewal falls between the two — which is the only window in
-        # which "resume after a renewal" is a state the UI can be in. The absolute dates
-        # satisfied neither half: the buy sat 31 days before a renewal the run always
-        # ended before reaching, so this rendered as a plain cancelled module and never
-        # once showed the thing it is named for. The renewal also sweeps up the pending
-        # extension, so this is where extension_state moves pending -> invoiced.
-        ("buy", "PETTY_CASH", -50),
-        ("cancel", "PETTY_CASH", -25),   # access to +5, renewal lands about -5
+    ("M61 Kingsmead Limited", [("buy", PC, BOUGHT), ("nominate", FAILING_CARD, FAILING)]),
+    ("M63 Meadowfield Limited", [
+        ("trial", PR, LAPSED), ("buy", PC, AFTER_LAPSE), ("nominate", FAILING_CARD, FAILING),
     ]),
-    ("Scenario 11 - Cancelled Module on Petty Cash", [
-        ("buy", "PETTY_CASH", -20),
-        ("buy", "PAYMENT_REQUEST", -20),
-        ("cancel", "PETTY_CASH", -19),
+    ("M65 Oakhaven Limited", [
+        ("buy", PC, BOUGHT), ("buy", PR, BOUGHT), ("cancel", PR, CANCELLED),
+        ("nominate", FAILING_CARD, FAILING),
     ]),
-    ("Scenario 12 - Both Modules Terminated", [
-        # TERMINATED, not merely cancelled — the distinction scenarios 9 and 11 do not
-        # draw. Cancelling stops the renewal but leaves 30 days of paid access, so a
-        # module cancelled last week is still live and still resumable; it becomes
-        # terminated only when those days run out and `sweep_expired_module_access` closes
-        # it, which is the one state here that nobody clicks. So the cancellation has to
-        # sit a clear month back: at -63 the access ran out at -33 and the sweep has long
-        # since done its work. The absolute dates cancelled a day after buying and still
-        # had three weeks of access left at the end of the run, so this scenario rendered
-        # as another cancelled-but-live module, indistinguishable from 9 and 11.
-        ("buy", "PETTY_CASH", -65),
-        ("buy", "PAYMENT_REQUEST", -65),
-        ("cancel", "PETTY_CASH", -63),   # access ran out at -33
-        ("cancel", "PAYMENT_REQUEST", -63),
+    ("M66 Halcyon Labs Limited", [
+        ("buy", PC, BOUGHT), ("buy", PR, BOUGHT), ("nominate", FAILING_CARD, FAILING),
+        ("rename", FAILING_ACCOUNT, FAILING),
+    ]),
+    ("N12b Rosewood Limited", [("trial", PR, RUNNING), ("consent", "-", CONSENTED)]),
+    ("N21a Silverbrook Limited", [("trial", PC, RUNNING), ("consent", "-", CONSENTED)]),
+    ("N23a Vantage Point Limited", [
+        ("trial", PR, LAPSED), ("trial", PC, RUNNING), ("consent", "-", CONSENTED),
+    ]),
+    # No consent event on these: the buy records it, and consent is per ENTITY — which is
+    # exactly why their M-twins (M24, M42, ...) cannot be lived at all.
+    ("N24a Westbay Limited", [("buy", PR, BOUGHT), ("trial", PC, RUNNING)]),
+    ("N25a Yardley Limited", [
+        ("buy", PR, BOUGHT), ("trial", PC, RUNNING), ("cancel", PR, CANCELLED),
+    ]),
+    ("N26a Zephyr Lane Limited", [
+        ("buy", PR, BOUGHT), ("trial", PC, RUNNING), ("nominate", FAILING_CARD, FAILING),
+    ]),
+    ("N32b Amberton Limited", [
+        ("trial", PC, LAPSED), ("trial", PR, RUNNING), ("consent", "-", CONSENTED),
+    ]),
+    ("N42b Birchwood Limited", [("buy", PC, BOUGHT), ("trial", PR, RUNNING)]),
+    ("N52b Cedarcroft Limited", [
+        ("buy", PC, BOUGHT), ("trial", PR, RUNNING), ("cancel", PC, CANCELLED),
+    ]),
+    ("N62b Dunmore Limited", [
+        ("buy", PC, BOUGHT), ("trial", PR, RUNNING), ("nominate", FAILING_CARD, FAILING),
     ]),
 ]
+
+FRAMES_05A = [f"M{pc}{pr}" for pc in range(1, 7) for pr in range(1, 7)] + [
+    "N12b", "N21a", "N22a", "N22b", "N23a", "N24a", "N25a", "N26a",
+    "N32b", "N42b", "N52b", "N62b",
+]
+
+_CONFIRMED = (
+    "a trial beside a paid module is always CONFIRMED: will_convert is card AND consent, "
+    "consent is per entity with no revoke and every purchase records it, and the card is "
+    "the whole account's (removing it, possible only once nothing bills, would unconfirm "
+    "every trial the payer has)"
+)
+_STRANDED = (
+    "one module past due beside one paid up needs two paid-through dates on one entity, "
+    "which one card group cannot hold; the only route is moving a past-due company onto a "
+    "working card (payment_methods.set_for_entity, which lacks move_company's past-due "
+    "guard), a probable engine bug that strands the row past_due for good"
+)
+_TOGETHER = (
+    "will_convert is computed once per entity, so two trials are confirmed together or not "
+    "at all; no database state draws this frame"
+)
+UNREACHABLE_05A = {
+    "M24": _CONFIRMED, "M42": _CONFIRMED, "M25": _CONFIRMED, "M52": _CONFIRMED,
+    "M26": _CONFIRMED, "M62": _CONFIRMED,
+    "M46": _STRANDED, "M64": _STRANDED,
+    "N22a": _TOGETHER, "N22b": _TOGETHER,
+}
 
 # Scenario 1 — four months, four companies, one account.
 #
@@ -410,10 +489,17 @@ LIFECYCLE = [
         ("buy", "PAYMENT_REQUEST", after(S1_ANCHOR, 80)),
     ]),
     ("S1 Steady Co", [
-        # Account-level card events, hung off an entity that already exists so the
-        # timeline reads in one place. `code` is the card, not a module.
-        ("card", CARD_FAIL, after(S1_ANCHOR, 87)),
-        ("card", CARD_GOOD, after(S1_ANCHOR, 97)),
+        # The card UNDER the account dies and is replaced. `recard` acts on the GROUP and
+        # all four companies are on the one group, so the day-92 renewal fails for all of
+        # them and dunning collects on the replacement. Hung off Steady Co because it is
+        # on that card from day 0; `code` is the card, not a module.
+        #
+        # These were `card` events until 2026-09-28, and from the per-entity-cards cutover
+        # on they broke nothing: `card` changes only the payer's DEFAULT card, and a
+        # renewal charges the group's own. Every run in between billed day 92 on a working
+        # card, and the failure this scenario exists for never happened.
+        ("recard", CARD_FAIL, after(S1_ANCHOR, 87)),
+        ("recard", CARD_GOOD, after(S1_ANCHOR, 97)),
     ]),
 ]
 
@@ -520,8 +606,8 @@ L1_GIVES_UP = [
         ("buy", "PETTY_CASH", EDGE_ANCHOR),
         ("buy", "PAYMENT_REQUEST", EDGE_ANCHOR),
     ]),
-    # Pays nothing, does nothing wrong, and loses access anyway — dunning is
-    # account-level, so one bad card revokes every entity on the account. Worth seeing.
+    # Pays nothing, does nothing wrong, and loses access anyway — dunning is per CARD, and
+    # this account has one, so one bad card revokes every company on it. Worth seeing.
     ("L1 Bystander Co", [
         ("buy", "PETTY_CASH", EDGE_ANCHOR),
     ]),
@@ -531,8 +617,11 @@ L1_GIVES_UP = [
     ]),
     ("L1 Doomed Co", [
         # Four days before the renewal it has to break, so the margin survives the anchor
-        # month changing length underneath it.
-        ("card", CARD_FAIL, after(EDGE_ANCHOR, 26)),
+        # month changing length underneath it. `recard`, never repaired: the card under the
+        # account's one group, which Bystander and Hopeful are on too. As a `card` event
+        # (the payer's default) it broke nothing from the per-entity-cards cutover until
+        # 2026-09-28: every run in between renewed on a working card and never gave up.
+        ("recard", CARD_FAIL, after(EDGE_ANCHOR, 26)),
     ]),
 ]
 
@@ -625,7 +714,7 @@ def retag(scenarios: list, old: str, new: str) -> list:
 
     Two naming forms, and this handles both without being told which. The lifecycle and
     edge scenarios carry their tag in the name already ("S1 Steady Co", "L1 Doomed Co"),
-    so the first token is swapped. The catalogue's names do not ("Scenario 2: ...") —
+    so the first token is swapped. The catalogue's names do not ("M44 Nexora Health Limited") —
     nothing matches, they pass through, and `_clone_name` prefixes the run's tag at seed
     time instead. Which is why the tag alone re-points a catalogue run and the two
     hand-written helpers this replaced were never actually doing different things.
@@ -684,14 +773,14 @@ RUNS = {
     # address the run was originally seeded under.
     #
     # A TAG IS ONLY FREE TO CHANGE WHILE NOTHING IS SEEDED UNDER IT. It is baked into
-    # every entity NAME that a run has already created ("Ang - Scenario 2 ...",
+    # every entity NAME that a run has already created ("Ang - M44 Nexora Health Limited",
     # "A1 Steady Co") and `_entities` matches on name, so renaming one against live data
     # renames nothing — the run stops seeing its own entities and seeds a second set
     # beside them. This one went "Ang" -> "Digitalisation" on 2026-08-17, checked first
     # and safe only because neither database held a single entity or payer row for it.
     # Check the same way before touching "A1" below, or any other.
     "digitalisation": {
-        "label": "Scenarios 2-12, handed to digitalisation (entities tagged Digitalisation)",
+        "label": "The 05·A catalogue, handed to digitalisation (entities tagged Digitalisation)",
         "user_id": "44444444-5555-6666-7777-888888888888",
         "email": "digitalisation+catalogue@oliveandvinehk.com",
         # The data is digitalisation's; the NOTICES go to Angelika — the same split as
@@ -719,7 +808,7 @@ RUNS = {
     # than sit beside it. This one took the tag "Ang" back on 2026-08-17, once
     # digitalisation's rename freed it; it was "Ang2" for as long as the two collided.
     "angelika": {
-        "label": "Scenarios 2-12 for Angelika — fix validation",
+        "label": "The 05·A catalogue for Angelika — fix validation",
         "user_id": "88888888-9999-0000-1111-222222222222",
         "email": "angelika.tardaguela+catalogue@oliveandvinehk.com",
         "name": ("Angelika", "Scenarios"),
@@ -803,35 +892,6 @@ RUNS = {
         "tag": "E1",
         "scenarios": E1_MONTH_END,
     },
-    # Jayden's two runs, read by Angelika. `notify_to` is the ONLY thing that separates
-    # the payer from the reader — see `_patch_notify`. It deliberately points at
-    # addresses that already belong to the `angelika` runs' payers: the mail is meant to
-    # land in that inbox, and nothing about a redirect requires the destination to be
-    # free.
-    "jayden": {
-        "label": "Scenarios 2-12 for Jayden (mail -> angelika.tardaguela+catalogue)",
-        "user_id": "66666666-7777-8888-9999-000000000000",
-        "email": "jayden.kim+catalogue@oliveandvinehk.com",
-        # Follows the `angelika` payer's address, which moved +scenarios -> +catalogue on
-        # 2026-08-17. The point of this line is "the box Angelika reads her own catalogue
-        # run in", so it tracks that address rather than the literal string it once held.
-        "notify_to": "angelika.tardaguela+catalogue@oliveandvinehk.com",
-        "name": ("Jayden", "Scenarios"),
-        "tag": "Jay",
-        "scenarios": CATALOGUE,
-    },
-    "jayden-lifecycle": {
-        "label": "Scenario 1 for Jayden (mail -> angelika.tardaguela+jay-lifecycle)",
-        "user_id": "77777777-8888-9999-0000-111111111111",
-        "email": "jayden.kim+lifecycle@oliveandvinehk.com",
-        # Her inbox, but NOT her plain `+lifecycle@`: that address is the A3 run's own
-        # payer, so its notices would be indistinguishable from these — same subjects,
-        # same amounts, same dates, different account.
-        "notify_to": "angelika.tardaguela+jay-lifecycle@oliveandvinehk.com",
-        "name": ("Jayden", "Lifecycle"),
-        "tag": "J1",
-        "scenarios": lifecycle_as("J1"),
-    },
 }
 
 def _check_runs_are_distinct() -> None:
@@ -860,6 +920,118 @@ def _check_runs_are_distinct() -> None:
 
 
 _check_runs_are_distinct()
+
+
+def _check_script(label: str, scenarios: list) -> None:
+    """One shape's scripts, checked before anything is sent anywhere.
+
+    The dispatch in ``replay`` refuses an unknown kind too, but a script found wrong there
+    has already spent a Stripe test clock and part of a run — and until 2026-09-28 it
+    refused nothing: a mistyped kind was skipped without a word, and the scenario simply
+    rendered as something else.
+    """
+    for name, script in scenarios:
+        for kind, code, when in script:
+            if kind not in EVENT_CODES:
+                raise SystemExit(f"{label}: {name!r} has an unknown event kind {kind!r}")
+            allowed = EVENT_CODES[kind]
+            if allowed is CARD_SPEC:
+                if not code.rpartition(":")[2].startswith("tok_"):
+                    raise SystemExit(f"{label}: {name!r} {kind} needs a card spec, got {code!r}")
+            elif allowed is ACCOUNT_NAME:
+                # ``payer_billing_group.billing_company`` is VARCHAR(255), and a blank would
+                # CLEAR the name — which is what an unnamed account already is.
+                if not code.strip() or len(code) > 255:
+                    raise SystemExit(
+                        f"{label}: {name!r} {kind} needs a name of 1-255 characters, got {code!r}"
+                    )
+            elif code not in allowed:
+                raise SystemExit(f"{label}: {name!r} {kind} takes {allowed}, got {code!r}")
+            if kind == "card" and _declines(code):
+                # The payer's DEFAULT card is not what anybody is charged on — a renewal
+                # charges each company's own group. Scripted this way, the lifecycle's and
+                # L1's failures silently never happened for a month.
+                raise SystemExit(
+                    f"{label}: {name!r} makes a declining card the account default, which "
+                    f"declines nothing — use recard (the card under its group) or nominate"
+                )
+            if not callable(when) and when > 0:
+                raise SystemExit(
+                    f"{label}: {name!r} {kind} {code} is at +{when}; offsets count back from 0"
+                )
+
+
+def _check_catalogue(catalogue: list, unreachable: dict) -> None:
+    """The catalogue against the design it reproduces, and its offsets against each other.
+
+    Each relation is one a recipe depends on and nothing else would notice breaking: move
+    ANCHOR_BUY a week later and the renewal lands before FAILING, the declining card is
+    never charged inside the run, and the nine suspended companies quietly render as their
+    ACTIVE twins. The lengths are ``services.policy``'s defaults — a trial and a cancelled
+    module's access are 30 days, the past-due window is 15 — so a database whose
+    ``billing_policy`` says otherwise renders a different catalogue.
+    """
+    trial = cancel_access = 30
+    past_due = 15
+    shortest, longest = 28, 31      # a calendar month: where R can fall after ANCHOR_BUY
+    relations = {
+        "R falls after FAILING": ANCHOR_BUY + shortest > FAILING,
+        "R falls inside the run": ANCHOR_BUY + longest <= 0,
+        "the suspended are still suspended on the last day":
+            ANCHOR_BUY + shortest + past_due > 0,
+        "a cancellation outlasts R": CANCELLED + cancel_access > ANCHOR_BUY + longest,
+        "the LAPSED trials run out inside the run": LAPSED + trial <= 0,
+        "nothing consents before the LAPSED trials run out":
+            LAPSED + trial < min(AFTER_LAPSE, CONSENTED),
+        "the RUNNING trials still run on the last day": RUNNING + trial > 0,
+    }
+    broken = [what for what, holds in relations.items() if not holds]
+    if broken:
+        raise SystemExit("CATALOGUE offsets are broken: " + "; ".join(broken))
+
+    frames = []
+    for name, script in catalogue:
+        frame = name.split(" ", 1)[0]
+        if frame not in FRAMES_05A:
+            raise SystemExit(f"CATALOGUE: {name!r} does not start with a 05-A frame code")
+        frames.append(frame)
+        if any(when < ANCHOR_BUY for kind, _code, when in script
+               if kind in ("buy", "consent", "cancel")):
+            raise SystemExit(f"CATALOGUE: {name!r} charges before ANCHOR_BUY and moves the anchor")
+        bought = [when for kind, _code, when in script if kind == "buy"]
+        if any(not any(b <= when for b in bought)
+               for kind, _code, when in script if kind == "nominate"):
+            raise SystemExit(
+                f"CATALOGUE: {name!r} changes card before buying: no paid days carry, "
+                f"so the card is never charged and nothing declines"
+            )
+        moves = [when for kind, _code, when in script if kind in ("buy", "consent", "nominate")]
+        if any(not moves or when < max(moves)
+               for kind, _code, when in script if kind == "rename"):
+            raise SystemExit(
+                f"CATALOGUE: {name!r} renames its billing account before its last move onto "
+                f"one, so the name lands on an account it then leaves"
+            )
+    twice = sorted({frame for frame in frames if frames.count(frame) > 1})
+    if twice:
+        raise SystemExit(f"CATALOGUE: frames seeded twice: {twice}")
+    both = sorted(set(frames) & set(unreachable))
+    unexplained = sorted(set(FRAMES_05A) - set(frames) - set(unreachable))
+    unknown = sorted(set(unreachable) - set(FRAMES_05A))
+    if both or unexplained or unknown:
+        raise SystemExit(
+            f"CATALOGUE vs 05-A: seeded AND unreachable {both}, neither {unexplained}, "
+            f"not a frame {unknown}"
+        )
+
+
+def _check_scripts() -> None:
+    for key, run in RUNS.items():
+        _check_script(key, run["scenarios"])
+    _check_catalogue(CATALOGUE, UNREACHABLE_05A)
+
+
+_check_scripts()
 
 PASSWORD = "ReplayScenarios!2026"  # dev-only; these payers exist to be signed in as
 
@@ -1136,9 +1308,12 @@ def tagged(tag: str, token: str) -> str:
 def _set_card(run: dict, token: str) -> str:
     """Attach a card and make it the ACCOUNT DEFAULT.
 
-    What every ``("card", ...)`` event in the scenarios below does, and it is no longer
-    the same thing as "change what gets charged": each company is billed on the card it
-    was nominated onto, so this only decides what the pickers offer first.
+    What a ``("card", ...)`` event does, and it is no longer the same thing as "change
+    what gets charged": each company is billed on the card it was nominated onto, so this
+    only decides what the pickers offer first. Which is why ``_check_script`` refuses a
+    DECLINING one: the lifecycle's and L1's failures were scripted that way and silently
+    stopped happening. A card that should decline goes under a group (``recard``) or has
+    a company moved onto it (``nominate``).
 
     It still matters to a replay for exactly that reason — the consent paths with no
     picker (``checkout._ensure_nominated``, and a transfer accept) nominate the default at
@@ -1546,11 +1721,22 @@ def _daily_jobs(run: dict, today: datetime, log: list[str]) -> None:
         log.append(f"    DECLINED renewal {item['total']/100:>9,.2f}  {item.get('status')}")
 
     result = _step("retry-dunning", lambda: dunning.collect_due(today))
+    # ``collect_due``'s retry entries carry ``reason`` and no ``status``: reading
+    # ``status`` logged every retry as "None", a decline and a payment alike. A retry that
+    # paid is the same entry again under ``recovered``; an unpaid one without an exception
+    # (``retry_invoice`` returns ``(False, None)``) has no reason to give.
+    recovered = {str(r.get("billing_group_id")) for r in (result or {}).get("recovered", [])}
     for item in (result or {}).get("retried", []):
-        log.append(f"    dunning retry -> {item.get('status')}")
+        outcome = ("paid" if str(item.get("billing_group_id")) in recovered
+                   else item.get("reason") or "not paid")
+        log.append(f"    dunning retry -> {outcome}")
     for item in (result or {}).get("recovered", []):
         log.append(f"    dunning RECOVERED {item.get('user_id', '')[:8]}")
-    for item in (result or {}).get("gave_up", []):
+    # ``given_up``, as ``collect_due`` returns it. Reading "gave_up" printed nothing, ever:
+    # a run that gave up showed its retries and then only "ACCESS revoked".
+    for item in (result or {}).get("given_up", []):
+        # Lower case on purpose: ``scripts/replay_diff.py`` normalises the payer prefix
+        # of "dunning gave up <id>" to compare a clone against its original.
         log.append(f"    dunning gave up {item.get('user_id', '')[:8]}")
 
     # LAST, and that is the whole point — see `cli/subscription_access.py`, which spells
@@ -1614,11 +1800,23 @@ def replay(run: dict, dry: bool = False) -> None:
         _patch_renewal_keys(run)
         _patch_change_keys(run)
         user = User.objects.get(pk=run["user_id"])
+        # A replay STARTS a billing cycle; it cannot join one. Every shape's offsets are
+        # chosen around the anchor its own first charge sets, and a payer still holding an
+        # older one — a --reset that failed, or never ran — renews on the old day instead.
+        # Nothing errors: the catalogue's nine suspended companies would simply come out
+        # as their ACTIVE twins.
+        mapping = store.customer_mapping_for_user(run["user_id"])
+        if mapping is not None and mapping.anchor_at is not None:
+            raise SystemExit(
+                f"!! {run['tag']}'s payer already has a billing anchor "
+                f"({mapping.anchor_at:%d %b %Y}). Run --reset first."
+            )
         entities = _entities(run)
         expected = {_clone_name(run, n) for n, _ in run["scenarios"]}
         if len(entities) != len(expected):
-            print(f"!! expected {len(expected)} entities, found {len(entities)}. Run --setup.")
-            return
+            raise SystemExit(
+                f"!! expected {len(expected)} entities, found {len(entities)}. Run --setup."
+            )
 
         # Keyed on the first three fields only. Two entities can have an identical
         # (day, kind, code) — the lifecycle run has two companies buying Petty Cash on
@@ -1636,7 +1834,7 @@ def replay(run: dict, dry: bool = False) -> None:
               f"({(last_day - origin).days + 1} days, {len(events)} events)")
 
         event_days = {when.date() for when, _kind, _code, _entity in events}
-        advanced = skipped_days = 0
+        advanced = skipped_days = failed = 0
 
         day = origin
         while day <= last_day:
@@ -1690,27 +1888,46 @@ def replay(run: dict, dry: bool = False) -> None:
                         # fall back on at the charge.
                         store.record_billing_consent(entity.id, run["user_id"], "confirmed")
                         _checkout._ensure_nominated(entity.id, run["user_id"])
+                        # ``_ensure_nominated`` swallows its own failures, and the card
+                        # reads "confirmed" without a nomination (it judges by the
+                        # account's default card) — so a consent that nominated nothing
+                        # would look right and then EXPIRE at trial end instead of converting.
+                        if store.billing_group_for_entity(entity.id, run["user_id"]) is None:
+                            raise RuntimeError("billing consent recorded but no card nominated")
                         log.append(f"    consent billing authorised for {name[:32]}")
                     elif kind == "card":
                         pm = _set_card(run, code)
-                        which = "DECLINING" if code == CARD_FAIL else "working"
+                        which = "DECLINING" if _declines(code) else "working"
                         log.append(f"    card   account default is a {which} card "
                                    f"({pm[:18]})")
                     elif kind == "nominate":
                         # ONE company onto a card of its own. This is what splits an
                         # account's invoice in two.
                         pm = _nominate_card(run, entity, code)
-                        which = "DECLINING" if code == CARD_FAIL else "working"
+                        which = "DECLINING" if _declines(code) else "working"
                         log.append(f"    CARD   {name[:30]} -> {which} card "
                                    f"({pm[:18]})")
                     elif kind == "recard":
                         # The card UNDER a company changes — an expiry, a re-issue. Every
                         # company on that card moves with it; the group keeps its cycle.
                         pm = _replace_group_card(run, entity, code)
-                        which = "DECLINING" if code == CARD_FAIL else "working"
+                        which = "DECLINING" if _declines(code) else "working"
                         log.append(f"    RECARD {name[:30]}'s card replaced with a "
                                    f"{which} one ({pm[:18]})")
+                    elif kind == "rename":
+                        # The account this company is billed on NOW — which is why the kind
+                        # sorts after buy, consent and nominate on the same day.
+                        group = store.billing_group_for_entity(entity.id, run["user_id"])
+                        if group is None:
+                            raise RuntimeError("no billing account to rename")
+                        store.set_account_identity(group.id, billing_company=code)
+                        log.append(f"    RENAME {name[:30]}'s billing account -> {code}")
+                    else:
+                        # ``_check_script`` refuses this at import; the belt to its
+                        # braces, because an unknown kind here was once skipped silently.
+                        raise ValueError(f"unknown event kind {kind!r}")
                 except Exception as exc:
+                    failed += 1
                     log.append(f"    !! {kind} {code} {name[:26]}: {exc}")
 
             _daily_jobs(run, day, log)
@@ -1724,8 +1941,11 @@ def replay(run: dict, dry: bool = False) -> None:
         # Reported because the saving is the whole point of skipping, and because a run
         # that advanced on EVERY day means the predicate stopped discriminating — worth
         # noticing before it silently costs half an hour again.
+        # A failed event is COUNTED, not gated on: the run carries on past it by design
+        # (a transient failure is not a lost run, and a retry loop once destroyed a finished
+        # one), but it must not scroll past unseen either.
         print(f"\nreplay complete — Stripe clock advanced on {advanced} day(s), "
-              f"skipped {skipped_days}")
+              f"skipped {skipped_days}" + (f"; {failed} event(s) FAILED" if failed else ""))
 
 
 # --- report / cleanup -------------------------------------------------------
@@ -1784,6 +2004,7 @@ def report(run: dict) -> None:
                 for e in store.entity_ids_in_group(group.id)
             )
             print(f"  card {group.stripe_payment_method_id[:18]}  "
+                  f"name={group.billing_company or '-'}  "
                   f"paid_through={str(group.paid_through)[:10]}  "
                   f"dunning={str(group.dunning_started_at)[:10]}  "
                   f"{', '.join(on_it) or '(no companies)'}")
@@ -1847,16 +2068,23 @@ def reset(run: dict) -> None:
         # the foreign key refuses it the other way round. Not optional: a group carries
         # ``paid_through`` and a dunning clock, so one left behind means the next replay
         # opens with a card already paid months ahead and ``due_renewals`` skips it.
-        nominations = 0
-        if ids:
-            nominations, _ = EntityBillingGroup.objects.filter(entity_id__in=ids).delete()
-        groups, _ = PayerBillingGroup.objects.filter(payer_user_id=run["user_id"]).delete()
+        #
+        # Nominations BY PAYER, not by this run's entities: every group of the payer is
+        # deleted below, so a nomination onto one of them from ANY company - one the payer
+        # nominated by hand in the UI, say - blocks the delete (``fk_ebg_group`` has no ON
+        # DELETE) and the whole reset rolls back. That is not a loud failure in practice:
+        # the old anchor then survives and the next replay silently bills on the wrong
+        # cycle. The group it points at is going either way.
+        nominations, _ = EntityBillingGroup.objects.filter(payer_user_id=run["user_id"]).delete()
+        # The per-model count, not the total: each group CASCADES to its payment-method row,
+        # and the total counted those as groups too (two cards reported as four).
+        _, deleted = PayerBillingGroup.objects.filter(payer_user_id=run["user_id"]).delete()
+        groups = deleted.get(PayerBillingGroup._meta.label, 0)
 
         mapping = store.customer_mapping_for_user(run["user_id"])
         if mapping:
             # Only the anchor lives on the account now; the cycle and the dunning clock
-            # went with the groups just deleted (Flask's copy still assigns the old
-            # attributes, which its model no longer maps - a silent no-op there).
+            # went with the groups just deleted.
             mapping.anchor_at = None
             mapping.save(update_fields=["anchor_at"])
         print(f"reset {run['tag']}: {rows} module row(s), {consents} consent(s), "

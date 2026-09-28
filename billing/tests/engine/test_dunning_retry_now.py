@@ -372,3 +372,33 @@ def test_a_successful_manual_payment_switches_the_modules_back_on(app, monkeypat
         assert dunning.retry_now("u1")["status"] == "paid"
 
     assert restored == ["u1"]
+
+
+# --- one card and one invoice named outright (the payer portal's invoice row) ----------
+
+
+def test_a_named_card_is_charged_and_one_not_the_payers_is_not(app, monkeypatch):
+    """``group_id`` names the CARD outright - the portal's invoice row knows its billing
+    account, not a company. A card that is not this payer's charges nothing, rather than
+    falling back to one nobody asked about."""
+    dunning, calls = _wire(app, monkeypatch, account=_Account(), invoices=INVOICES)
+
+    assert dunning.retry_now("u1", group_id="g1")["status"] == "paid"
+    assert calls["retried"] == ["in_1"]
+
+    refused = dunning.retry_now("u1", group_id="g-not-theirs")
+    assert refused["status"] == "no_card"
+    assert calls["retried"] == ["in_1"], "nothing more was charged"
+
+
+def test_the_invoice_a_row_names_is_charged_only_if_the_rules_pick_it(app, monkeypatch):
+    """The row's button may pay only the bill it sits beside. Asked for another one - a page
+    read before something moved - it refuses BEFORE a slot is spent."""
+    dunning, calls = _wire(app, monkeypatch, account=_Account(), invoices=INVOICES)
+
+    other = dunning.retry_now("u1", group_id="g1", expect_invoice="in_other")
+    assert other["status"] == "not_this_invoice"
+    assert (calls["retried"], calls["attempts"]) == ([], 0)
+
+    assert dunning.retry_now("u1", group_id="g1", expect_invoice="in_1")["status"] == "paid"
+    assert calls["retried"] == ["in_1"]

@@ -411,7 +411,7 @@ def _line(entity_id, entity_name, product, amount, kind="full"):
 
 
 def _invoice(ref, *, status="paid", total=40000, lines=(), issued=None, ident="i1",
-             memo=None):
+             memo=None, paid=None):
     return SimpleNamespace(
         id=f"{ident}-0000-0000-0000-000000000000",
         external_id=ref,
@@ -420,6 +420,10 @@ def _invoice(ref, *, status="paid", total=40000, lines=(), issued=None, ident="i
         currency="HKD",
         issued_at=issued or NOW,
         created_at=issued or NOW,
+        # Settlement is its own moment and defaults to "not yet": the tests below are about
+        # description, money and status, and a fake that borrowed ``issued_at`` here would
+        # have hidden the very bug the "Paid date" column shipped with.
+        paid_at=paid,
         period_start=NOW - timedelta(days=30),
         period_end=NOW,
         memo=memo,
@@ -445,6 +449,9 @@ def payer_invoices(app, monkeypatch):
         monkeypatch.setattr(model, "SubscriptionInvoice", fake_model(invoices))
         # Money formatting reaches for currency_info; the symbol is not what is under test.
         monkeypatch.setattr(portal, "_money", lambda amt, cur: f"HK${amt / 100:,.2f}")
+        # Which failed row carries Retry payment reads the payer's cards and the engine's
+        # rule, over real rows - test_invoice_retry.py's subject, not these rows' wording.
+        monkeypatch.setattr(portal, "retryable_invoice_ids", lambda _user, _failed=None: set())
         return portal
 
     return _install
@@ -820,6 +827,84 @@ def test_the_payment_method_is_not_guessed(app, payer_invoices):
         result = portal.build_payer_invoices("u1")
 
     assert result["invoices"][0]["payment_method"] is None
+
+
+def test_when_it_was_paid_is_not_when_it_was_raised(app, payer_invoices):
+    """The grid's "Paid date" column reads ``paid``, and for a while there was nothing to
+    read: the row carried only ``date`` (``issued_at``), so the page printed the day the
+    invoice went out under a heading that promised the day it settled. Two days apart here
+    precisely so a row that borrowed the wrong one could not pass."""
+    settled = NOW + timedelta(days=2)
+    portal = payer_invoices(
+        [_invoice("in_1", paid=settled, lines=[_line("e1", "Acme", "Petty Cash", 28000)])]
+    )
+
+    with app.app_context():
+        row = portal.build_payer_invoices("u1")["invoices"][0]
+
+    assert row["paid_iso"] == settled.isoformat()
+    assert row["paid"] != row["date"]
+
+
+def test_an_unsettled_invoice_has_no_paid_date_at_all(app, payer_invoices):
+    """Open, failed, void - none of them settled, and the column says so with a dash. The
+    one thing it must never do is fall back to ``issued_at`` and look answered."""
+    portal = payer_invoices(
+        [_invoice("in_1", status="open", lines=[_line("e1", "Acme", "Petty Cash", 28000)])]
+    )
+
+    with app.app_context():
+        row = portal.build_payer_invoices("u1")["invoices"][0]
+
+    assert row["paid"] is None
+    assert row["paid_iso"] is None
+    assert row["date"] is not None
+
+
+def test_a_list_where_nothing_failed_reads_nothing_about_retrying(
+    app, payer_invoices, monkeypatch
+):
+    """*Retry payment*'s rule reads the payer's cards and the billing policy. A list with no
+    failed invoice has no row to put the button on, so it must not pay for that read - which
+    is most payers, on every visit."""
+    portal = payer_invoices([_invoice("in_1", lines=[_line("e1", "Acme", "Petty Cash", 28000)])])
+
+    def _must_not_run(*_args, **_kwargs):
+        raise AssertionError("the retry rule ran for a list with nothing failed")
+
+    monkeypatch.setattr(portal, "retryable_invoice_ids", _must_not_run)
+
+    with app.app_context():
+        row = portal.build_payer_invoices("u1")["invoices"][0]
+
+    assert row["retryable"] is False
+
+
+def test_retrying_is_judged_over_every_failed_invoice_before_any_narrowing(
+    app, payer_invoices, monkeypatch
+):
+    """The engine picks ONE invoice per card from all of that card's open bills, so the page
+    asks with all of them too. Narrowed to one company first, the rule would see only that
+    company's bills - and, with the current renewal filtered out, offer a mid-period charge
+    the engine would refuse to collect. The rows it gets are the list's own: none re-read."""
+    acme = _invoice("in_1", status="open", lines=[_line("e1", "Acme", "Petty Cash", 28000)])
+    beta = _invoice("in_2", ident="i2", status="uncollectible",
+                    lines=[_line("e2", "Beta", "Petty Cash", 28000)])
+    paid = _invoice("in_3", ident="i3", lines=[_line("e2", "Beta", "Petty Cash", 28000)])
+    portal = payer_invoices([acme, beta, paid])
+    asked: list[list[str]] = []
+
+    def _retryable(_user, failed=None):
+        asked.append(sorted(inv.external_id for inv in failed))
+        return {beta.id}
+
+    monkeypatch.setattr(portal, "retryable_invoice_ids", _retryable)
+
+    with app.app_context():
+        rows = portal.build_payer_invoices("u1", entity_id="e2")["invoices"]
+
+    assert asked == [["in_1", "in_2"]]
+    assert [(r["reference"], r["retryable"]) for r in rows] == [("in_2", True), ("in_3", False)]
 
 
 def test_a_currency_code_is_spaced_off_the_amount(app, monkeypatch):
