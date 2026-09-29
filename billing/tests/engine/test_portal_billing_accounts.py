@@ -719,21 +719,61 @@ def test_a_target_whose_card_is_gone_is_refused(app, wallet):  # noqa: F811
     assert caught.value.message == "Beta Ltd has no card it can charge. Add a card to it first."
 
 
-def test_a_company_on_no_account_has_nothing_to_move(app, wallet):  # noqa: F811
-    """It gets an account when its billing is first confirmed; consent is not this
-    screen's to give."""
+def _loose_trial(payer):
+    """A company the payer pays for with a trial started card-free: on no account at all."""
+    from billing.services import store
+
+    loose = _entity(None, "Loose Co")
+    store.upsert_module_row(loose.id, "PETTY_CASH", payer.id, phase="trial")
+    return loose
+
+
+def test_a_company_on_no_account_is_placed_and_nothing_else_is_written(app, wallet):  # noqa: F811
+    """Manage Subscriptions asks which account bills a change before applying it, and a
+    card-free trial has none: it is PLACED (it used to be refused as "nothing to move").
+    Nothing is charged, no consent is written - that is the confirm's own statement, made
+    right after - and there are no paid days to carry onto the account."""
+    from billing.services import billing_accounts, store
+    from shared_models.models import EntityBillingConsent, SubscriptionInvoice
+
+    payer, _acme, beta, _moving = _two_accounts(wallet)
+    loose = _loose_trial(payer)
+
+    result = billing_accounts.move_company(payer.id, loose.id, beta.id)
+
+    nomination = store.nomination_for_entity(loose.id, payer.id)
+    assert str(nomination.billing_group_id) == str(beta.id)
+    assert nomination.source == "chosen"
+    assert result["moved"] == {
+        "entity_id": str(loose.id),
+        "entity_name": "Loose Co",
+        "from_account": None,
+        "to_account": {"id": str(beta.id), "name": "Beta Ltd"},
+    }
+    assert store.billing_group(beta.id).paid_through is None
+    assert not EntityBillingConsent.objects.filter(entity_id=str(loose.id)).exists()
+    assert not SubscriptionInvoice.objects.exists()
+
+
+@pytest.mark.parametrize("target_state", ["in_dunning", "card_gone"])
+def test_a_first_placement_meets_the_same_target_refusals(app, wallet, target_state):  # noqa: F811
     from billing.services import billing_accounts, store
     from billing.services.payment_methods import PaymentMethodError
 
     payer, _acme, beta, _moving = _two_accounts(wallet)
-    loose = _entity(None, "Loose Co")
-    store.upsert_module_row(loose.id, "PETTY_CASH", payer.id, phase="trial")
+    loose = _loose_trial(payer)
+    if target_state == "in_dunning":
+        group = store.billing_group(beta.id)
+        group.dunning_started_at = NOW
+        group.save(update_fields=["dunning_started_at"])
+    else:
+        wallet["methods"] = [_card("pm_a")]  # pm_b detached at Stripe
 
     with pytest.raises(PaymentMethodError) as caught:
         billing_accounts.move_company(payer.id, loose.id, beta.id)
 
     assert caught.value.status == 409
-    assert "isn't on a billing account yet" in caught.value.message
+    assert store.nomination_for_entity(loose.id, payer.id) is None
 
 
 def test_moving_onto_the_account_it_is_on_changes_nothing(app, wallet):  # noqa: F811

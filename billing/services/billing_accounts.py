@@ -223,13 +223,20 @@ def update(
 
 
 def move_company(user_id, entity_id, account_id) -> dict:
-    """Put one company on another of the payer's accounts. Returns the accounts, plus
-    ``moved`` — what went where, or None when it was already there.
+    """Put one company on one of the payer's accounts. Returns the accounts, plus ``moved`` —
+    what went where (``from_account`` null for a first placement), or None when it was
+    already there.
+
+    A company on NO account yet — a trial started without a card — is PLACED rather than
+    moved (source ``chosen``): Manage Subscriptions asks which account bills a change before
+    it applies it, and a card-free trial is exactly the company that has none. Placing it
+    charges nothing and writes no consent — "you may bill me for this company" stays the
+    confirm's own statement (``authorize-billing`` and the rest), made right after; a placed
+    company with no consent is billed nothing, and its trial still only ends. There are no
+    paid days to carry.
 
     Refused, each in words that name the fix:
 
-    * a company on NO account — there is nothing to move; it gets one when its billing is
-      first confirmed (the module page, onboarding), and consent is not this screen's;
     * a PAST-DUE company. Its debt is an invoice the account it is on raised: the retries,
       "Pay now" (``dunning.retry_now`` settles the account the company is on NOW) and the
       recovery that restores its access (``end_group_dunning`` → the account's companies)
@@ -243,20 +250,18 @@ def move_company(user_id, entity_id, account_id) -> dict:
     target = account_of(user_id, account_id)
     nomination = sub_store.nomination_for_entity(entity_id, payer)
     company = _company_name(entity_id)
-    if nomination is None:
-        raise PaymentMethodError(
-            f"{company} isn't on a billing account yet, so there's nothing to move.",
-            status=409,
-        )
-    if str(nomination.billing_group_id) == str(target.id):
+    if nomination is not None and str(nomination.billing_group_id) == str(target.id):
         return {**_accounts(user_id), "moved": None}
 
     person = _payer(user_id)
-    leaving = sub_store.billing_group(nomination.billing_group_id)
+    leaving = sub_store.billing_group(nomination.billing_group_id) if nomination else None
     if sub_store.entity_is_past_due(entity_id, payer):
         raise PaymentMethodError(
             f"{company}'s last payment on {_name(leaving, person)} didn't go through. "
-            "Settle it there first, then move the company.",
+            "Settle it there first, then move the company."
+            if leaving is not None
+            else f"{company}'s last payment didn't go through. "
+            "Settle it first, then choose its billing account.",
             status=409,
         )
     if target.dunning_started_at is not None:
@@ -273,11 +278,19 @@ def move_company(user_id, entity_id, account_id) -> dict:
             status=409,
         ) from exc
 
-    sub_store.nominate_group_for_entity(entity_id, payer, target.id, source="moved")
-    logger.info(
-        "billing accounts: payer {} moved {} from account {} to {}",
-        user_id, entity_id, getattr(leaving, "id", None), target.id,
+    placing = nomination is None
+    sub_store.nominate_group_for_entity(
+        entity_id, payer, target.id, source="chosen" if placing else "moved"
     )
+    if placing:
+        logger.info(
+            "billing accounts: payer {} placed {} on account {}", user_id, entity_id, target.id
+        )
+    else:
+        logger.info(
+            "billing accounts: payer {} moved {} from account {} to {}",
+            user_id, entity_id, getattr(leaving, "id", None), target.id,
+        )
     payload = _accounts(user_id)
     payload["moved"] = {
         "entity_id": str(entity_id),

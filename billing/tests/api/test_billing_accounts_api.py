@@ -153,6 +153,26 @@ def test_a_move_answers_the_accounts_and_what_went_where(client, user, entity, w
     }
 
 
+def test_a_card_free_trial_is_placed_by_the_same_route(client, user, entity, wallet):  # noqa: F811
+    """Manage Subscriptions' account picker sends a company on no account yet here too."""
+    from billing.services import store
+
+    beta = _open(user, "pm_b", company="Beta Ltd")
+    store.upsert_module_row(entity.id, "PETTY_CASH", user.id, phase="trial")
+    wallet["methods"] = [_card("pm_b", last4="1111")]
+
+    response = post_json(
+        client, f"{ACCOUNTS}/move",
+        {"entity": str(entity.id), "account": str(beta.id)}, **bearer(user),
+    )
+
+    assert response.status_code == 200
+    moved = response.json()["moved"]
+    assert moved["from_account"] is None
+    assert moved["to_account"] == {"id": str(beta.id), "name": "Beta Ltd"}
+    assert str(store.nomination_for_entity(entity.id, user.id).billing_group_id) == str(beta.id)
+
+
 # --- confirm: the account is checked before the card is attached ----------------------
 
 

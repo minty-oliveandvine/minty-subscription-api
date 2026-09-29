@@ -288,7 +288,7 @@
     },
     "/api/me/billing/accounts/move": {
       "post": {
-        "description": "Body: ``{entity, account}``. Nothing is charged; the company's paid days travel with\nit. Answers the accounts plus ``moved`` (null when it was already there).",
+        "description": "Body: ``{entity, account}``. Nothing is charged; the company's paid days travel with\nit. A company on no account yet (a card-free trial) is placed on this one, with no\nconsent written. Answers the accounts plus ``moved`` (null when it was already there;\n``from_account`` null for a first placement).",
         "operationId": "billing_api_me_my_billing_account_move",
         "parameters": [],
         "responses": {
