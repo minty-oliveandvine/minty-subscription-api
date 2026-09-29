@@ -283,6 +283,22 @@ locked - below); and nowhere else. **Never a Stripe call inside
 reservation being COMMITTED before the processor is called, and a request-wide transaction
 would hold it back until after the charge.
 
+**Every charge names the billing account's card, and there is no fallback** (the
+per-entity-cards decision of 2026-08-25). A renewal (`renewals.run_renewals`), a mid-period
+change and a trial conversion (`checkout._bill_module_change_in_house`, `changes.issue_change`),
+a transfer's first charge (`transfers`), a dunning retry and a re-issued invoice
+(`dunning._charge`) all hand the company's `payer_billing_group` to `billing_gateway`, which
+pins its `stripe_payment_method_id` on the document and records `billing_group_id`. An invoice
+raised with no card named is charged by Stripe to the customer's account default, which is a
+bug, not a fallback: a company with no nomination is refused or skipped, never billed
+elsewhere. Fixed 2026-09-29 in both engines: undoing a cancellation after its extension was
+invoiced (`checkout._bill_reinstatement_in_house`) called `issue_change` without `group`, so
+the reinstatement invoice carried no `billing_group_id` and went to the account default (the
+dev DB's R1/DR1 Returner and Pair Co rows of 09-21 and the +catalogue N52b/M45/M15 rows of
+09-29 are that bug's output); it now resolves the company's group and refuses (409, "Choose a
+payment method for this company before restoring this module.") when there is none, proven by
+`test_reinstating_a_company_with_no_card_is_refused_not_billed_elsewhere` in both engines.
+
 **An invoice Stripe will no longer collect is re-issued (2026-09-28, both engines).** Stripe
 cancels an invoice's PaymentIntent once it has been confirmed too many times — its docs: "a
 variable upper limit on how many times a PaymentIntent can be confirmed"; our test account: TEN

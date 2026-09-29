@@ -1982,11 +1982,29 @@ def _bill_reinstatement_in_house(entity, user, code: str, row) -> None:
         # bill for days the extension paid for.
         return
 
+    # WHICH CARD. The one this company is nominated onto, and nothing else. Passing no
+    # ``group`` makes ``issue_change`` raise the invoice with no card named, which the
+    # processor charges to the customer's account default: a card the payer never chose
+    # for this company, on a document no billing account owns. Reinstating is a purchase,
+    # so a company with no card is refused rather than billed somewhere else.
+    group = store.billing_group_for_entity(entity.id, payer_user_id)
+    if group is None:
+        logger.error(
+            "reinstate: entity {} has no payment method nominated for payer {}; refusing "
+            "to charge a card they did not choose for it",
+            entity.id, payer_user_id,
+        )
+        raise CheckoutError(
+            "Choose a payment method for this company before restoring this module.",
+            status=409,
+        )
+
     before = _billed_codes_in_house(entity.id) - {code}
     name = getattr(entity, "name", None) or str(entity.id)
     try:
         invoice = changes.issue_change(
-            customer_id, entity.id, name, before, before | {code}, period, covered_to
+            customer_id, entity.id, name, before, before | {code}, period, covered_to,
+            group=group,
         )
     except Exception as exc:
         raise CheckoutError(

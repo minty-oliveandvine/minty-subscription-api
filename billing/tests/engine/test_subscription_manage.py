@@ -621,17 +621,31 @@ def test_uncancelling_a_trial_after_it_ended_is_refused(monkeypatch):
 # --- undoing a cancellation --------------------------------------------------
 
 
-def _wire_reinstate(monkeypatch, checkout, *, billed_codes, paid=True):
+class _Group:
+    """The billing account (card) a reinstated company is charged on."""
+
+    id = "grp_1"
+    stripe_payment_method_id = "pm_company"
+
+
+_GROUP = _Group()
+
+
+def _wire_reinstate(monkeypatch, checkout, *, billed_codes, paid=True, group=_GROUP):
     """Capture what reinstating bills."""
     from billing.services import changes, store
 
     charged: list = []
     monkeypatch.setattr(checkout, "_billed_codes_in_house", lambda eid: set(billed_codes))
     monkeypatch.setattr(store, "customer_id_for_user", lambda uid: "cus_1")
+    # The card this company is nominated onto. None = no nomination, and there is no
+    # fallback to the account default.
+    monkeypatch.setattr(store, "billing_group_for_entity", lambda eid, uid=None: group)
     monkeypatch.setattr(
         changes, "issue_change",
-        lambda cid, eid, nm, before, after, period, at: charged.append(
-            {"before": set(before), "after": set(after), "at": at, "period": period}
+        lambda cid, eid, nm, before, after, period, at, **kw: charged.append(
+            {"before": set(before), "after": set(after), "at": at, "period": period,
+             "group": kw.get("group")}
         ) or {"id": "in_r", "status": "paid" if paid else "open"},
     )
     return charged
@@ -688,6 +702,8 @@ def test_in_house_uncancel_after_billing_charges_the_uncovered_remainder(monkeyp
     assert charged[0]["after"] == {"PAYMENT_REQUEST", "PETTY_CASH"}
     # Prorated from where the extension stopped covering, not from "now".
     assert charged[0]["at"] == datetime(2027, 1, 20, 13, tzinfo=UTC)
+    # Charged on the card THIS company is nominated onto, never the account default.
+    assert charged[0]["group"] is _GROUP
 
     code, fields = calls["rows"][-1]
     assert (code, fields["phase"]) == ("PETTY_CASH", "active")
@@ -715,6 +731,34 @@ def test_a_declined_reinstatement_does_not_give_the_module_back(monkeypatch):
         checkout.reactivate_module(_FakeEntity(), _FakeUser(), "PETTY_CASH")
 
     assert exc.value.status == 402
+    assert calls["rows"] == []          # still cancelled
+
+
+def test_reinstating_a_company_with_no_card_is_refused_not_billed_elsewhere(monkeypatch):
+    """A company nobody nominated a card for has nowhere to be charged. Without the
+    company's card ``issue_change`` names none, and the processor bills the account's
+    default: a card the payer never chose for it, on a document no billing account owns.
+    That is not a fallback, it is the bug, so the purchase is refused."""
+    row = _Row("PETTY_CASH", phase="scheduled_cancel", ext_state="invoiced",
+               billed=True,
+               app_access_until=datetime(2027, 1, 20, 13, tzinfo=UTC))
+    row.extension_amount = 4258
+    checkout, calls = _wire(
+        monkeypatch,
+        rows=[row],
+        paid_through=datetime(2027, 2, 8, 13, tzinfo=UTC),
+        now=datetime(2027, 1, 25, 13, tzinfo=UTC),
+    )
+    monkeypatch.setattr(checkout, "_set_module_access", lambda e, c, on: None)
+    charged = _wire_reinstate(
+        monkeypatch, checkout, billed_codes={"PAYMENT_REQUEST", "PETTY_CASH"}, group=None
+    )
+
+    with pytest.raises(checkout.CheckoutError) as exc:
+        checkout.reactivate_module(_FakeEntity(), _FakeUser(), "PETTY_CASH")
+
+    assert exc.value.status == 409
+    assert charged == []                # nothing billed, on any card
     assert calls["rows"] == []          # still cancelled
 
 
