@@ -47,7 +47,8 @@ FLASK_PORTAL_PATHS = {
 #: 08-C): Flask's portal listed cards, never accounts. ``invoices/{invoice_id}/breakdown`` is
 #: 08-B's "Billing Breakdown · Download csv": Flask's invoice tab had no breakdown.
 #: ``invoices/{invoice_id}/retry`` is 08-B's "Retry payment" on a failed invoice's row: Flask
-#: retried only from a company's module card.
+#: retried only from a company's module card. ``invoices/{invoice_id}/pdf`` is 08-B's
+#: "Invoice PDF", drawn as Figma 09-A: Flask linked Stripe's hosted page.
 ADDED_PORTAL_PATHS = {
     "/subscriptions/transfer/seen",
     "/billing/accounts",
@@ -56,6 +57,7 @@ ADDED_PORTAL_PATHS = {
     "/billing/accounts/move",
     "/invoices/{invoice_id}/breakdown",
     "/invoices/{invoice_id}/retry",
+    "/invoices/{invoice_id}/pdf",
 }
 
 #: The nineteen ``POST /entity/settings/module/<org_id>/<action>`` routes of Flask's
@@ -83,8 +85,8 @@ def test_the_portal_carries_flasks_fifteen_paths():
     assert served == FLASK_PORTAL_PATHS | ADDED_PORTAL_PATHS
     # Every one of Flask's is still here: an addition must never be a replacement.
     assert FLASK_PORTAL_PATHS <= served
-    # Flask's sixteen operations plus the seven added paths (one operation each).
-    assert len(ME_ROUTES) == 23
+    # Flask's sixteen operations plus the eight added paths (one operation each).
+    assert len(ME_ROUTES) == 24
     assert ("GET", "/billing/entity-payment-method") in ME_ROUTES
     assert ("POST", "/billing/entity-payment-method") in ME_ROUTES
 

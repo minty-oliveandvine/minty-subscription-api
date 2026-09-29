@@ -14,6 +14,11 @@ stripe==11.4.1
 # The in-process scheduler (billing/scheduler.py) - Minty's pin, same reason.
 APScheduler==3.11.0
 pytz>=2024.1
+# The invoice PDF (billing/services/invoice_pdf.py, Figma 09-A). Pure Python on wheels
+# (Pillow, fontTools, defusedxml), so the slim image needs no system libraries. fontTools
+# is also read directly: the glyph check that makes a missing character fail loudly.
+fpdf2==2.8.8
+fonttools>=4.50,<5.0
 
 # Dev / testing
 pytest>=8.0

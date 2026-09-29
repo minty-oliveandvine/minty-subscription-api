@@ -631,8 +631,10 @@ class _Group:
 _GROUP = _Group()
 
 
-def _wire_reinstate(monkeypatch, checkout, *, billed_codes, paid=True, group=_GROUP):
-    """Capture what reinstating bills."""
+def _wire_reinstate(monkeypatch, checkout, *, billed_codes, paid=True, group=_GROUP,
+                    raises=None):
+    """Capture what reinstating bills. ``raises`` is what the charge throws — the way a
+    declined card really arrives: out of ``Invoice.pay``, with the invoice left open."""
     from billing.services import changes, store
 
     charged: list = []
@@ -641,14 +643,50 @@ def _wire_reinstate(monkeypatch, checkout, *, billed_codes, paid=True, group=_GR
     # The card this company is nominated onto. None = no nomination, and there is no
     # fallback to the account default.
     monkeypatch.setattr(store, "billing_group_for_entity", lambda eid, uid=None: group)
-    monkeypatch.setattr(
-        changes, "issue_change",
-        lambda cid, eid, nm, before, after, period, at, **kw: charged.append(
+
+    def _issue(cid, eid, nm, before, after, period, at, **kw):
+        charged.append(
             {"before": set(before), "after": set(after), "at": at, "period": period,
              "group": kw.get("group")}
-        ) or {"id": "in_r", "status": "paid" if paid else "open"},
-    )
+        )
+        if raises is not None:
+            raise raises
+        return {"id": "in_r", "status": "paid" if paid else "open"}
+
+    monkeypatch.setattr(changes, "issue_change", _issue)
     return charged
+
+
+def _capture_voids(monkeypatch, *, fails=False):
+    """What the gateway is asked to void. ``fails``: the void itself errors."""
+    from billing.services import billing_gateway
+
+    voided: list = []
+
+    def _void(invoice_id):
+        voided.append(invoice_id)
+        if fails:
+            raise RuntimeError("processor unavailable")
+
+    monkeypatch.setattr(billing_gateway, "void_invoice", _void)
+    return voided
+
+
+def _reinstatable(monkeypatch):
+    """A module cancelled after the renewal collected its extension — restoring it is a
+    purchase of the uncovered rest of the period."""
+    row = _Row("PETTY_CASH", phase="scheduled_cancel", ext_state="invoiced",
+               billed=True,
+               app_access_until=datetime(2027, 1, 20, 13, tzinfo=UTC))
+    row.extension_amount = 4258
+    checkout, calls = _wire(
+        monkeypatch,
+        rows=[row],
+        paid_through=datetime(2027, 2, 8, 13, tzinfo=UTC),
+        now=datetime(2027, 1, 25, 13, tzinfo=UTC),
+    )
+    monkeypatch.setattr(checkout, "_set_module_access", lambda e, c, on: None)
+    return checkout, calls
 
 
 def test_in_house_uncancel_discards_the_extension_before_it_is_billed(monkeypatch):
@@ -725,6 +763,7 @@ def test_a_declined_reinstatement_does_not_give_the_module_back(monkeypatch):
         now=datetime(2027, 1, 25, 13, tzinfo=UTC),
     )
     monkeypatch.setattr(checkout, "_set_module_access", lambda e, c, on: None)
+    voided = _capture_voids(monkeypatch)
     _wire_reinstate(monkeypatch, checkout, billed_codes={"PAYMENT_REQUEST", "PETTY_CASH"}, paid=False)
 
     with pytest.raises(checkout.CheckoutError) as exc:
@@ -732,6 +771,50 @@ def test_a_declined_reinstatement_does_not_give_the_module_back(monkeypatch):
 
     assert exc.value.status == 402
     assert calls["rows"] == []          # still cancelled
+    # ...and the unpaid bill is withdrawn with it, or dunning would chase it.
+    assert voided == ["in_r"]
+
+
+def test_a_card_declined_while_reinstating_voids_the_invoice_it_left_open(monkeypatch):
+    """How a decline really arrives: raised out of ``Invoice.pay`` with the invoice
+    finalized and OPEN. The module stays cancelled, so the bill must go too — left open,
+    dunning chases it and the portal offers it as *Retry payment*: a customer paying to
+    restore a module that stays cancelled."""
+    from billing.services.billing_gateway import BillingError
+
+    checkout, calls = _reinstatable(monkeypatch)
+    voided = _capture_voids(monkeypatch)
+    _wire_reinstate(
+        monkeypatch, checkout, billed_codes={"PAYMENT_REQUEST", "PETTY_CASH"},
+        raises=BillingError("card_declined", invoice_id="in_declined"),
+    )
+
+    with pytest.raises(checkout.CheckoutError) as exc:
+        checkout.reactivate_module(_FakeEntity(), _FakeUser(), "PETTY_CASH")
+
+    assert exc.value.status == 402
+    assert voided == ["in_declined"]
+    assert calls["rows"] == []          # still cancelled
+
+
+def test_a_reinstatement_whose_void_fails_is_still_refused(monkeypatch):
+    """The void is best effort. A processor error there is logged, never turned into
+    something the customer reads as worse than the decline itself."""
+    from billing.services.billing_gateway import BillingError
+
+    checkout, calls = _reinstatable(monkeypatch)
+    voided = _capture_voids(monkeypatch, fails=True)
+    _wire_reinstate(
+        monkeypatch, checkout, billed_codes={"PAYMENT_REQUEST", "PETTY_CASH"},
+        raises=BillingError("card_declined", invoice_id="in_declined"),
+    )
+
+    with pytest.raises(checkout.CheckoutError) as exc:
+        checkout.reactivate_module(_FakeEntity(), _FakeUser(), "PETTY_CASH")
+
+    assert exc.value.status == 402
+    assert voided == ["in_declined"]
+    assert calls["rows"] == []
 
 
 def test_reinstating_a_company_with_no_card_is_refused_not_billed_elsewhere(monkeypatch):

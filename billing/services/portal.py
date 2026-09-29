@@ -888,6 +888,39 @@ def _reference(invoice) -> str:
     return f"#{str(invoice.id)[:8].upper()}"
 
 
+def _issued(invoice):
+    """When an invoice was issued: finalized, else created. The list's date and the PDF's
+    Bill Date both read this, so the two can never name different days."""
+    return invoice.issued_at or invoice.created_at
+
+
+#: The statuses an invoice is a document in: finalized and sent, and not withdrawn.
+DOCUMENT_STATUSES = frozenset({"paid", "open", "uncollectible"})
+
+
+def has_document(invoice) -> bool:
+    """Whether the invoice has a PDF (``GET /api/me/invoices/{id}/pdf``).
+
+    It must have reached the processor (``external_id``) and been finalized — paid, open or
+    uncollectible. A draft was never issued; a void one was withdrawn (a refused purchase, or
+    the dead half of a refresh); and a reservation the processor never saw is no document at
+    all. The list's ``has_pdf`` and the route's 409 both ask this, so the button is only ever
+    offered where the download works.
+    """
+    return bool(invoice.external_id) and (invoice.status or "").lower() in DOCUMENT_STATUSES
+
+
+def invoice_account_id(invoice, account_ids) -> str | None:
+    """The billing account an invoice belongs to: the one that raised it — or, for an
+    invoice raised before accounts existed, the payer's OLDEST (``account_ids`` is oldest
+    first), the attribution dunning makes when it collects them
+    (``dunning._invoices_for_group``). None when the payer has no account at all."""
+    own = getattr(invoice, "billing_group_id", None)
+    if own:
+        return str(own)
+    return str(account_ids[0]) if account_ids else None
+
+
 def _products(lines) -> list[str]:
     """The plan names to print in the Description column: what was BOUGHT.
 
@@ -1175,11 +1208,8 @@ def build_payer_invoices(
         if wanted_account not in owned:
             invoices = []
         else:
-            oldest = owned[0]
             invoices = [
-                inv
-                for inv in invoices
-                if str(getattr(inv, "billing_group_id", None) or oldest) == wanted_account
+                inv for inv in invoices if invoice_account_id(inv, owned) == wanted_account
             ]
 
     # The dropdown, from history rather than from current subscriptions.
@@ -1207,7 +1237,7 @@ def build_payer_invoices(
         # `total` and not a sum of lines — the gateway drops zero-amount lines.
         amount = sum(ln.amount or 0 for ln in lines) if wanted else (invoice.total or 0)
         status = (invoice.status or "").lower()
-        issued = invoice.issued_at or invoice.created_at
+        issued = _issued(invoice)
 
         rows.append(
             {
@@ -1246,10 +1276,12 @@ def build_payer_invoices(
                 # invoices raised before the column existed, and the UI says "not
                 # recorded" rather than guessing.
                 "payment_method": getattr(invoice, "payment_method", None),
-                # Stripe's hosted page — the PDF download and, while open, a way to
-                # pay. Null until finalized, so the row's action stays off rather than
-                # pointing at nothing.
+                # Stripe's hosted page (while open, a way to pay). Null until finalized.
+                # minty-web no longer links it: its "Invoice PDF" is our own document.
                 "hosted_invoice_url": getattr(invoice, "hosted_invoice_url", None),
+                # Whether ``/invoices/{id}/pdf`` has a document to serve - the same rule
+                # the route refuses on (``has_document``), so the button never 409s.
+                "has_pdf": has_document(invoice),
                 "entities": sorted({ln.entity_name for ln in lines if ln.entity_name}),
             }
         )
@@ -1276,6 +1308,26 @@ def build_payer_invoices(
 
 #: How a cancellation extension's product is named on its line (``renewals._pending_extension_lines``).
 EXTENSION_SUFFIX = " (access after cancellation)"
+
+
+def _payers_invoice(user_id, invoice_id):
+    """One of THIS payer's invoices, its lines prefetched — or None for a malformed id,
+    another payer's invoice, or no invoice at all (one answer: someone who should not be
+    asking learns nothing). The breakdown and the PDF both come through here, so no id in a
+    request reaches another payer's history by either route."""
+    import uuid
+
+    from shared_models.models import SubscriptionInvoice
+
+    try:
+        wanted = str(uuid.UUID(str(invoice_id)))
+    except ValueError:
+        return None
+    return (
+        SubscriptionInvoice.objects.filter(id=wanted, payer_user_id=str(user_id))
+        .prefetch_related("lines")
+        .first()
+    )
 
 
 def build_invoice_breakdown(user_id, invoice_id) -> dict | None:
@@ -1313,24 +1365,15 @@ def build_invoice_breakdown(user_id, invoice_id) -> dict | None:
 
     A zero line is left out: the gateway never sent it, so it is on no invoice anyone saw.
     """
-    import uuid
     from datetime import timedelta
 
     from billing.services import money
     from billing.services import store as sub_store
     from billing.services.billing import period_containing
     from billing.services.renewals import _extension_product
-    from shared_models.models import BillingPlan, SubscriptionInvoice
+    from shared_models.models import BillingPlan
 
-    try:
-        wanted = str(uuid.UUID(str(invoice_id)))
-    except ValueError:
-        return None
-    invoice = (
-        SubscriptionInvoice.objects.filter(id=wanted, payer_user_id=str(user_id))
-        .prefetch_related("lines")
-        .first()
-    )
+    invoice = _payers_invoice(user_id, invoice_id)
     if invoice is None:
         return None
 
@@ -1443,6 +1486,38 @@ def account_name(group, payer: dict) -> str:
     return company or payer.get("name") or payer.get("email") or ""
 
 
+def card_address(card: dict | None, country_names: dict) -> dict | None:
+    """An account's address: the billing address of the card it CHARGES (the account holds
+    none of its own - the user's decision; 08-C writes the card's), with the country named
+    from the registry. None when Stripe no longer holds that card. ``card`` is a
+    ``payment_methods._view`` row."""
+    if card is None:
+        return None
+    address = dict(card.get("address") or {})
+    code = address.get("country")
+    address["country_name"] = country_names.get(code or "", code) if code else None
+    return address
+
+
+def address_lines(address: dict | None) -> list[str]:
+    """The address as 08-B prints it: line 1, line 2, then the place - city, region, postal
+    code and country on one line, blanks and repeats dropped ("Hong Kong, Hong Kong" says it
+    once). A port of minty-web's ``lib/billingAccounts.ts::addressLines``, so the invoice PDF
+    and the page print one address the same way; change both together."""
+    if not address:
+        return []
+    seen: set[str] = set()
+    place: list[str] = []
+    for part in (address.get("city"), address.get("state"), address.get("postal_code"),
+                 address.get("country_name")):
+        text = (part or "").strip()
+        if text and text.lower() not in seen:
+            seen.add(text.lower())
+            place.append(text)
+    lines = (address.get("line1"), address.get("line2"), ", ".join(place))
+    return [text for text in ((line or "").strip() for line in lines) if text]
+
+
 def _countries() -> list[dict]:
     """Every country in the registry, in its display order — the 08-C Country list.
 
@@ -1528,11 +1603,7 @@ def build_billing_accounts(user_id, *, countries: bool = False) -> dict:
             shelf.insert(0, dict(charged, is_default=True))
         shelf.sort(key=lambda card: 0 if card["is_default"] else 1)
 
-        address = None
-        if charged is not None:
-            address = dict(charged.get("address") or {})
-            code = address.get("country")
-            address["country_name"] = country_names.get(code or "", code) if code else None
+        address = card_address(charged, country_names)
 
         companies = sorted(
             (

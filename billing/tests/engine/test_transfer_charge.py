@@ -70,8 +70,8 @@ def _wire(monkeypatch, *, anchor=ANCHOR, issued=None, raises=None, existing=None
     monkeypatch.setattr(store, "start_billing_cycle",
                         lambda uid, at, cur: calls["anchored"].append((uid, at, cur)))
     monkeypatch.setattr(checkout, "_entity_invoice_name", lambda eid: "Bakery Ltd")
-    monkeypatch.setattr(checkout, "_void_unpaid_conversion",
-                        lambda inv, eid: calls["voided"].append(inv))
+    monkeypatch.setattr(checkout, "_void_unpaid_invoice",
+                        lambda inv, eid, what: calls["voided"].append(inv))
     monkeypatch.setattr(renewals, "_already_invoiced",
                         lambda cid, key, **kw: existing)
 

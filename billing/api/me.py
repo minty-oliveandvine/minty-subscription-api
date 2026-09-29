@@ -3,9 +3,10 @@ service added.
 
 Fifteen paths (sixteen operations) are Flask's, byte for byte: paths, methods, JSON and
 status codes, so minty-web's ``features/subscription/api/payerPortal.ts`` is
-billing-frontend's ``lib/payerPortal.ts`` with a new base URL. Five are this service's own
-(``billing/tests/test_contract.py::ADDED_PORTAL_PATHS``): ``subscriptions/transfer/seen``
-and the four ``billing/accounts`` routes behind the portal's billing accounts (08-A/B/C).
+billing-frontend's ``lib/payerPortal.ts`` with a new base URL. Eight are this service's own
+(``billing/tests/test_contract.py::ADDED_PORTAL_PATHS``): ``subscriptions/transfer/seen``,
+the four ``billing/accounts`` routes behind the portal's billing accounts (08-A/B/C), and
+08-B's three per-invoice actions - ``invoices/{id}/breakdown``, ``/retry`` and ``/pdf``.
 
 Person-scoped (``SelfBearerAuth``): every row is found by the caller's ``user_id``, never
 by the company in the token or the ``X-Entity-Id`` header.
@@ -50,6 +51,7 @@ ROUTES = (
     ("GET", "/subscriptions/transfers"),
     ("GET", "/invoices"),
     ("GET", "/invoices/{invoice_id}/breakdown"),  # 08-B's "Billing Breakdown" (Flask had none)
+    ("GET", "/invoices/{invoice_id}/pdf"),  # 08-B's "Invoice PDF", Figma 09-A (Flask had none)
     ("POST", "/invoices/{invoice_id}/retry"),  # 08-B's "Retry payment" (Flask had none)
     ("GET", "/billing/payment-methods"),
     ("POST", "/billing/payment-methods/setup-intent"),
@@ -327,6 +329,55 @@ def my_invoice_breakdown(request, invoice_id: str):
     if payload is None:
         return error("That invoice couldn't be found.", 404)
     return respond(payload)
+
+
+@me_router.get(
+    "/invoices/{invoice_id}/pdf",
+    summary="One invoice as a PDF - Figma 09-A",
+    openapi_extra={
+        "responses": {
+            200: {
+                "description": "The invoice, an A4 PDF.",
+                "content": {"application/pdf": {"schema": {"type": "string", "format": "binary"}}},
+            },
+        },
+    },
+)
+def my_invoice_pdf(request, invoice_id: str):
+    """08-B's "Invoice PDF": the invoice drawn as Figma 09-A, not Stripe's hosted page. Bill to
+    is the invoice's BILLING ACCOUNT (read live, as 08-B shows it); each of 09-A's plan lines
+    lists its companies, one row per Stripe item. 404 when it is not the caller's; 409 when it
+    is no document - never sent, a draft, voided (the list's ``has_pdf`` is false for exactly
+    those); 502 when the billing address cannot be read from the processor; 500 otherwise,
+    including lines that do not add up to the invoice's total, which is never printed."""
+    from django.http import HttpResponse
+
+    from billing.services import invoice_document, invoice_pdf
+
+    uid = user_id(request)
+    try:
+        doc = invoice_document.build_invoice_document(uid, invoice_id)
+        if doc is None:
+            return error("That invoice couldn't be found.", 404)
+        data = invoice_pdf.render_invoice_pdf(doc)
+    except invoice_document.NoDocument:
+        return error("There's no PDF for that invoice.", 409)
+    except invoice_document.BillToUnavailable:
+        return error(
+            "We couldn't reach the payment processor for the billing address. "
+            "Please try again in a moment.",
+            502,
+        )
+    except invoice_document.TotalMismatch:
+        return error("Could not prepare that invoice's PDF.", 500)  # logged where it was found
+    except Exception:
+        logger.exception("invoice pdf API failed for user {} invoice {}", uid, invoice_id)
+        return error("Could not prepare that invoice's PDF.", 500)
+    response = HttpResponse(data, content_type="application/pdf")
+    # The web names its own download (CORS exposes no headers); this is for a direct open.
+    response["Content-Disposition"] = f'attachment; filename="{doc.filename}"'
+    response["Cache-Control"] = "private, no-store"
+    return response
 
 
 @me_router.post("/invoices/{invoice_id}/retry", summary="Retry a failed invoice's payment now")

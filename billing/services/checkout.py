@@ -1503,16 +1503,20 @@ def _billed_codes_in_house(entity_id) -> set[str]:
     }
 
 
-def _void_unpaid_conversion(invoice_id, entity_id) -> None:
-    """Withdraw a conversion invoice the customer is not getting the module for.
+def _void_unpaid_invoice(invoice_id, entity_id, what: str) -> None:
+    """Withdraw the invoice of a purchase the customer is not getting.
 
-    Refusing to grant and leaving the invoice open bills them for something explicitly
-    not given — the row's ``first_billed_at`` stays NULL, which is this code recording
-    that no real charge happened, beside an open document saying one did.
+    Every purchase that is refused when its charge fails lands here — a trial conversion,
+    a handover, a reinstatement (``what`` names which, for the log). Refusing to grant and
+    leaving the invoice open bills them for something explicitly not given: for a
+    conversion the row's ``first_billed_at`` stays NULL, which is this code recording that
+    no real charge happened, beside an open document saying one did.
 
     It does not merely sit there. ``dunning.collect_due`` chases the payer's OLDEST open
-    invoice, so on any later episode this is the first thing retried, for a module whose
-    row has since gone ``expired`` — terminal, and never to be granted.
+    invoice, so on any later episode this is the first thing retried — for a module whose
+    row has since gone ``expired``, or one still cancelled because its restore was
+    declined — and the portal offers it to the customer as *Retry payment*. Either way
+    they would pay for something never given.
 
     Reached from BOTH failure paths, which look different and are the same event: a
     declined card RAISES out of ``Invoice.pay``, while a non-paid status is returned.
@@ -1529,13 +1533,12 @@ def _void_unpaid_conversion(invoice_id, entity_id) -> None:
     try:
         billing_gateway.void_invoice(invoice_id)
         logger.info(
-            "trial: voided unpaid conversion invoice {} for entity {}",
-            invoice_id, entity_id,
+            "{}: voided unpaid invoice {} for entity {}", what, invoice_id, entity_id,
         )
     except Exception:
         logger.exception(
-            "trial: could not void the unpaid conversion invoice {} for entity {}",
-            invoice_id, entity_id,
+            "{}: could not void the unpaid invoice {} for entity {}",
+            what, invoice_id, entity_id,
         )
 
 
@@ -1783,7 +1786,7 @@ def _bill_transfer_in_house(entity_id, payer_user_id, customer_id: str, codes, *
         # the document is finalized and OPEN. Void it: an abandoned open invoice becomes
         # the first thing ``dunning.collect_due`` chases on any later episode, for a
         # handover that never happened.
-        _void_unpaid_conversion(getattr(exc, "invoice_id", None), entity_id)
+        _void_unpaid_invoice(getattr(exc, "invoice_id", None), entity_id, "transfer")
         return _failed(
             getattr(exc, "user_message", None)
             or "That payment didn't go through. Check the card and try again."
@@ -1794,7 +1797,7 @@ def _bill_transfer_in_house(entity_id, payer_user_id, customer_id: str, codes, *
             "transfer: invoice {} for entity {} is {}; not moving the payer",
             (result or {}).get("id"), entity_id, (result or {}).get("status"),
         )
-        _void_unpaid_conversion((result or {}).get("id"), entity_id)
+        _void_unpaid_invoice((result or {}).get("id"), entity_id, "transfer")
         return _failed("That payment didn't go through. Check the card and try again.")
 
     # ESTABLISH the cycle, never ADVANCE one that exists — the same rule, and the same
@@ -1876,7 +1879,7 @@ def _bill_module_change_in_house(entity_id, payer_user_id, customer_id: str,
         # so the branch below, which reads a returned status, never sees a decline at all.
         # Without this the customer keeps a bill for a module this function is in the
         # middle of refusing them.
-        _void_unpaid_conversion(getattr(exc, "invoice_id", None), entity_id)
+        _void_unpaid_invoice(getattr(exc, "invoice_id", None), entity_id, "trial")
         return None
 
     # A None invoice means nothing was owed (already at this price), which is a success:
@@ -1898,7 +1901,7 @@ def _bill_module_change_in_house(entity_id, payer_user_id, customer_id: str,
         # retried, for a module whose row has since gone ``expired`` — terminal, never
         # to be granted. A customer would pay for a trial that lapsed months earlier.
         #
-        _void_unpaid_conversion(invoice.get("id"), entity_id)
+        _void_unpaid_invoice(invoice.get("id"), entity_id, "trial")
         return None
 
     # ESTABLISH the card's cycle; never ADVANCE one that already exists.
@@ -2007,6 +2010,14 @@ def _bill_reinstatement_in_house(entity, user, code: str, row) -> None:
             group=group,
         )
     except Exception as exc:
+        logger.exception(
+            "reinstate: could not bill the uncovered period for {} {}", entity.id, code
+        )
+        # A decline RAISES out of ``Invoice.pay``, with the document finalized and OPEN.
+        # The module is not given back, so the bill must not survive either: left open,
+        # dunning chases it and the portal offers it as *Retry payment* — a customer
+        # paying to restore a module that stays cancelled.
+        _void_unpaid_invoice(getattr(exc, "invoice_id", None), entity.id, "reinstate")
         raise CheckoutError(
             "We couldn't take the payment to restore this module. Please check your "
             "payment method and try again.",
@@ -2014,6 +2025,11 @@ def _bill_reinstatement_in_house(entity, user, code: str, row) -> None:
         ) from exc
 
     if invoice is not None and invoice.get("status") != "paid":
+        logger.warning(
+            "reinstate: invoice {} for {} {} is {}; not restoring the module",
+            invoice.get("id"), entity.id, code, invoice.get("status"),
+        )
+        _void_unpaid_invoice(invoice.get("id"), entity.id, "reinstate")
         raise CheckoutError(
             "We couldn't take the payment to restore this module. Please check your "
             "payment method and try again.",

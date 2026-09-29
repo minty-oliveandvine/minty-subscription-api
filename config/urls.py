@@ -3,9 +3,9 @@
 THE PATHS ARE FLASK'S, RE-HOMED UNDER ONE API.
 
 * ``/api/me/*`` - the payer portal: the fifteen paths of Flask's ``routes/portal.py`` plus
-  this service's five (``transfer/seen``, the four ``billing/accounts`` routes),
-  paths and JSON unchanged, so ``payerPortal.ts`` moves to minty-web with a new base URL
-  and no path edits.
+  this service's eight (``transfer/seen``, the four ``billing/accounts`` routes, and an
+  invoice's ``breakdown``, ``retry`` and ``pdf``), Flask's paths and JSON unchanged, so
+  ``payerPortal.ts`` moved to minty-web with a new base URL and no path edits.
 * ``/api/entities/{id}/modules`` and ``/api/entities/{id}/modules/{action}`` - the module
   settings page. In Flask these were the Jinja page plus nineteen ``POST
   /entity/settings/module/<org_id>/<action>`` routes; here they are one page model and

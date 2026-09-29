@@ -249,6 +249,31 @@ def _capture_payment_method(record, invoice_id: str) -> None:
         )
 
 
+def _item_period(line, period) -> dict:
+    """The days ONE line pays for, as the processor prints them under it.
+
+    Every item used to carry the invoice's whole period, so Stripe's PDF, its hosted page
+    and its revenue recognition dated a prorated start, an upgrade's credit and an access
+    extension as if each covered the full month. A line records its own span when it is
+    priced (``billing.Line.period_start`` / ``period_end``, schema item 23); the invoice's
+    period is the fallback only for a line that recorded none.
+
+    A recorded span that is empty or runs backwards is a pricing bug, not a reason to refuse
+    a charge over a display date: it is logged and the invoice's period is sent instead.
+    """
+    start, end = line.period_start, line.period_end
+    if start is None or end is None:
+        start, end = period.start, period.end
+    elif end <= start:
+        logger.warning(
+            "billing: line for entity {} records an empty span ({} - {}); sending the "
+            "invoice's period instead",
+            line.entity_id, start, end,
+        )
+        start, end = period.start, period.end
+    return {"start": int(start.timestamp()), "end": int(end.timestamp())}
+
+
 def issue_invoice(customer_id: str, invoice: Invoice, *, memo: str | None = None,
                   collect: bool = True, metadata: dict[str, str] | None = None,
                   idempotency_key: str | None = None,
@@ -344,10 +369,8 @@ def issue_invoice(customer_id: str, invoice: Invoice, *, memo: str | None = None
                 # onto every line it owns, which names one entity for all of them; this
                 # is written per item and stays correct.
                 metadata={"entity_id": line.entity_id},
-                period={
-                    "start": int(invoice.period.start.timestamp()),
-                    "end": int(invoice.period.end.timestamp()),
-                },
+                # The days THIS line pays for, not the invoice's (``_item_period``).
+                period=_item_period(line, invoice.period),
             )
         if not collect:
             held = stripe.Invoice.retrieve(draft["id"])

@@ -545,6 +545,45 @@
         ]
       }
     },
+    "/api/me/invoices/{invoice_id}/pdf": {
+      "get": {
+        "description": "08-B's \"Invoice PDF\": the invoice drawn as Figma 09-A, not Stripe's hosted page. Bill to\nis the invoice's BILLING ACCOUNT (read live, as 08-B shows it); each of 09-A's plan lines\nlists its companies, one row per Stripe item. 404 when it is not the caller's; 409 when it\nis no document - never sent, a draft, voided (the list's ``has_pdf`` is false for exactly\nthose); 502 when the billing address cannot be read from the processor; 500 otherwise,\nincluding lines that do not add up to the invoice's total, which is never printed.",
+        "operationId": "billing_api_me_my_invoice_pdf",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "invoice_id",
+            "required": true,
+            "schema": {
+              "title": "Invoice Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/pdf": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The invoice, an A4 PDF."
+          }
+        },
+        "security": [
+          {
+            "SelfBearerAuth": []
+          }
+        ],
+        "summary": "One invoice as a PDF - Figma 09-A",
+        "tags": [
+          "Payer portal"
+        ]
+      }
+    },
     "/api/me/invoices/{invoice_id}/retry": {
       "post": {
         "description": "08-B's *Retry payment*: collect this failed invoice now, on its account's card\n(``billing_accounts.retry_invoice``). Answers ``{\"ok\", \"status\", \"message\"}`` in the words\nthe module page's retry uses (``api._retry``): ``paid``, ``failed`` (with the processor's\nreason), ``no_card``, ``gave_up``, ``nothing_owed``, ``older_debt_only``,\n``not_this_invoice``, ``not_collectable``. An invoice the processor will no longer collect\nis re-issued and the replacement charged in the same press; one that cannot be re-issued\nautomatically is ``not_collectable``. Someone else's invoice is 404; one not waiting for a\npayment, 409 (or ``not_this_invoice`` when it was re-issued since the page was drawn).",

@@ -36,10 +36,12 @@ class _Record:
 class _FakeStripe:
     """Just enough Stripe to get an invoice created, finalized and paid."""
 
-    def __init__(self, log, *, status="paid", fail_on=None):
+    def __init__(self, log, *, status="paid", fail_on=None, items=None):
         self.log = log
         self.status = status
         self.fail_on = fail_on
+        # Every InvoiceItem.create's keyword arguments, when a test wants to read them.
+        self.items = items if items is not None else []
         self.Invoice = self._Invoices(self)
         self.InvoiceItem = self._Items(self)
 
@@ -83,17 +85,18 @@ class _FakeStripe:
 
         def create(self, **kw):
             self.outer._step("stripe.item")
+            self.outer.items.append(kw)
             return {"id": "ii_1"}
 
 
 def _wire(monkeypatch, *, reserved=_Record(), status="paid", fail_on=None,
-          reserve_raises=None):
+          reserve_raises=None, items=None):
     """Mock the processor and the persistence seam; return (gateway, log, settled)."""
     from billing.services import billing_gateway, store
 
     log: list[str] = []
     settled: list[tuple] = []
-    stripe = _FakeStripe(log, status=status, fail_on=fail_on)
+    stripe = _FakeStripe(log, status=status, fail_on=fail_on, items=items)
     monkeypatch.setattr(billing_gateway, "get_stripe", lambda: stripe)
     monkeypatch.setattr(store, "user_for_customer", lambda cid: "u1")
 
@@ -297,3 +300,80 @@ def test_the_recorded_total_is_what_was_SENT_not_what_was_computed(monkeypatch):
     )
 
     assert [line.entity_id for line in reserved[0]["lines"]] == ["e1"]
+
+
+# --- what each item says it paid for ------------------------------------------
+
+
+def _stamp(moment: datetime) -> int:
+    return int(moment.timestamp())
+
+
+def test_each_item_carries_the_days_its_own_line_paid_for(monkeypatch):
+    """Stripe prints an item's period under it, on the PDF and the hosted page, and books
+    revenue by it. Stamped with the invoice's whole period, a prorated start, an upgrade's
+    credit and an access extension all read as a full month."""
+    from billing.services.billing import Line
+
+    items: list[dict] = []
+    gateway, _log, _settled = _wire(monkeypatch, items=items)
+    at = datetime(2027, 2, 20, 13, tzinfo=UTC)
+    access_end = datetime(2027, 2, 18, 13, tzinfo=UTC)
+
+    gateway.issue_invoice(
+        "cus_1",
+        _invoice(
+            Line("e1", "Entity One", "Super Minty", 40000,
+                 period_start=PERIOD_START, period_end=PERIOD_END),
+            Line("e2", "Entity Two", "Petty Cash", -18065, kind="unused", at=at,
+                 period_start=at, period_end=PERIOD_END),
+            Line("e2", "Entity Two", "Super Minty", 25806, kind="remaining", at=at,
+                 period_start=at, period_end=PERIOD_END),
+            Line("e3", "Entity Three", "Petty Cash (access after cancellation)", 9032,
+                 period_start=PERIOD_START, period_end=access_end),
+        ),
+        idempotency_key="k",
+    )
+
+    spans = {(item["metadata"]["entity_id"], item["amount"]): item["period"]
+             for item in items}
+    assert spans == {
+        ("e1", 40000): {"start": _stamp(PERIOD_START), "end": _stamp(PERIOD_END)},
+        ("e2", -18065): {"start": _stamp(at), "end": _stamp(PERIOD_END)},
+        ("e2", 25806): {"start": _stamp(at), "end": _stamp(PERIOD_END)},
+        ("e3", 9032): {"start": _stamp(PERIOD_START), "end": _stamp(access_end)},
+    }
+
+
+def test_a_line_that_recorded_no_span_is_sent_the_invoices_period(monkeypatch):
+    """Lines priced before they recorded their days have nothing better to say."""
+    from billing.services.billing import Line
+
+    items: list[dict] = []
+    gateway, _log, _settled = _wire(monkeypatch, items=items)
+
+    gateway.issue_invoice(
+        "cus_1", _invoice(Line("e1", "Entity One", "Super Minty", 40000)),
+        idempotency_key="k",
+    )
+
+    assert items[0]["period"] == {"start": _stamp(PERIOD_START), "end": _stamp(PERIOD_END)}
+
+
+def test_an_empty_recorded_span_is_sent_the_invoices_period_not_refused(monkeypatch):
+    """A span that ends where it starts is a pricing bug to log, not a reason to refuse a
+    charge over a display date - the processor would reject the item outright."""
+    from billing.services.billing import Line
+
+    items: list[dict] = []
+    gateway, _log, _settled = _wire(monkeypatch, items=items)
+    at = datetime(2027, 2, 20, 13, tzinfo=UTC)
+
+    gateway.issue_invoice(
+        "cus_1",
+        _invoice(Line("e1", "Entity One", "Super Minty", 40000,
+                      period_start=at, period_end=at)),
+        idempotency_key="k",
+    )
+
+    assert items[0]["period"] == {"start": _stamp(PERIOD_START), "end": _stamp(PERIOD_END)}

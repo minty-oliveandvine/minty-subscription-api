@@ -45,19 +45,21 @@ def _payer(email="breakdown@payer.test"):
     return payer
 
 
-def _invoice(payer, *, total=0):
+def _invoice(payer, *, total=0, status="paid", external_id="in_breakdown_1",
+             billing_group_id=None):
     from shared_models.models import SubscriptionInvoice
 
     seed_currency("HKD")  # fk_si_currency, likewise
     invoice = SubscriptionInvoice(
         id=str(uuid.uuid4()),
         payer_user_id=str(payer.id),
-        external_id="in_breakdown_1",
+        external_id=external_id,
         period_start=START,
         period_end=END,
         currency="HKD",
         total=total,
-        status="paid",
+        status=status,
+        billing_group_id=billing_group_id,
     )
     invoice.save(force_insert=True)
     return invoice
