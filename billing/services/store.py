@@ -951,6 +951,83 @@ def entity_ids_in_group(group_id) -> set[str]:
     }
 
 
+# --- Where a billing account's mail goes ----------------------------------------------
+
+
+def shared_business_email(emails) -> str | None:
+    """The ONE business email a set of companies has between them, else None.
+
+    Blanks are skipped and case is ignored, so "AP@Olive.test" and "ap@olive.test" are one
+    inbox. Two DIFFERENT addresses answer None rather than picking one: an account can pay
+    for companies that are separate businesses, and mailing one company's inbox about the
+    charges for all of them would show it another's bill.
+    """
+    found: dict[str, set[str]] = {}
+    for email in emails:
+        cleaned = (email or "").strip()
+        if cleaned:
+            found.setdefault(cleaned.casefold(), set()).add(cleaned)
+    if len(found) != 1:
+        return None
+    # Spellings of one address that differ only in case: the alphabetically first, so the
+    # answer never depends on the order the companies were read in.
+    return min(next(iter(found.values())))
+
+
+def business_email(entity_id) -> str | None:
+    """A company's business email (onboarding step 1), trimmed; None when it has none."""
+    # Lazy, like ``entities_paid_for_by``.
+    from shared_models.models import Entity
+
+    entity = _by_pk(Entity, str(entity_id)) if entity_id else None
+    return (getattr(entity, "business_email", None) or "").strip() or None
+
+
+def entity_timezone(entity_id) -> str | None:
+    """A company's ``timezone`` column as stored (an IANA name, or None when never set)."""
+    from shared_models.models import Entity
+
+    entity = _by_pk(Entity, str(entity_id)) if entity_id else None
+    return getattr(entity, "timezone", None)
+
+
+def account_email(group, business_emails=None) -> str | None:
+    """Where a billing account's money is addressed, before the payer's own address.
+
+    The account's billing email; else the business email EVERY company on the account
+    shares (``shared_business_email``); else None, and the caller falls back to the payer.
+    The one rule behind the money emails' recipient and the invoice's Bill to (the user's
+    order, 2026-09-30: billing email, business email, user email), so the inbox an email
+    reaches is the one its invoice names.
+
+    "The companies on the account" are the ones 08-B lists: nominated onto it AND still
+    paid for by this payer. A nomination outlives a handover as history, and a company that
+    has left must never receive the account's mail. ``business_emails`` lets a caller that
+    has already read those companies pass their addresses instead of reading them again
+    (``portal.build_billing_accounts``).
+    """
+    if group is None:
+        return None
+    billing_email = (group.billing_email or "").strip()
+    if billing_email:
+        return billing_email
+    if business_emails is None:
+        business_emails = _business_emails_on_account(group)
+    return shared_business_email(business_emails)
+
+
+def _business_emails_on_account(group) -> list[str | None]:
+    paid_for = {str(row.entity_id) for row in module_rows_for_payer(group.payer_user_id)}
+    companies = entity_ids_in_group(group.id) & paid_for
+    if not companies:
+        return []
+    from shared_models.models import Entity
+
+    return list(
+        Entity.objects.filter(id__in=sorted(companies)).values_list("business_email", flat=True)
+    )
+
+
 def nominations_for_payer(user_id) -> list[EntityBillingGroup]:
     """Every company this payer has put on one of their accounts — one read for a page.
 

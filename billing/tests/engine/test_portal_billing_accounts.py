@@ -138,6 +138,36 @@ def test_the_address_is_the_charged_cards_billing_address(app, wallet, countries
     assert address["country_name"] == "Hong Kong"
 
 
+def test_bill_to_email_is_the_billing_email_then_the_shared_business_email_then_the_payer(
+    app, wallet  # noqa: F811
+):
+    """What 08-B prints under "Bill to" - and where the account's money emails go, and what
+    its invoices name (``store.account_email``, the user's order, 2026-09-30)."""
+    payer = _payer()
+    billed = _open(payer, "pm_a", email="ap@billing.test", age_days=3)
+    shared = _open(payer, "pm_b", age_days=2)
+    split = _open(payer, "pm_c", age_days=1)
+    wallet["methods"] = [_card("pm_a"), _card("pm_b", last4="1111"), _card("pm_c", last4="2222")]
+    companies = (
+        (billed, "ap@acme.test"),
+        (shared, "ap@group.test"), (shared, "ap@group.test"),
+        (split, "ap@one.test"), (split, "ap@two.test"),
+    )
+    for index, (account, email) in enumerate(companies):
+        entity = _entity(None, f"Company {index}")
+        entity.business_email = email
+        entity.save(update_fields=["business_email"])
+        _billed(entity, payer, account)
+
+    result = _read(payer)
+
+    assert [_account(result, a.id)["bill_to_email"] for a in (billed, shared, split)] == [
+        "ap@billing.test", "ap@group.test", "payer@accounts.test",
+    ]
+    # The column itself stays raw: 08-C's form edits what was typed, not the fallback.
+    assert _account(result, shared.id)["billing_email"] is None
+
+
 def test_a_charged_card_stripe_no_longer_holds_reads_as_no_card(app, wallet):  # noqa: F811
     """Detached at Stripe, the account cannot pay. A blank row would hide that; null says it."""
     payer = _payer()

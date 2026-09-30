@@ -1205,17 +1205,18 @@ def _patch_notify(run: dict) -> None:
     """Send THIS run's mail to somewhere other than the payer's own address.
 
     A payer's notices go wherever ``notify.address_for`` says: the ``email`` column on their
-    user row — the same field they sign in with — or, for a money email, their billing
-    account's billing email. So a run whose payer is one person and whose mail should reach
-    another cannot be expressed by the data alone; rewriting the column to the reader's
-    address would take the login with it, and the address may already belong to a
-    different payer.
+    user row — the same field they sign in with — or a company inbox: a money email's
+    billing account address (its billing email, else the business email its companies
+    share) and a trial warning's business email. So a run whose payer is one person and
+    whose mail should reach another cannot be expressed by the data alone; rewriting the
+    column to the reader's address would take the login with it, and the address may
+    already belong to a different payer.
 
     Redirecting the lookups instead keeps the payer intact and touches no product code.
-    BOTH are redirected: ``recipient_for`` alone would let a receipt slip out to whatever
-    billing email the account carries. Scoped to this run's payer BY ID: the daily jobs are
-    global, and a blanket redirect would divert a real payer's mail if one ever came due
-    mid-replay.
+    BOTH are redirected: ``recipient_for`` alone would let a decline or a trial warning
+    slip out to whatever company inbox the data carries. Scoped to this run's payer BY ID:
+    the daily jobs are global, and a blanket redirect would divert a real payer's mail if
+    one ever came due mid-replay.
     """
     redirect = run.get("notify_to")
     if not redirect:

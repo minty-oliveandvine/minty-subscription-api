@@ -1549,6 +1549,9 @@ def build_billing_accounts(user_id, *, countries: bool = False) -> dict:
 
     * ``name`` — ``account_name``; ``billing_company`` / ``billing_email`` stay raw so a
       form can tell "unnamed" from "named after the payer";
+    * ``bill_to_email`` — the address "Bill to" prints, which is where the account's money
+      emails go and what its invoices name: ``store.account_email`` (the billing email,
+      else the business email every company on it shares), else the payer's;
     * ``card`` — the card the account CHARGES, or null when Stripe no longer holds it (a
       detached card is an account that cannot pay, and the page says so);
     * ``cards`` — the shelf, default first, with ``is_default`` marking THIS account's card.
@@ -1587,11 +1590,10 @@ def build_billing_accounts(user_id, *, countries: bool = False) -> dict:
             on_account.setdefault(str(nomination.billing_group_id), []).append(entity_id)
 
     named = {entity_id for ids in on_account.values() for entity_id in ids}
-    names = (
-        {str(e.id): (e.name or "") for e in Entity.objects.filter(id__in=sorted(named))}
-        if named
-        else {}
-    )
+    companies_read = list(Entity.objects.filter(id__in=sorted(named))) if named else []
+    names = {str(e.id): (e.name or "") for e in companies_read}
+    # Read in the same query, for ``bill_to_email``.
+    business_emails = {str(e.id): e.business_email for e in companies_read}
 
     charged_cards = {
         str(group.id): live.get(group.stripe_payment_method_id) for group, _ in groups
@@ -1632,6 +1634,10 @@ def build_billing_accounts(user_id, *, countries: bool = False) -> dict:
                 "name": account_name(group, payer),
                 "billing_company": group.billing_company,
                 "billing_email": group.billing_email,
+                "bill_to_email": sub_store.account_email(
+                    group,
+                    [business_emails.get(eid) for eid in on_account.get(str(group.id), [])],
+                ) or payer.get("email"),
                 "default_id": charging,
                 "card": dict(charged, is_default=True) if charged is not None else None,
                 "cards": shelf,

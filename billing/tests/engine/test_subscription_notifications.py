@@ -46,15 +46,20 @@ class _DbShim:
             pass
 
 
-def _company(db, label):
+def _company(db, label, **fields):
     """A real company row for a test label: entity_module_subscription.entity_id is a uuid FK
-    to entities since C7, so the labels the tests used to write ("e1") become rows."""
+    to entities since C7, so the labels the tests used to write ("e1") become rows.
+    ``fields`` (``business_email``, ``timezone``) are set on it."""
     from shared_models.models import Entity
 
     eid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"notify-company-{label}"))
-    Entity.objects.get_or_create(
+    entity, _ = Entity.objects.get_or_create(
         id=eid, defaults={"name": f"Company {label}", "status": "disconnected"}
     )
+    if fields:
+        for name, value in fields.items():
+            setattr(entity, name, value)
+        entity.save(update_fields=list(fields))
     return eid
 
 
@@ -428,24 +433,36 @@ def test_the_trial_email_states_no_price(app, db_session, mail):
         assert "Monthly after trial" not in html
 
 
-def test_a_receipt_states_the_amount_and_the_period(app, db_session, mail):
+def test_the_trial_date_is_the_day_on_the_companys_calendar(app, db_session, mail,
+                                                            monkeypatch):
+    """Dates are written in the company's time zone - Hong Kong when it never set one.
+
+    20:00 UTC on 8 September is already 9 September in Hong Kong, and the countdown has to
+    agree with the date it names: counted in UTC this read "ends in 7 days ... before
+    8 Sep" to someone whose calendar said the trial had a day longer.
+    """
     from billing.services import notify
+
+    frozen = datetime(2026, 9, 1, tzinfo=UTC)
+    monkeypatch.setattr(notify.clock, "now", lambda: frozen)
+    trial_end = datetime(2026, 9, 8, 20, tzinfo=UTC)
 
     with app.app_context():
         payer = _make_payer(db_session)
-        notify.notify(payer, notify.RENEWAL_PAID, dedupe_key="k", context={
-            "total": 40000,
-            "currency": "HKD",
-            "period_start": datetime(2026, 8, 1, tzinfo=UTC),
-            "period_end": datetime(2026, 9, 1, tzinfo=UTC),
-            "lines": ["Olive Ltd — Super Minty"],
-        })
-
-        message = mail.sent[0]
-        assert "HKD 400.00" in message.subject
-        assert "HKD 400.00" in message.html
-        assert "Olive Ltd — Super Minty" in message.html
-        assert "1 Aug 2026" in message.html and "1 Sep 2026" in message.html
+        for key, zone, date_line, countdown in (
+            ("unset", None, "9 Sep 2026", "in 8 days"),
+            ("london", "Europe/London", "8 Sep 2026", "in 7 days"),
+            # A zone nobody can resolve is dated in the default, not dropped.
+            ("unknown", "Mars/Olympus", "9 Sep 2026", "in 8 days"),
+        ):
+            notify.notify(payer, notify.TRIAL_ENDING, dedupe_key=key, context={
+                "entity_id": _company(db_session, key, timezone=zone),
+                "entity_name": "Olive Ltd", "codes": ["PETTY_CASH"],
+                "trial_end": trial_end, "needs_card": True,
+            })
+            message = mail.sent[-1]
+            assert date_line in message.html, key
+            assert message.subject == f"Your Minty trial ends {countdown}", key
 
 
 def test_links_are_dropped_rather_than_pointed_at_localhost(app, db_session, mail, settings):
@@ -456,15 +473,17 @@ def test_links_are_dropped_rather_than_pointed_at_localhost(app, db_session, mai
     with app.app_context():
         payer = _make_payer(db_session)
         settings.MINTY_PUBLIC_URL = None
-        notify.notify(payer, notify.TRIAL_EXPIRED, dedupe_key="k", context={
-            "entity_id": _company(db_session, "e1"), "entity_name": "Olive Ltd", "codes": ["PAYMENT_REQUEST"],
+        notify.notify(payer, notify.TRIAL_ENDING, dedupe_key="k", context={
+            "entity_id": _company(db_session, "e1"), "entity_name": "Olive Ltd",
+            "codes": ["PAYMENT_REQUEST"], "trial_end": datetime(2026, 9, 1, tzinfo=UTC),
+            "needs_card": True,
         })
 
         html = mail.sent[0].html
         assert "localhost" not in html
         assert "Go to Manage Subscription" not in html
         # The words still carry the message without the button.
-        assert "switched off" in html
+        assert "choose a subscription plan" in html
 
 
 def test_the_images_travel_with_the_message_not_over_http(app, db_session, mail):
@@ -655,20 +674,16 @@ def test_a_xero_only_user_is_still_reachable(app, db_session, mail):
 
 
 # ---------------------------------------------------------------------------
-# Where the MONEY emails go — the billing account's billing email, else the payer
+# Where the emails go — a company's inbox before the payer's own
 # ---------------------------------------------------------------------------
 #
-# A billing account's "Billing Email" is where the company wants its invoices, and the
-# invoice prints it as Bill to. The receipt, the declines and the recovery went to the
-# payer's login address regardless.
+# The money emails follow the user's order (2026-09-30): the billing account's billing
+# email, else the business email every company on the account shares, else the payer.
+# The invoice's Bill to follows the same rule, so the inbox an email reaches is the one
+# its invoice names. The trial warning goes to its company's business email, else the
+# payer; handover notices always go to the person.
 
-RECEIPT = {
-    "total": 40000,
-    "currency": "HKD",
-    "period_start": datetime(2026, 8, 1, tzinfo=UTC),
-    "period_end": datetime(2026, 9, 1, tzinfo=UTC),
-    "lines": ["Olive Ltd — Super Minty"],
-}
+DECLINE = {"total": 40000, "currency": "HKD"}
 
 
 def _billing_account(payer, *, email="accounts@olive.test", company="Olive Holdings Ltd"):
@@ -679,22 +694,34 @@ def _billing_account(payer, *, email="accounts@olive.test", company="Olive Holdi
     )
 
 
-def test_a_receipt_goes_to_the_accounts_billing_email_and_greets_the_company(
-    app, db_session, mail
-):
+def _on_account(db, payer, account, entity_id, *, paid_for=True):
+    """Put a company on ``account``. ``paid_for=False`` is a company that has LEFT: its
+    nomination kept as history, no module row of this payer's any more."""
+    from shared_models.models import EntityBillingGroup, EntityModuleSubscription
+
+    EntityBillingGroup.objects.create(
+        entity_id=entity_id, payer_user_id=payer, billing_group_id=account.id,
+        source="chosen",
+    )
+    if paid_for:
+        EntityModuleSubscription.objects.create(
+            id=str(uuid.uuid4()), entity_id=entity_id, function_code="PETTY_CASH",
+            payer_user_id=payer, phase="trial",
+            trial_end=datetime(2026, 9, 1, tzinfo=UTC),
+        )
+
+
+def test_a_money_email_goes_to_the_accounts_billing_email(app, db_session, mail):
     from billing.services import notify
 
     with app.app_context():
         payer = _make_payer(db_session)
         account = _billing_account(payer)
 
-        assert notify.notify(payer, notify.RENEWAL_PAID, dedupe_key="k",
-                             context={**RECEIPT, "billing_group_id": account.id}) is True
+        assert notify.notify(payer, notify.RENEWAL_FAILED, dedupe_key="k",
+                             context={**DECLINE, "billing_group_id": account.id}) is True
 
         assert mail.sent[0].to == ["accounts@olive.test"]
-        # Whoever reads a company's billing inbox need not be the payer.
-        assert "Hi Olive Holdings Ltd," in mail.sent[0].html
-        assert "Hi Sam," not in mail.sent[0].html
 
 
 @pytest.mark.parametrize("event", ["renewal_failed", "dunning_retry_failed",
@@ -713,32 +740,122 @@ def test_every_money_email_goes_to_the_billing_email(app, db_session, mail, even
 
 
 def test_an_account_with_no_billing_email_mails_the_payer_as_before(app, db_session, mail):
-    """The common case: an account opened without one (every backfilled account)."""
+    """The common case: an account opened without one (every backfilled account), whose
+    companies gave no business email either."""
     from billing.services import notify
 
     with app.app_context():
         payer = _make_payer(db_session)
         account = _billing_account(payer, email=None)
+        _on_account(db_session, payer, account, _company(db_session, "e1"))
 
-        notify.notify(payer, notify.RENEWAL_PAID, dedupe_key="k",
-                      context={**RECEIPT, "billing_group_id": account.id})
+        notify.notify(payer, notify.RENEWAL_FAILED, dedupe_key="k",
+                      context={**DECLINE, "billing_group_id": account.id})
 
         assert mail.sent[0].to == ["payer@test.com"]
-        assert "Hi Sam," in mail.sent[0].html
 
 
-def test_an_account_with_an_email_but_no_company_greets_the_payer(app, db_session, mail):
+def test_with_no_billing_email_the_business_email_its_companies_share_is_used(
+    app, db_session, mail
+):
+    """Case and blanks do not split an inbox: "AP@…" and "ap@…" are one address, and a
+    company that gave none does not stand in the way."""
     from billing.services import notify
 
     with app.app_context():
         payer = _make_payer(db_session)
-        account = _billing_account(payer, company=None)
+        account = _billing_account(payer, email=None)
+        for label, email in (("e1", "ap@group.test"), ("e2", " AP@Group.test "), ("e3", None)):
+            _on_account(db_session, payer, account,
+                        _company(db_session, label, business_email=email))
 
-        notify.notify(payer, notify.RENEWAL_PAID, dedupe_key="k",
-                      context={**RECEIPT, "billing_group_id": account.id})
+        notify.notify(payer, notify.RENEWAL_FAILED, dedupe_key="k",
+                      context={**DECLINE, "billing_group_id": account.id})
+
+        assert mail.sent[0].to == ["AP@Group.test"]
+
+
+def test_companies_with_different_business_emails_mail_the_payer(app, db_session, mail):
+    """Never one company's inbox about the charges for all of them: an account can pay for
+    separate businesses, and picking one would show it another's bill."""
+    from billing.services import notify
+
+    with app.app_context():
+        payer = _make_payer(db_session)
+        account = _billing_account(payer, email=None)
+        _on_account(db_session, payer, account,
+                    _company(db_session, "e1", business_email="ap@olive.test"))
+        _on_account(db_session, payer, account,
+                    _company(db_session, "e2", business_email="ap@lemon.test"))
+
+        notify.notify(payer, notify.RENEWAL_FAILED, dedupe_key="k",
+                      context={**DECLINE, "billing_group_id": account.id})
+
+        assert mail.sent[0].to == ["payer@test.com"]
+
+
+def test_a_company_that_left_the_account_is_never_mailed(app, db_session, mail):
+    """A nomination outlives a handover as history. The company that left must not
+    receive the account's mail - nor stop the ones still on it from agreeing."""
+    from billing.services import notify
+
+    with app.app_context():
+        payer = _make_payer(db_session)
+        account = _billing_account(payer, email=None)
+        _on_account(db_session, payer, account,
+                    _company(db_session, "gone", business_email="ap@gone.test"),
+                    paid_for=False)
+        notify.notify(payer, notify.RENEWAL_FAILED, dedupe_key="k1",
+                      context={**DECLINE, "billing_group_id": account.id})
+
+        _on_account(db_session, payer, account,
+                    _company(db_session, "stays", business_email="ap@stays.test"))
+        notify.notify(payer, notify.RENEWAL_FAILED, dedupe_key="k2",
+                      context={**DECLINE, "billing_group_id": account.id})
+
+        assert [m.to for m in mail.sent] == [["payer@test.com"], ["ap@stays.test"]]
+
+
+def test_a_billing_email_beats_the_business_email(app, db_session, mail):
+    from billing.services import notify
+
+    with app.app_context():
+        payer = _make_payer(db_session)
+        account = _billing_account(payer)
+        _on_account(db_session, payer, account,
+                    _company(db_session, "e1", business_email="hello@olive.test"))
+
+        notify.notify(payer, notify.PAYMENT_RECOVERED, dedupe_key="k",
+                      context={"billing_group_id": account.id})
 
         assert mail.sent[0].to == ["accounts@olive.test"]
-        assert "Hi Sam," in mail.sent[0].html
+
+
+def test_the_shared_business_email_rule():
+    """The pure rule, on its own: one address between them, else nothing."""
+    from billing.services import store
+
+    assert store.shared_business_email(["", None, " AP@x.test ", "ap@x.test"]) == "AP@x.test"
+    assert store.shared_business_email(["a@x.test", "b@x.test"]) is None
+    assert store.shared_business_email([None, "  "]) is None
+    assert store.shared_business_email([]) is None
+
+
+def test_the_trial_warning_goes_to_the_companys_business_email(app, db_session, mail):
+    """A trial usually has no billing account yet, so there is no billing email to ask:
+    the company's business email (onboarding step 1), else the payer."""
+    from billing.services import notify
+
+    with app.app_context():
+        payer = _make_payer(db_session)
+        for label, email in (("e1", "hello@olive.test"), ("e2", None)):
+            notify.notify(payer, notify.TRIAL_ENDING, dedupe_key=label, context={
+                "entity_id": _company(db_session, label, business_email=email),
+                "entity_name": "Olive Ltd", "codes": ["PETTY_CASH"],
+                "trial_end": datetime(2026, 9, 1, tzinfo=UTC), "needs_card": True,
+            })
+
+        assert [m.to for m in mail.sent] == [["hello@olive.test"], ["payer@test.com"]]
 
 
 def test_an_email_naming_no_account_mails_the_payer(app, db_session, mail):
@@ -748,7 +865,7 @@ def test_an_email_naming_no_account_mails_the_payer(app, db_session, mail):
         payer = _make_payer(db_session)
         _billing_account(payer)
 
-        notify.notify(payer, notify.RENEWAL_PAID, dedupe_key="k", context=RECEIPT)
+        notify.notify(payer, notify.RENEWAL_FAILED, dedupe_key="k", context=DECLINE)
 
         assert mail.sent[0].to == ["payer@test.com"]
 
@@ -763,25 +880,26 @@ def test_somebody_elses_account_is_never_mailed(app, db_session, mail):
         stranger = _make_payer(db_session, email="stranger@test.com")
         theirs = _billing_account(stranger, email="accounts@stranger.test")
 
-        notify.notify(payer, notify.RENEWAL_PAID, dedupe_key="k",
-                      context={**RECEIPT, "billing_group_id": theirs.id})
+        notify.notify(payer, notify.RENEWAL_FAILED, dedupe_key="k",
+                      context={**DECLINE, "billing_group_id": theirs.id})
 
         assert mail.sent[0].to == ["payer@test.com"]
 
 
-def test_trial_and_handover_notices_stay_with_the_person(app, db_session, mail):
+def test_handover_notices_stay_with_the_person(app, db_session, mail):
+    """About the person, not the company: neither a billing email nor a business email
+    takes a handover notice away from the payer who asked."""
     from billing.services import notify
 
     with app.app_context():
         payer = _make_payer(db_session)
         account = _billing_account(payer)
+        company = _company(db_session, "e1", business_email="hello@olive.test")
 
-        notify.notify(payer, notify.TRIAL_EXPIRED, dedupe_key="t",
-                      context={"billing_group_id": account.id})
         notify.notify(payer, notify.SUBSCRIBER_TRANSFER_DECLINED, dedupe_key="h",
-                      context={"billing_group_id": account.id})
+                      context={"billing_group_id": account.id, "entity_id": company})
 
-        assert [m.to for m in mail.sent] == [["payer@test.com"], ["payer@test.com"]]
+        assert [m.to for m in mail.sent] == [["payer@test.com"]]
 
 
 def test_a_long_billing_email_is_logged_as_sent_not_sent_again(app, db_session, mail):
@@ -795,22 +913,22 @@ def test_a_long_billing_email_is_logged_as_sent_not_sent_again(app, db_session, 
     with app.app_context():
         payer = _make_payer(db_session)
         account = _billing_account(payer, email=address)
-        context = {**RECEIPT, "billing_group_id": account.id}
+        context = {**DECLINE, "billing_group_id": account.id}
 
-        assert notify.notify(payer, notify.RENEWAL_PAID, dedupe_key="k", context=context)
-        assert notify.notify(payer, notify.RENEWAL_PAID, dedupe_key="k", context=context) is False
+        assert notify.notify(payer, notify.RENEWAL_FAILED, dedupe_key="k", context=context)
+        assert notify.notify(payer, notify.RENEWAL_FAILED, dedupe_key="k", context=context) is False
 
         assert mail.sent[0].to == [address]
         assert len(mail.sent) == 1
-        row = SubscriptionEmailLog.objects.get(event=notify.RENEWAL_PAID, dedupe_key="k")
+        row = SubscriptionEmailLog.objects.get(event=notify.RENEWAL_FAILED, dedupe_key="k")
         assert row.status == notify.STATUS_SENT
         assert row.recipient == address[: notify.RECIPIENT_MAX]
 
 
 def test_the_replay_redirect_also_catches_a_billing_address(app, db_session, mail,
                                                              monkeypatch):
-    """A replay mails whoever is reading it, never the account it lives on - the billing
-    email included, or a receipt would slip out to it."""
+    """A replay mails whoever is reading it, never the inbox the data names - a billing
+    email or a business email included, or a decline or a trial warning would slip out."""
     from billing.management.commands.replay_scenarios import _patch_notify
     from billing.services import notify
 
@@ -823,10 +941,14 @@ def test_the_replay_redirect_also_catches_a_billing_address(app, db_session, mai
         _patch_notify({"notify_to": "reader+replay@test.com", "user_id": payer,
                        "email": "payer@test.com"})
 
-        notify.notify(payer, notify.RENEWAL_PAID, dedupe_key="k",
-                      context={**RECEIPT, "billing_group_id": account.id})
+        notify.notify(payer, notify.RENEWAL_FAILED, dedupe_key="k",
+                      context={**DECLINE, "billing_group_id": account.id})
+        notify.notify(payer, notify.TRIAL_ENDING, dedupe_key="t", context={
+            "entity_id": _company(db_session, "e1", business_email="hello@olive.test"),
+            "trial_end": datetime(2026, 9, 1, tzinfo=UTC), "needs_card": True,
+        })
 
-        assert mail.sent[0].to == ["reader+replay@test.com"]
+        assert [m.to for m in mail.sent] == [["reader+replay@test.com"]] * 2
 
 
 # ---------------------------------------------------------------------------
@@ -902,11 +1024,14 @@ def test_dunning_scaffolding_does_not_leak_into_the_reported_result():
 
 
 def test_the_retired_events_stay_retired(app):
-    """Five emails were deliberately switched off. Each removal has a consequence that is
+    """Seven emails were deliberately switched off. Each removal has a consequence that is
     invisible from the call site, so re-adding one should be a decision, not a reflex:
 
-      trial_converted            a converting trial is silent; the first charge is
-                                 receipted by ``renewal_paid`` in the same daily pass
+      trial_converted            a converting trial is silent, and so is its first charge
+      renewal_paid               the receipt: a charge that succeeds is silent (2026-09-30,
+                                 not in the approved designs)
+      trial_expired              a lapsed trial is silent; the module page shows it
+                                 (2026-09-30, not in the approved designs)
       trial_ending/will-convert  a cleanly converting trial gets no advance warning at all
       account_closed             superseded, then the thing meant to supersede it went too
       subscriber_transfer_failed the accepting user sees the decline in the browser
@@ -918,15 +1043,16 @@ def test_the_retired_events_stay_retired(app):
     """
     from billing.services import notify
 
-    retired = ("trial_converted", "account_closed", "subscriber_transfer_failed",
-               "access_revoked")
+    retired = ("trial_converted", "renewal_paid", "trial_expired", "account_closed",
+               "subscriber_transfer_failed", "access_revoked")
     assert [e for e in retired if e in notify._COPY] == []
     assert [e for e in retired if e in notify.EVENTS] == []
-    # The live set, stated once so a silent addition shows up here.
-    assert len(notify._COPY) == 10
+    # The live set, stated once so a silent addition shows up here: exactly the eight
+    # approved Figma designs.
+    assert len(notify._COPY) == 8
 
 
-def test_renewal_receipts_are_deduped_on_the_billing_period(app, db_session, mail):
+def test_renewal_declines_are_deduped_on_the_billing_period(app, db_session, mail):
     """The same key that stops the payer being CHARGED twice for a period stops them
     being MAILED twice about it, so a re-run is consistent in both."""
     from billing.services import renewals
@@ -941,8 +1067,8 @@ def test_renewal_receipts_are_deduped_on_the_billing_period(app, db_session, mai
             "currency": "HKD",
             "lines": ["Olive Ltd — Super Minty"],
         }
-        renewals._notify_renewals(issued=[entry], failed=[])
-        renewals._notify_renewals(issued=[entry], failed=[])
+        renewals._notify_renewals(failed=[entry])
+        renewals._notify_renewals(failed=[entry])
 
         assert len(mail.sent) == 1
 
@@ -1019,8 +1145,8 @@ def test_a_trial_that_will_convert_cleanly_is_not_warned_at_all(app, db_session,
     This email used to go to every trial in the window and pick one of three wordings,
     one of which amounted to "your trial ends soon, do nothing". That trains people to
     skim past the one trial email that does need acting on, so a trial with a card saved
-    and this company authorised is now not mailed at all — its first word about the
-    charge is the receipt.
+    and this company authorised is now not mailed at all — and with the receipt retired,
+    neither is its first charge.
     """
     checkout = pytest.importorskip("billing.services.checkout")  # slice C
     from shared_models.models import EntityModuleSubscription

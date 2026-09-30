@@ -237,9 +237,9 @@ def sweep_expired_module_access(payer_user_id=None) -> dict:
     # THIS SWEEP MAILS NOTHING, in either direction.
     #
     # Restorations never did: the customer is told by the thing that caused them — the
-    # dunning "you're all settled" notice, the receipt for the payment that cleared the
-    # balance — and a second "your access is back" for the same event reads as a system
-    # talking to itself.
+    # dunning "you're all settled" notice — and a second "your access is back" for the same
+    # event reads as a system talking to itself. (The receipt that used to confirm any
+    # other clearing payment is retired, 2026-09-30, so that case is now silent.)
     #
     # Revocations used to, and no longer do (2026-09, by decision). Worth knowing what
     # that means, because nothing else covers it: when this switches a module off, the

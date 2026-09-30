@@ -126,7 +126,7 @@ core/            auth (BearerAuth, SelfBearerAuth, EntityBearerAuth) · exceptio
 shared_models/   the 21 mirrors, managed = False · enums (the Postgres enums) · fields (PgEnumField, CharNField)
 billing/         api/ (me, modules, notice, onboarding - the four routers, live; _json.py = Flask's jsonify) · services/ (THE ENGINE: the 24 modules of Minty's blueprints/subscription/services ported 1:1, plus entity_modules.py, _context.py, _log.py, and this service's own invoice_document.py + invoice_pdf.py - the invoice PDF, Figma 09-A) · static/email/ (the 9 inline images) · static/invoice/ (the PDF's Inter and Noto Sans HK fonts with their OFL licences, and 09-A's logo vector) · scheduler.py · management/commands/{subscriptions,plans,replay_scenarios,export_openapi}.py · tests/ (+ tests/engine/, the ported suite; tests/api/, the route tests)
 scripts/         replay_diff.py (Flask report vs Django report, normalised)
-templates/email/ subscription_{notice,receipt}.html - Minty's, verbatim (Jinja2 backend; a render from either side is byte-identical)
+templates/email/ subscription_notice.html - Minty's, verbatim (Jinja2 backend; a render from either side is byte-identical)
 e2e/             HTTP smoke tests against a live service
 docker/          entrypoint (waits for DB + schema; no migrate)
 docs/features/   README · authentication.md · subscriptions-api.md (the route-by-route map and what each step fills)

@@ -222,7 +222,10 @@ def _bill_to(user_id, invoice) -> tuple[str, tuple[str, ...], str]:
     payer = portal._person(_by_pk(User, user_id), user_id)
 
     name = portal.account_name(group, payer)
-    email = (getattr(group, "billing_email", None) or "").strip() or payer.get("email") or ""
+    # The money emails' rule (``store.account_email``): the billing email, else the business
+    # email every company on the account shares, else the payer - so Bill to names the
+    # inbox this account's emails go to.
+    email = sub_store.account_email(group) or payer.get("email") or ""
 
     address: tuple[str, ...] = ()
     card_id = getattr(group, "stripe_payment_method_id", None)

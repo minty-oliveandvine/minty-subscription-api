@@ -15,6 +15,7 @@ What is pinned (the user's decisions, 2026-09-29):
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import UTC, datetime
 
 import pytest
@@ -272,6 +273,55 @@ def test_an_unnamed_account_reads_as_the_payer_and_so_does_its_email(app, monkey
     doc = _document(payer, invoice)
 
     assert (doc.bill_to_name, doc.bill_to_email) == ("Pat Payer", "unnamed@payer.test")
+
+
+def _company_on(account, payer, name, business_email):
+    """A company on ``account`` that ``payer`` still pays for, with its business email."""
+    from shared_models.models import EntityBillingGroup, EntityModuleSubscription
+
+    entity = _entity(None, name)
+    entity.business_email = business_email
+    entity.save(update_fields=["business_email"])
+    EntityBillingGroup.objects.create(
+        entity_id=entity.id, payer_user_id=payer.id, billing_group_id=account.id,
+        source="chosen",
+    )
+    EntityModuleSubscription.objects.create(
+        id=str(uuid.uuid4()), entity_id=entity.id, function_code="PETTY_CASH",
+        payer_user_id=payer.id, phase="trial", trial_end=UPGRADED,
+    )
+    return entity
+
+
+def test_with_no_billing_email_bill_to_is_the_business_email_its_companies_share(
+    app, monkeypatch
+):
+    """The money emails' rule (billing email, else the business email every company on the
+    account shares, else the payer), so Bill to names the inbox those emails reach."""
+    _hkd()
+    payer = _payer("pat@payer.test")
+    account = _account(payer, email=None)
+    _wallet(monkeypatch, ("pm_charged", ADDRESS))
+    acme = _company_on(account, payer, "Acme Ltd", "ap@group.test")
+    _company_on(account, payer, "Beta Ltd", "ap@group.test")
+    invoice = _invoice(payer, total=28000, billing_group_id=account.id)
+    _lines(invoice, (acme, "Petty Cash", 28000, "full", None))
+
+    assert _document(payer, invoice).bill_to_email == "ap@group.test"
+
+
+def test_companies_with_different_business_emails_bill_the_payer(app, monkeypatch):
+    """Never one company's inbox on an invoice that covers another's charges."""
+    _hkd()
+    payer = _payer("pat@payer.test")
+    account = _account(payer, email=None)
+    _wallet(monkeypatch, ("pm_charged", ADDRESS))
+    acme = _company_on(account, payer, "Acme Ltd", "ap@acme.test")
+    _company_on(account, payer, "Beta Ltd", "ap@beta.test")
+    invoice = _invoice(payer, total=28000, billing_group_id=account.id)
+    _lines(invoice, (acme, "Petty Cash", 28000, "full", None))
+
+    assert _document(payer, invoice).bill_to_email == "pat@payer.test"
 
 
 def test_a_payer_with_no_account_is_billed_by_their_own_name_without_asking_stripe(

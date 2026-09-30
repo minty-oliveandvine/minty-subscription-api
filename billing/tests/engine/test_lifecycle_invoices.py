@@ -377,7 +377,7 @@ def _install(monkeypatch, world):
         lambda ids: {str(i): COMPANIES[str(i)][0] for i in ids},
     )
     # Mail is not what is being compared, and it reaches for an app context.
-    monkeypatch.setattr(renewals, "_notify_renewals", lambda issued, failed: None)
+    monkeypatch.setattr(renewals, "_notify_renewals", lambda failed: None)
     monkeypatch.setattr(dunning, "_notify_dunning", lambda *a, **k: None)
     monkeypatch.setattr(dunning, "_restore_access", lambda uid: None)
     monkeypatch.setattr(policy, "current", lambda: policy.DEFAULTS)

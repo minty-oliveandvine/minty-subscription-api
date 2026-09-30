@@ -499,7 +499,8 @@ def _as_reserved(entry: dict, record) -> dict:
     """``entry`` describing a RESUMED invoice as it was reserved.
 
     What is charged is what was reserved then, not what the companies would be priced at
-    today, so the receipt or the decline has to state those lines and that total.
+    today, so the job's result - and a decline's email - has to state those lines and that
+    total.
     """
     rows = store.invoice_lines(record.id)
     return {
@@ -582,13 +583,16 @@ def run_renewals(now: datetime, *, scope, issue: bool = False,
     # Emails go out only after the whole batch has been billed and committed. Sending
     # inside the loop would put SMTP latency between two payers' charges, and would tell
     # a customer about a charge that a later exception could still roll back.
-    _notify_renewals(issued, failed)
+    _notify_renewals(failed)
 
     return {"planned": planned, "issued": issued, "failed": failed, "skipped": skipped}
 
 
-def _notify_renewals(issued: list[dict], failed: list[dict]) -> None:
-    """Mail the receipts and the declines. Never raises — see ``notify``.
+def _notify_renewals(failed: list[dict]) -> None:
+    """Mail the declines. Never raises — see ``notify``.
+
+    Only a decline: the receipt for a renewal that was paid is retired (2026-09-30, not in
+    the approved designs), so a successful charge is silent.
 
     Deduped on the period key, which is what makes a re-run harmless: the same payer and
     period produce the same key, so a job that is run twice in a day charges once (by
@@ -598,15 +602,9 @@ def _notify_renewals(issued: list[dict], failed: list[dict]) -> None:
 
     # The GROUP is in the dedupe key for the same reason it is in the idempotency key: a
     # payer with two cards has two outcomes for one period, and a payer-and-period key
-    # would silence the second — most damagingly when one card was paid and the other
-    # declined, which is exactly the message they need.
+    # would silence the second — most damagingly when one card was declined, which is
+    # exactly the message they need.
     events = []
-    for entry in issued:
-        period = Period(start=entry["period_start"], end=entry["period_end"])
-        events.append(
-            (entry["user_id"], notify.RENEWAL_PAID,
-             period_key(entry["user_id"], period, entry.get("billing_group_id")), entry)
-        )
     for entry in failed:
         period = Period(start=entry["period_start"], end=entry["period_end"])
         events.append(
@@ -653,8 +651,8 @@ def _renew_one_group(account, group, paid_through, now, issue) -> dict[str, list
         "period_end": period.end,
         "total": invoice.total if invoice else 0,
         "lines": [line.description for line in invoice.lines] if invoice else [],
-        # Carried so the receipt / decline email can state the amount in the right
-        # currency without re-deriving the payer's invoice from scratch.
+        # Carried so the job's result states the amount in the right currency without
+        # re-deriving the payer's invoice from scratch.
         "currency": invoice.currency if invoice else None,
     }
     if invoice is None:

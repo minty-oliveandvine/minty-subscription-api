@@ -1058,61 +1058,11 @@ def convert_or_expire_due_trials(limit: int | None = None) -> dict:
                 continue
             expired.append({"entity_id": entity_id, "code": row.function_code})
 
-    # One email per ENTITY, not per module — for the same reason the conversion itself
-    # is grouped by entity: two modules whose trials end together are a single event the
-    # customer experienced once, and two emails seconds apart describing it would read
-    # as a bug. Sent after every entity has been closed out, so the mail can never
-    # describe a conversion a later exception undid.
-    _notify_trial_outcomes(converted, expired, by_entity)
+    # Nothing is mailed about how a trial ENDED, by decision (2026-09-30): neither the
+    # "trial expired" notice nor a conversion note is in the approved designs, and the
+    # receipt that used to announce a conversion's first charge is retired too. A lapse
+    # shows on the module page. See the retired-events block in ``notify``.
     return {"converted": converted, "expired": expired}
-
-
-def _notify_trial_outcomes(converted: list[dict], expired: list[dict],
-                           by_entity: dict) -> None:
-    """Tell each payer how their trial ended. Never raises — see ``notify``.
-
-    Deduped on entity + module set, which a trial can only reach once: after this runs
-    the rows are off ``trial`` phase, so the same trial cannot be closed out twice.
-    """
-    from billing.services import notify
-
-    payers = {
-        entity_id: rows[0].payer_user_id
-        for entity_id, rows in by_entity.items()
-        if rows
-    }
-    names = _entity_names_for_notice(set(payers))
-
-    events = []
-    # Only the expired half is mailed. A trial that CONVERTED is announced by the receipt
-    # ``run_renewals`` sends for the first charge later in this same daily pass — see
-    # ``daily.JOB_ORDER``, where close-trials deliberately runs before run-renewals — so a
-    # separate "your trial converted" note arrived minutes before the receipt for the very
-    # same event and said less.
-    for event, outcome in ((notify.TRIAL_EXPIRED, expired),):
-        by_id: dict[str, list[str]] = {}
-        for item in outcome:
-            by_id.setdefault(item["entity_id"], []).append(item["code"])
-        for entity_id, codes in by_id.items():
-            payer = payers.get(entity_id)
-            if not payer:
-                continue
-            events.append((
-                payer,
-                event,
-                # Payer-scoped for the same reason as the warning above — the constraint
-                # cannot tell two recipients apart on its own. These fire once per trial
-                # so a handover has never actually collided here, but leaving one key in
-                # the family payer-blind is how the next one gets copied from the wrong
-                # example.
-                f"{payer}:{entity_id}:{','.join(sorted(codes))}",
-                {
-                    "entity_id": entity_id,
-                    "entity_name": names.get(str(entity_id)),
-                    "codes": sorted(codes),
-                },
-            ))
-    notify.notify_many(events)
 
 
 def _entity_names_for_notice(entity_ids) -> dict[str, str]:
@@ -1134,12 +1084,12 @@ def _entity_names_for_notice(entity_ids) -> dict[str, str]:
 def notify_trials_ending(days_before: int = 7, limit: int | None = None) -> dict:
     """Warn payers about trials that end in ``days_before`` days.
 
-    THE ONLY NOTIFICATION IN THE SYSTEM THAT CAN PREVENT A LAPSE. Everything else in this
-    module reports something that has already happened — a trial that converted, a trial
-    that expired, access that was revoked. This one arrives while the customer can still
-    act, and the case it exists for is the trial that will NOT convert because no card is
-    saved or billing for the entity was never confirmed: without it, that customer's first
-    news is their module going dark.
+    THE ONLY NOTIFICATION IN THE SYSTEM THAT CAN PREVENT A LAPSE. Every other billing email
+    reports something that has already happened — a payment that failed or recovered, a
+    handover — and a trial that has ENDED is not mailed at all. This one arrives while the
+    customer can still act, and the case it exists for is the trial that will NOT convert
+    because no card is saved or billing for the entity was never confirmed: without it,
+    that customer's first news is their module going dark.
 
     Reads the SAME three conditions ``_convert_due_trials`` will apply on the day
     (customer, card, consent) rather than a simplified version, so the warning cannot
@@ -1186,11 +1136,12 @@ def notify_trials_ending(days_before: int = 7, limit: int | None = None) -> dict
     # It bounds itself. An outage of up to ``days_before`` is covered completely (with
     # less notice than intended, which is the point); a longer one loses only trials that
     # ENDED while it was down, and those are not warnable — ``convert_or_expire_due_trials``
-    # has already sent them the expiry notice.
+    # has already closed them out, and since the ended-trial email was retired
+    # (2026-09-30) the module page is the only place they hear about it.
     #
     # Starts TOMORROW, not today. ``notify-trial-ending`` runs before ``close-trials`` on
-    # the same schedule, so including today would mail "your trial ends soon" minutes
-    # before "your trial has ended" — two contradictory notices about one trial.
+    # the same schedule, so including today would mail "your trial ends today" minutes
+    # before the trial is closed out — a warning nobody has the time to act on.
     today = now.astimezone(UTC).date()
     start = datetime(
         today.year, today.month, today.day, tzinfo=UTC
@@ -1230,7 +1181,7 @@ def notify_trials_ending(days_before: int = 7, limit: int | None = None) -> dict
                 # Card saved and this company authorised, so the trial converts on its
                 # own. Mailing "your trial ends soon, do nothing" trains people to skim
                 # past the one trial email that does need acting on, so it is not sent
-                # at all. The customer's first word about the charge is the receipt.
+                # at all — and with the receipt retired, neither is the charge itself.
                 skipped.append({"entity_id": entity_id, "reason": "will_convert"})
                 continue
             events.append((

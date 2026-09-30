@@ -1,10 +1,10 @@
 {#
-  The template behind every billing email except the receipt.
+  The template behind every billing email.
 
   Content comes from ``blueprints/subscription/services/notify.py`` — one template rather
-  than ten so the markup can never drift between a dunning notice and a handover request.
-  ``renewal_paid`` is the sole exception and renders ``subscription_receipt.html``,
-  because a receipt has to itemise and this design has nowhere to itemise into.
+  than eight so the markup can never drift between a dunning notice and a handover request.
+  (The receipt had its own template, because a receipt has to itemise and this design has
+  nowhere to itemise into; both were retired on 2026-09-30.)
 
   Table layout and inline styles are not a stylistic choice: Outlook and most webmail
   clients strip <style> blocks and ignore flex/grid, so anything laid out the way the rest

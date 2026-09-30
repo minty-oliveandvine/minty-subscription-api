@@ -734,7 +734,7 @@ class SubscriptionAuditLog(models.Model):
 
 
 class SubscriptionEmailLog(models.Model):
-    """The dedup ledger of the ten notification emails: ``UNIQUE (event, dedupe_key)`` is
+    """The dedup ledger of the eight notification emails: ``UNIQUE (event, dedupe_key)`` is
     what stops a re-run of the daily pass sending the same notice twice. ``status`` is
     ``failed`` until the send succeeds, then ``sent`` (Flask's ``STATUS_FAILED`` default);
     ``error`` the reason when it failed."""

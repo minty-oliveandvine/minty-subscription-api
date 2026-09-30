@@ -51,9 +51,9 @@ MIDDLEWARE = [
 ROOT_URLCONF = "config.urls"
 WSGI_APPLICATION = "config.wsgi.application"
 
-# Jinja2 for the two notification templates (templates/email/subscription_{notice,receipt}
-# .html), so they move over from Flask verbatim in Part 2 step 2. No Django template engine:
-# this service renders no pages.
+# Jinja2 for the notification template (templates/email/subscription_notice.html), so it
+# moved over from Flask verbatim in Part 2 step 2. No Django template engine: this service
+# renders no pages.
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.jinja2.Jinja2",
@@ -186,7 +186,7 @@ STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
 STRIPE_PUBLISHABLE_KEY = os.environ.get("STRIPE_PUBLISHABLE_KEY", "")
 
 # ---------------------------------------------------------------------------
-# Mail - the ten subscription notices, on the same Brevo SMTP Minty uses. Without
+# Mail - the eight subscription notices, on the same Brevo SMTP Minty uses. Without
 # EMAIL_HOST every send is logged and skipped rather than failing the pass that raised it
 # (Flask's rule, kept). The sender is SUBSCRIPTION_EMAIL, as in Flask.
 # ---------------------------------------------------------------------------

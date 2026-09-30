@@ -24,46 +24,54 @@ THREE RULES, all of them load-bearing:
    customer about a charge that then rolls back, and puts network latency inside a
    billing transaction.
 
-The copy for all eleven events lives in ``_COPY`` below rather than in eleven templates, so
+The copy for all eight events lives in ``_COPY`` below rather than in eight templates, so
 the entire customer-facing vocabulary of the billing system is reviewable on one screen —
 which matters more here than template purity, because these are the only words Minty ever
-says to a customer about their money.
+says to a customer about their money. The eight are exactly the approved Figma designs
+(2026-09-30); anything not drawn there is retired — see the block below the events.
 
-Recipient is the PAYER, with TWO exceptions. Every action these emails ask for (add a card,
-settle an invoice, confirm billing) is one only the payer can take; co-admins on an entity
-would receive amounts they cannot act on. The consequence is a known gap — a co-admin
-still watches modules go dark with no explanation — and closing it needs a separate,
-redacted template set rather than a wider recipient list on these.
+Recipient is the PAYER, with THREE exceptions. Co-admins on an entity are never copied,
+by decision (2026-09-30): the money emails reach the company's own inbox, which the company
+owns rather than any one person, and every action these emails ask for (add a card, settle
+an invoice, confirm billing) is one only the payer can take.
 
 The first exception is ``subscriber_transfer_requested``, which is addressed to someone
 who is NOT yet the payer and is being asked to become one. It belongs here rather than in a
 separate system because it is a message about money with an amount in it, and the whole
 point of keeping this vocabulary on one screen is that no such message escapes review.
 
-The second is the MONEY emails (``MONEY_EVENTS``: the receipt, the two declines and the
-recovery). They go to the billing account's own billing email when it has one - the
-address the company gave for its invoices, and the one its invoice prints as Bill to -
-greeted by the company's name. With none set they go to the payer. See ``address_for``,
+The second is the MONEY emails (``MONEY_EVENTS``: the two declines and the recovery). They
+go to the billing account's address - its billing email, else the business email every
+company on it shares (``store.account_email``, the rule the invoice's Bill to follows too,
+so the inbox an email reaches is the one its invoice names) - and to the payer when it has
+neither.
+
+The third is the trial ending warning, which goes to the company's business email when
+onboarding recorded one: a trial usually has no billing account yet. See ``address_for``,
 the one place a recipient is decided.
+
+Dates are written in the company's time zone (``entities.timezone``, Hong Kong when unset -
+``entity_zone``); scheduling itself stays in UTC.
 
 PORTED FROM FLASK (Part 2 step 2). The copy, the builders and the three rules are Flask's
 ``blueprints/subscription/services/notify.py`` verbatim; what changed is the delivery
 layer underneath them - Flask-Mail became Django's mail framework (``InlineImageMessage``
 keeps the ``multipart/related`` wire shape), ``render_template`` became the Jinja2
-template backend rendering the SAME two templates (``templates/email/``), ``PUBLIC_URL``
+template backend rendering the SAME template (``templates/email/``), ``PUBLIC_URL``
 became ``MINTY_PUBLIC_URL``, and the links a person receives go to minty-web through
 Flask's re-handoff (``settings_url`` / ``portal_url``) instead of to Flask's own pages.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from email import encoders
 from email.mime.base import MIMEBase
 from email.mime.image import MIMEImage
 from pathlib import Path
 from urllib.parse import urlencode
 
+import pytz
 from django.conf import settings
 from django.core.mail import EmailMultiAlternatives
 from django.core.mail.message import SafeMIMEMultipart
@@ -72,7 +80,6 @@ from django.template.loader import render_to_string
 
 from billing.services import clock, display
 from billing.services._log import logger
-from billing.services.money import format_minor
 
 #: ``billing/static/`` - the email images live at ``billing/static/email/<name>.png``.
 STATIC_ROOT = Path(__file__).resolve().parent.parent / "static"
@@ -90,8 +97,6 @@ RECIPIENT_MAX = 200
 # Stable strings: they are persisted as dedupe rows, so renaming one silently
 # re-sends every email of that kind to every customer who already had it.
 TRIAL_ENDING = "trial_ending"
-TRIAL_EXPIRED = "trial_expired"
-RENEWAL_PAID = "renewal_paid"
 RENEWAL_FAILED = "renewal_failed"
 DUNNING_RETRY_FAILED = "dunning_retry_failed"
 PAYMENT_RECOVERED = "payment_recovered"
@@ -105,8 +110,13 @@ SUBSCRIBER_TRANSFER_EXPIRED = "subscriber_transfer_expired"
 # rows still carry them, and anyone reading a row for "trial_converted" needs to find out
 # here that it was deliberately stopped rather than assume the send is broken:
 #
-#   trial_converted            a converting trial is now silent; the first charge is
-#                              receipted by ``renewal_paid`` in the same daily pass
+#   trial_converted            a converting trial is now silent, and since ``renewal_paid``
+#                              went too, so is its first charge
+#   renewal_paid               the receipt. Not in the approved designs (2026-09-30): a
+#                              charge that succeeds is silent - Stripe's own receipt, if
+#                              switched on in its Dashboard, is the only one
+#   trial_expired              not in the approved designs (2026-09-30): a lapsed trial is
+#                              silent; the module page shows it
 #   account_closed             superseded, then access_revoked went too
 #   subscriber_transfer_failed the accepting user sees the decline in the browser
 #   access_revoked             nothing now announces a revocation at all -- see the
@@ -117,8 +127,6 @@ SUBSCRIBER_TRANSFER_EXPIRED = "subscriber_transfer_expired"
 
 EVENTS = (
     TRIAL_ENDING,
-    TRIAL_EXPIRED,
-    RENEWAL_PAID,
     RENEWAL_FAILED,
     DUNNING_RETRY_FAILED,
     PAYMENT_RECOVERED,
@@ -128,45 +136,86 @@ EVENTS = (
     SUBSCRIBER_TRANSFER_EXPIRED,
 )
 
-#: The emails about a billing account's MONEY - charged, declined, declined again, settled.
-#: They go to the account's billing email when it has one (``address_for``).
-MONEY_EVENTS = frozenset(
-    {RENEWAL_PAID, RENEWAL_FAILED, DUNNING_RETRY_FAILED, PAYMENT_RECOVERED}
-)
+#: The emails about a billing account's MONEY - declined, declined again, settled. They go
+#: to the account's address when it has one (``address_for``, ``store.account_email``).
+MONEY_EVENTS = frozenset({RENEWAL_FAILED, DUNNING_RETRY_FAILED, PAYMENT_RECOVERED})
 
-# One template for everything except the receipt. ``renewal_paid`` is a document rather
-# than a notice — it has to itemise what was charged — and the redesigned notice template
-# is prose-only with nowhere to put a line-item table. Temporary: once the invoice-styled
-# mockup exists, that design absorbs the receipt and this mapping collapses back to one.
+# One template for every email. The receipt had its own - a document has to itemise and
+# this design is prose-only - and went with the receipt (2026-09-30).
 NOTICE_TEMPLATE = "email/subscription_notice.html"
-RECEIPT_TEMPLATE = "email/subscription_receipt.html"
-TEMPLATES = {RENEWAL_PAID: RECEIPT_TEMPLATE}
+
+#: The zone a company that has never set one is dated in (``entities.timezone`` is NULL on
+#: every row today): the one ``SUBSCRIPTION_SCHEDULER_TZ`` and Flask's ``models.db.tz``
+#: already assume.
+DEFAULT_TIMEZONE = "Asia/Hong_Kong"
 
 
 # --- Formatting helpers -------------------------------------------------------
 
 
-def money(amount_minor, currency: str | None) -> str:
-    """``28000, 'hkd'`` -> ``'HKD 280.00'``.
-
-    Currency is stated alongside the number rather than as a symbol: these emails reach
-    customers in several currencies and a bare ``$`` is ambiguous across most of them.
-    """
-    code = (currency or "").strip().upper()
-    return f"{code} {format_minor(amount_minor, currency)}".strip()
-
-
-def day(value) -> str:
+def day(value, zone=None) -> str:
     """A date a human reads without parsing: ``12 Mar 2026``. Empty when unknown.
 
-    The FORMAT is ``display.day`` -- email is prose, so the day is unpadded. What stays
-    here is the empty-string contract: these values go straight into email templates,
-    where ``None`` would render the word "None" into a sentence, so a missing date has to
-    come back as "" and the isinstance guard has to stay in front of it.
+    The FORMAT is ``display.day`` -- email is prose, so the day is unpadded. The DATE is
+    the one on the company's calendar (``zone``, from ``entity_zone``; the default zone
+    when not given): an instant late in a UTC day is already tomorrow in Hong Kong, and
+    the email has to name the day the customer would. What stays here is the empty-string
+    contract: these values go straight into email templates, where ``None`` would render
+    the word "None" into a sentence, so a missing date has to come back as "" and the
+    isinstance guard has to stay in front of it.
     """
     if not isinstance(value, datetime):
         return ""
-    return display.day(value) or ""
+    return display.day(in_zone(value, zone)) or ""
+
+
+_warned_zones: set[str] = set()
+
+
+def zone_named(name):
+    """The pytz zone ``name`` names, else ``DEFAULT_TIMEZONE``.
+
+    Blank means the company never set one. An unknown name is a data problem, not a reason
+    to drop the email: it is dated in the default, and said once per name so it gets fixed.
+    """
+    cleaned = (name or "").strip()
+    if cleaned:
+        try:
+            return pytz.timezone(cleaned)
+        except pytz.UnknownTimeZoneError:
+            if cleaned not in _warned_zones:
+                _warned_zones.add(cleaned)
+                logger.warning(
+                    "notify: unknown time zone {!r}; dating its emails in {}",
+                    cleaned, DEFAULT_TIMEZONE,
+                )
+    return pytz.timezone(DEFAULT_TIMEZONE)
+
+
+def entity_zone(entity_id):
+    """The zone a company's emails are dated in: its own, else ``DEFAULT_TIMEZONE``.
+
+    A failure to read it dates the email in the default rather than dropping it, logged.
+    """
+    name = None
+    if entity_id:
+        try:
+            from billing.services import store
+
+            name = store.entity_timezone(entity_id)
+        except Exception:
+            logger.exception("notify: could not read the time zone of company {}", entity_id)
+    return zone_named(name)
+
+
+def in_zone(value: datetime, zone=None) -> datetime:
+    """``value`` on the wall clock of ``zone`` (``DEFAULT_TIMEZONE`` when None).
+
+    A naive value is read as UTC, which is how the engine stores every instant.
+    """
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(zone or zone_named(None))
 
 
 def modules_phrase(codes) -> str:
@@ -372,22 +421,23 @@ def logo_bytes() -> bytes | None:
 # on file, and that difference is the entire value of the email.
 
 
-def _days_until(value) -> int | None:
+def _days_until(value, zone=None) -> int | None:
     """Whole days from today to ``value``, or None if it isn't a date.
 
     Calendar days, not elapsed hours: a trial ending tomorrow afternoon is "1 day", not
     "0 days" because it is 20 hours away. The heading is the first thing the customer
-    reads and it has to agree with how they would count it themselves.
+    reads and it has to agree with how they would count it themselves — so both days are
+    read on the company's calendar (``zone``), not on UTC's.
     """
     if not isinstance(value, (datetime, date)):
         return None
-    ends = value.date() if isinstance(value, datetime) else value
+    ends = in_zone(value, zone).date() if isinstance(value, datetime) else value
     # ``clock.now``, not ``date.today``. Everything else in the billing engine dates
     # itself from this clock, and the replay harness moves it — reading the process clock
     # here would make a scenario run months in the past render "Trial Ending today" on a
     # trial with three weeks left, and the email would disagree with the state that
     # produced it.
-    return (ends - clock.now().date()).days
+    return (ends - in_zone(clock.now(), zone).date()).days
 
 
 def _in_days(count: int | None) -> str:
@@ -436,8 +486,8 @@ def _trial_ending(ctx: dict) -> dict:
     why they were told to add a card they already have, this is the paragraph they needed.
     """
     entity = ctx.get("entity_name") or "your company"
-    ends = day(ctx.get("trial_end"))
-    left = _days_until(ctx.get("trial_end"))
+    ends = day(ctx.get("trial_end"), ctx.get("zone"))
+    left = _days_until(ctx.get("trial_end"), ctx.get("zone"))
     return {
         # The subject echoes the heading. A payer with several companies loses the
         # company name from their inbox list, which the amber line inside the email
@@ -452,46 +502,6 @@ def _trial_ending(ctx: dict) -> dict:
         ],
         "cta_label": "Go to Manage Subscription",
         "cta_url": settings_url(ctx.get("entity_id")),
-    }
-
-
-def _trial_expired(ctx: dict) -> dict:
-    entity = ctx.get("entity_name") or "your company"
-    mods = modules_phrase(ctx.get("codes") or [])
-    return {
-        "subject": "Your trial has ended",
-        "heading": "Your trial has ended",
-        "entity_name": entity,
-        "body": [
-            f"The free trial for {mods} has ended, and access has been switched off.",
-            "Your data is safe and unchanged. Subscribing restores access to everything "
-            "exactly as you left it.",
-        ],
-        "cta_label": "Go to Manage Subscription",
-        "cta_url": settings_url(ctx.get("entity_id")),
-    }
-
-
-def _renewal_paid(ctx: dict) -> dict:
-    """The receipt. The ONE email still rendering the pre-redesign template.
-
-    It is a document rather than a notice: the line items and the period are the point of
-    it, and the redesigned notice template is prose-only with nowhere to itemise. Keeps
-    ``tone``, ``facts`` and ``lines``, which every other builder has dropped - see
-    ``TEMPLATES``.
-    """
-    total = money(ctx.get("total"), ctx.get("currency"))
-    start, end = day(ctx.get("period_start")), day(ctx.get("period_end"))
-    return {
-        "tone": "neutral",
-        "subject": f"Your Minty receipt — {total}",
-        "heading": "Payment received",
-        "lede": f"Thanks — we've charged {total} for your Minty subscription.",
-        "facts": [("Amount", total), ("Period", f"{start} – {end}" if start else "")],
-        "lines": ctx.get("lines") or [],
-        "body": [],
-        "cta_label": "View billing",
-        "cta_url": base_url(),
     }
 
 
@@ -528,7 +538,7 @@ def _renewal_failed(ctx: dict) -> dict:
         # No entity line: a card belongs to the payer and may cover several companies, so
         # naming one of them would be arbitrary rather than merely redundant.
         "body": ["We could not process your latest subscription payment."]
-        + _payment_failed_body(day(ctx.get("deadline"))),
+        + _payment_failed_body(day(ctx.get("deadline"), ctx.get("zone"))),
         "cta_label": "Go to Manage Subscription",
         "cta_url": base_url(),
     }
@@ -539,7 +549,7 @@ def _dunning_retry_failed(ctx: dict) -> dict:
         "subject": "We couldn't process your payment",
         "heading": "We couldn't process your payment",
         "body": ["We still could not process your subscription payment."]
-        + _payment_failed_body(day(ctx.get("deadline"))),
+        + _payment_failed_body(day(ctx.get("deadline"), ctx.get("zone"))),
         "cta_label": "Go to Manage Subscription",
         "cta_url": base_url(),
     }
@@ -658,8 +668,6 @@ def _subscriber_transfer_expired(ctx: dict) -> dict:
 
 _COPY = {
     TRIAL_ENDING: _trial_ending,
-    TRIAL_EXPIRED: _trial_expired,
-    RENEWAL_PAID: _renewal_paid,
     RENEWAL_FAILED: _renewal_failed,
     DUNNING_RETRY_FAILED: _dunning_retry_failed,
     PAYMENT_RECOVERED: _payment_recovered,
@@ -808,42 +816,42 @@ def recipient_for(user_id) -> tuple[str | None, str]:
 
 
 def address_for(user_id, event: str, context: dict | None) -> tuple[str | None, str]:
-    """``(email, greeting)`` for ONE email - the only place ``notify`` asks who it goes to.
+    """``(email, first_name)`` for ONE email - the only place ``notify`` asks who it goes to.
 
-    The payer (``recipient_for``), except for a MONEY email about a billing account that
-    has a billing email: the receipt, the declines and the recovery go there. That address
-    is what a billing account's "Billing Email" is FOR - it is where the company wants its
-    invoices - and it is printed as the invoice's Bill to. Greeted by the account's company
-    name, since whoever reads a company's billing inbox need not be the payer; by the
-    payer's first name when the account names no company.
+    The payer (``recipient_for``), except where a company has said where its mail goes:
 
-    Only an account of THIS payer's counts, named by the email's own ``billing_group_id``;
-    anything else - no account, no billing email, somebody else's account - is the payer.
-    Trial and handover notices are about the person and always go to them.
+    * a MONEY email goes to its billing account's address - the billing email, else the
+      business email every company on the account shares (``store.account_email``: the
+      rule the invoice's Bill to follows too, so the inbox an email reaches is the one its
+      invoice names). Only an account of THIS payer's counts, named by the email's own
+      ``billing_group_id``; anything else - no account, no address, somebody else's
+      account - is the payer;
+    * the TRIAL ENDING warning goes to the company's business email (onboarding step 1).
+      A trial usually has no billing account yet, so there is no billing email to ask.
 
-    A failure to read the account falls back to the payer, logged: the notice still has
-    somewhere to go, and a missing receipt is worse than one at the login address.
+    Handover notices are about the person and always go to them.
+
+    ``first_name`` is the payer's whatever the address: the notice template draws no
+    greeting, so nothing turns it into one addressed to a company inbox.
+
+    A failure to read the account or the company falls back to the payer, logged: the
+    notice still has somewhere to go.
     """
     address, first_name = recipient_for(user_id)
-    group_id = (context or {}).get("billing_group_id")
-    if event not in MONEY_EVENTS or not group_id:
-        return address, first_name
+    context = context or {}
     try:
         from billing.services import store
 
-        group = store.billing_group(group_id)
+        if event in MONEY_EVENTS and context.get("billing_group_id"):
+            group = store.billing_group(context["billing_group_id"])
+            if group is None or str(group.payer_user_id) != str(user_id):
+                return address, first_name
+            return store.account_email(group) or address, first_name
+        if event == TRIAL_ENDING and context.get("entity_id"):
+            return store.business_email(context["entity_id"]) or address, first_name
     except Exception:
-        logger.exception(
-            "notify: could not read billing account {} for {}; mailing the payer",
-            group_id, event,
-        )
-        return address, first_name
-    if group is None or str(group.payer_user_id) != str(user_id):
-        return address, first_name
-    billing_email = (group.billing_email or "").strip()
-    if not billing_email:
-        return address, first_name
-    return billing_email, (group.billing_company or "").strip() or first_name
+        logger.exception("notify: could not read where {} should go; mailing the payer", event)
+    return address, first_name
 
 
 def _claim(user_id, event: str, dedupe_key: str):
@@ -911,13 +919,20 @@ def notify(user_id, event: str, *, dedupe_key: str, context: dict | None = None)
             logger.debug("notify: {} / {} already sent", event, dedupe_key)
             return False
 
-        content = builder(context or {})
+        # A copy, not the caller's dict: the billing jobs hand over their own result
+        # entries. The zone is the company's when the email is about one company. The
+        # account-level (money) emails carry no date today and get the default; if one
+        # ever does, the decided rule (2026-09-30) is the zone all the account's companies
+        # share, else the default - the same shape as ``store.shared_business_email``.
+        context = dict(context or {})
+        context["zone"] = entity_zone(context.get("entity_id"))
+        content = builder(context)
         logo = logo_bytes()
         # Resolved from the EVENT, not from anything the builder returns, so copy and art
         # cannot drift apart and no builder has to know a filename.
         art = image_bytes(*illustration_path(event))
         html = render_to_string(
-            TEMPLATES.get(event, NOTICE_TEMPLATE),
+            NOTICE_TEMPLATE,
             {
                 "first_name": first_name,
                 "base_url": base_url(),
