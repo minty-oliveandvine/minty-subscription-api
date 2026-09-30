@@ -89,6 +89,21 @@ def test_preflight_answers_without_a_token(client):
     assert response["Access-Control-Allow-Origin"] == ORIGIN
 
 
+@pytest.mark.parametrize("origin", ["http://localhost:3000", "http://localhost:5001"])
+def test_the_other_apps_with_the_sidebar_read_it_too(client, user, origin):
+    """billing-frontend (:3000) and Flask's own pages (:5001, ``MINTY_PUBLIC_URL``) carry the
+    sidebar since 2026-09-30, and its My Profile shows the Subscriptions Overview from this
+    list - read from the browser, so each origin is named."""
+    response = client.get(PORTAL, HTTP_ORIGIN=origin, **bearer(user))
+    assert response.status_code == 200
+    assert response["Access-Control-Allow-Origin"] == origin
+
+
+def test_a_stranger_origin_is_not_named(client, user):
+    response = client.get(PORTAL, HTTP_ORIGIN="http://evil.test", **bearer(user))
+    assert "Access-Control-Allow-Origin" not in response
+
+
 def test_a_payer_with_nothing_gets_the_empty_table_not_an_error(client, user):
     """No stub at all: the real read model over an empty database. An empty table is the
     honest answer for a person who pays for nothing, and it must be a 200 the page renders,

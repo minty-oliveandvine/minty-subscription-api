@@ -95,9 +95,25 @@ SUBSCRIPTION_SCHEDULER_TZ = os.environ.get("SUBSCRIPTION_SCHEDULER_TZ") or "Asia
 SUBSCRIPTION_SCHEDULER_FULL_HOUR = int(os.environ.get("SUBSCRIPTION_SCHEDULER_FULL_HOUR") or 5) % 24
 
 # ---------------------------------------------------------------------------
-# CORS - two browser apps call this API: minty-web (the payer portal and the module
-# settings page) and billing-frontend (the subscription notice on the payment module's
-# landing page). Flask and onboarding-backend call it server-side and need no CORS.
+# Cross-service: the Flask app. Identity and the company are Flask's until Part 3, so
+# the portal's invite-admin forwards there (core/flask_client.py - the only module that
+# calls Flask), and the links this service puts in emails point at minty-web via Flask's
+# login-gated re-handoff (``{FLASK_APP_URL}/handoff/minty-web?next=...``).
+# ---------------------------------------------------------------------------
+FLASK_APP_URL = os.environ.get("FLASK_APP_URL", "http://localhost:5001").rstrip("/")
+# The address a PERSON reaches Minty at - the links in emails (Flask's PUBLIC_URL). Distinct
+# from FLASK_APP_URL, which in the docker stack is the internal service name; defaults to it
+# so a single-host setup needs one variable.
+MINTY_PUBLIC_URL = os.environ.get("MINTY_PUBLIC_URL", FLASK_APP_URL).rstrip("/")
+FLASK_PROXY_TIMEOUT = int(os.environ.get("FLASK_PROXY_TIMEOUT", "20"))
+
+# ---------------------------------------------------------------------------
+# CORS - three browser apps call this API: minty-web (the payer portal and the module
+# settings page), and - since the sidebar with My Profile was copied into them on
+# 2026-09-30 - billing-frontend and Flask's own pages, whose My Profile shows the
+# Subscriptions Overview from ``/api/me/subscriptions``. Flask (``MINTY_PUBLIC_URL``, the
+# address a person's browser reaches it at) and onboarding-backend also call it server-side,
+# which needs no CORS.
 #
 # ``x-entity-id`` IS advertised, unlike onboarding-backend: the module settings page
 # reached from the portal carries an unscoped token and names the company in this header,
@@ -114,7 +130,7 @@ ONBOARDING_WEB_URL = os.environ.get("ONBOARDING_WEB_URL", "http://localhost:3001
 CORS_ALLOWED_ORIGINS = [
     origin.strip()
     for origin in os.environ.get(
-        "CORS_ALLOWED_ORIGINS", f"{MINTY_WEB_URL},{PAYMENTS_WEB_URL}"
+        "CORS_ALLOWED_ORIGINS", f"{MINTY_WEB_URL},{PAYMENTS_WEB_URL},{MINTY_PUBLIC_URL}"
     ).split(",")
     if origin.strip()
 ]
@@ -189,19 +205,6 @@ DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL") or os.environ.get(
     "SUBSCRIPTION_EMAIL", "noreply@example.com"
 )
 SUBSCRIPTION_EMAIL = os.environ.get("SUBSCRIPTION_EMAIL", DEFAULT_FROM_EMAIL)
-
-# ---------------------------------------------------------------------------
-# Cross-service: the Flask app. Identity and the company are Flask's until Part 3, so
-# the portal's invite-admin forwards there (core/flask_client.py - the only module that
-# calls Flask), and the links this service puts in emails point at minty-web via Flask's
-# login-gated re-handoff (``{FLASK_APP_URL}/handoff/minty-web?next=...``).
-# ---------------------------------------------------------------------------
-FLASK_APP_URL = os.environ.get("FLASK_APP_URL", "http://localhost:5001").rstrip("/")
-# The address a PERSON reaches Minty at - the links in emails (Flask's PUBLIC_URL). Distinct
-# from FLASK_APP_URL, which in the docker stack is the internal service name; defaults to it
-# so a single-host setup needs one variable.
-MINTY_PUBLIC_URL = os.environ.get("MINTY_PUBLIC_URL", FLASK_APP_URL).rstrip("/")
-FLASK_PROXY_TIMEOUT = int(os.environ.get("FLASK_PROXY_TIMEOUT", "20"))
 
 # ---------------------------------------------------------------------------
 # Logging - core + API formatters (same shape as the other two Django services so the
