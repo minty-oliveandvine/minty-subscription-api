@@ -386,9 +386,10 @@ def my_invoice_retry(request, invoice_id: str):
     (``billing_accounts.retry_invoice``). Answers ``{"ok", "status", "message"}`` in the words
     the module page's retry uses (``api._retry``): ``paid``, ``failed`` (with the processor's
     reason), ``no_card``, ``gave_up``, ``nothing_owed``, ``older_debt_only``,
-    ``not_this_invoice``, ``not_collectable``. An invoice the processor will no longer collect
-    is re-issued and the replacement charged in the same press; one that cannot be re-issued
-    automatically is ``not_collectable``. Someone else's invoice is 404; one not waiting for a
+    ``not_this_invoice``, ``not_collectable``, and ``unavailable`` when the processor failed
+    rather than the card (nothing charged, no attempt spent). An invoice the processor will no
+    longer collect is re-issued and the replacement charged in the same press; one that cannot
+    be re-issued automatically is ``not_collectable``. Someone else's invoice is 404; one not waiting for a
     payment, 409 (or ``not_this_invoice`` when it was re-issued since the page was drawn)."""
     from billing.api._retry import retry_answer
     from billing.services import billing_accounts

@@ -34,7 +34,12 @@ from datetime import UTC, datetime
 
 from billing.services._log import logger
 from billing.services.billing import Invoice
-from billing.services.stripe_client import STRIPE_API_VERSION, get_stripe, lacks_field
+from billing.services.stripe_client import (
+    STRIPE_API_VERSION,
+    get_stripe,
+    is_transient,
+    lacks_field,
+)
 
 
 class BillingError(Exception):
@@ -47,13 +52,28 @@ class BillingError(Exception):
     invoice, because dunning chases exactly that document; a declined conversion must
     withdraw its own, because nothing was granted. Only the caller knows which it is,
     which is why this is reported rather than acted on here.
+
+    ``retryable`` says the PROCESSOR (or our access to it) failed, not the card: an outage,
+    a timeout, a rate limit, our key, our own database refusing the reservation. Nothing is
+    known about whether the customer can pay, so a caller retries on the next pass rather
+    than treating it as a decline (``retryable``). ``claimed`` says the key is already
+    reserved - another attempt at the same charge is in flight or finished.
     """
 
     def __init__(self, message: str, *, user_message: str | None = None,
-                 invoice_id: str | None = None):
+                 invoice_id: str | None = None, retryable: bool = False,
+                 claimed: bool = False):
         super().__init__(message)
         self.user_message = user_message
         self.invoice_id = invoice_id
+        self.retryable = retryable
+        self.claimed = claimed
+
+
+def retryable(exc) -> bool:
+    """Whether ``exc`` - a ``BillingError`` or a raw processor error - is the processor
+    failing rather than the card being refused. The one test every caller asks."""
+    return bool(getattr(exc, "retryable", False)) or is_transient(exc)
 
 
 def find_invoice_by_metadata(customer_id: str, key: str, value: str, *,
@@ -122,8 +142,10 @@ def _reserve(customer_id, invoice: Invoice, lines, memo, idempotency_key,
                 "billing: could not reserve {} for customer {}; refusing to charge "
                 "without the guard", idempotency_key, customer_id,
             )
+            # Our database, not the customer's card: nothing was tried, so try again.
             raise BillingError(
-                f"could not reserve invoice {idempotency_key} for {customer_id}"
+                f"could not reserve invoice {idempotency_key} for {customer_id}",
+                retryable=True,
             ) from exc
         logger.exception(
             "billing: could not record the invoice for customer {}; charging anyway "
@@ -134,8 +156,10 @@ def _reserve(customer_id, invoice: Invoice, lines, memo, idempotency_key,
     if record is None and idempotency_key:
         # The unique index refused it: this period is already being, or has been,
         # invoiced. Charging now is the exact double-bill the table exists to prevent.
+        # Not a decline either: the other attempt decides what is owed.
         raise BillingError(
-            f"invoice {idempotency_key} is already claimed for {customer_id}"
+            f"invoice {idempotency_key} is already claimed for {customer_id}",
+            retryable=True, claimed=True,
         )
     return record
 
@@ -324,6 +348,24 @@ def _finalize(stripe, record, invoice_id: str) -> dict:
     return finalized
 
 
+def _paid_after_all(stripe, invoice_id: str) -> dict | None:
+    """Re-read an invoice whose ``pay`` just failed: the invoice if it is PAID after all, else
+    None (also when it cannot be read - the caller's own error then stands)."""
+    try:
+        again = stripe.Invoice.retrieve(invoice_id)
+    except Exception:
+        logger.warning("billing: could not re-read invoice {} after a failed payment",
+                       invoice_id)
+        return None
+    if again.get("status") != "paid":
+        return None
+    logger.warning(
+        "billing: paying invoice {} failed, but it is PAID - a lost reply or a payment made "
+        "elsewhere; recording it as paid", invoice_id,
+    )
+    return again
+
+
 def _collect(stripe, record, invoice_id: str, invoice: dict,
              payment_method: str | None = None) -> dict:
     """Charge ``invoice`` now if it is open, and record the outcome. A decline RAISES.
@@ -336,9 +378,18 @@ def _collect(stripe, record, invoice_id: str, invoice: dict,
         # A finalized invoice with charge_automatically is normally collected by Stripe, but
         # not synchronously - pay() makes the outcome available now, so a decline surfaces
         # to the caller instead of arriving by webhook later.
-        invoice = stripe.Invoice.pay(
-            invoice_id, **({"payment_method": payment_method} if payment_method else {})
-        )
+        try:
+            invoice = stripe.Invoice.pay(
+                invoice_id, **({"payment_method": payment_method} if payment_method else {})
+            )
+        except Exception:
+            # The money may have moved all the same: a reply lost on the way back, or a
+            # customer's Pay now that got there first ("already paid"). Reading that as a
+            # decline is how a caller that voids and retries charges twice.
+            paid = _paid_after_all(stripe, invoice_id)
+            if paid is None:
+                raise
+            invoice = paid
         _settle(record, **_record_of(invoice))
     # After the money has moved and been recorded, never before: this is history for the
     # invoice list and must not be able to affect the charge. See ``_capture_payment_method``.
@@ -401,13 +452,16 @@ def issue_invoice(customer_id: str, invoice: Invoice, *, memo: str | None = None
         billing_group_id,
     )
 
-    stripe = get_stripe()
     # Bound before the try so the failure path can name the document it left behind: a
     # decline raises from ``Invoice.pay`` with the invoice already finalized and open, while
     # a failure BEFORE finalizing leaves a draft that Stripe will never finalize on its own.
     draft = None
     finalized = None
     try:
+        # Inside the try: a missing key is our failure, and has to come out as a retryable
+        # ``BillingError`` like any other processor failure, not as a bare RuntimeError a
+        # caller would read as a decline.
+        stripe = get_stripe()
         options = {"idempotency_key": idempotency_key} if idempotency_key else {}
         # Omitted rather than passed as None: an explicit null would CLEAR the field, and
         # a caller that has no card to name wants Stripe's own resolution (the customer
@@ -464,6 +518,7 @@ def issue_invoice(customer_id: str, invoice: Invoice, *, memo: str | None = None
             f"could not issue invoice for {customer_id}",
             user_message=getattr(exc, "user_message", None),
             invoice_id=(draft or {}).get("id"),
+            retryable=retryable(exc),
         ) from exc
 
 
@@ -545,6 +600,46 @@ def refresh_record(record) -> str | None:
     return record_found_invoice(record, found)
 
 
+def recheck(record) -> dict | None:
+    """The processor's invoice for ``record`` as it is NOW - recorded, payment expanded.
+
+    For a caller about to CHARGE on the answer; ``refresh_record`` is for one that only reads,
+    and never raises. This one raises ``BillingError`` when the invoice cannot be read -
+    ``retryable`` when the processor failed - because acting on a guess is how an invoice is
+    paid twice, or never. None when the processor no longer has it at all: only a DRAFT can
+    be deleted, by hand in the Stripe dashboard.
+    """
+    try:
+        found = get_stripe().Invoice.retrieve(record.external_id, expand=["payment_intent"])
+    except Exception as exc:
+        if _gone(exc):
+            return None
+        logger.exception("billing: could not re-read invoice {}", record.external_id)
+        raise BillingError(
+            f"could not re-read invoice {record.external_id}",
+            invoice_id=record.external_id, retryable=retryable(exc),
+        ) from exc
+    record_found_invoice(record, found)
+    return found
+
+
+def declined(invoice) -> bool | None:
+    """Whether a charge on this OPEN invoice was tried and refused - from the processor's own
+    record, so it holds whatever a crash kept this process from writing down.
+
+    ``attempted`` is set once a payment has been tried, and the payment's
+    ``last_payment_error`` says what refused it (``payment_intent`` expanded, as ``recheck``
+    reads it). None when the answer lacks those fields - logged by ``_api_changed`` - and the
+    caller then neither charges nor mails: a guess either way is wrong somebody's money.
+    """
+    if _api_changed(invoice, "attempted") or _api_changed(invoice, "payment_intent"):
+        return None
+    intent = invoice.get("payment_intent")
+    if isinstance(intent, dict) and intent.get("last_payment_error"):
+        return True
+    return bool(invoice.get("attempted"))
+
+
 def _gone(exc) -> bool:
     """Whether a processor error says the object does not exist - a draft deleted by hand."""
     return (getattr(exc, "http_status", None) == 404
@@ -576,13 +671,16 @@ def _same_charge(item) -> tuple:
             period.get("start"), period.get("end"))
 
 
-def resume_invoice(record, payment_method: str | None = None) -> dict | None:
-    """Finish an invoice ``issue_invoice`` started and never saw finalized. Renewals only.
+def resume_invoice(record, payment_method: str | None = None, *,
+                   where: str = "renewal") -> dict | None:
+    """Finish an invoice ``issue_invoice`` started and never charged. Renewals and handovers.
 
-    ONLY for a row that still says "draft". ``issue_invoice`` records the finalize (open)
-    BEFORE it asks for payment, so a row still saying "draft" is proof it never charged;
-    and with ``auto_advance=False`` Stripe cannot have charged it either. So whatever state
-    the processor holds, finishing the job cannot take the money twice:
+    For a row that still says "draft", or one that is OPEN and was never tried (the caller
+    has asked ``declined``). ``issue_invoice`` records the finalize (open) BEFORE it asks for
+    payment, so a row still saying "draft" is proof it never charged; and with
+    ``auto_advance=False`` Stripe cannot have charged it either. So whatever state the
+    processor holds, finishing the job cannot take the money twice - and an open invoice
+    cannot be paid twice by Stripe itself:
 
     * a DRAFT gets the items it is missing, and only those, then is finalized and charged -
       but only if what is on it is exactly what was reserved (``store.invoice_lines``, the
@@ -620,6 +718,7 @@ def resume_invoice(record, payment_method: str | None = None) -> dict | None:
             f"could not finish invoice {invoice_id}",
             user_message=getattr(exc, "user_message", None),
             invoice_id=invoice_id,
+            retryable=retryable(exc),
         )
 
     try:
@@ -628,7 +727,7 @@ def resume_invoice(record, payment_method: str | None = None) -> dict | None:
         # Only THIS read may mean "deleted": a missing card on ``pay`` is also a
         # resource_missing, and is a failed charge, not a vanished invoice.
         if _gone(exc):
-            stranded_draft(invoice_id, key, "renewal", GONE)
+            stranded_draft(invoice_id, key, where, GONE)
             return None
         raise failed(exc) from exc
     try:
@@ -636,7 +735,7 @@ def resume_invoice(record, payment_method: str | None = None) -> dict | None:
         if status in ("void", "uncollectible"):
             record_found_invoice(record, found)
             logger.warning(
-                "billing: invoice {} ({}) was left a draft, then made {} at Stripe by hand; "
+                "billing: invoice {} ({}) was left unfinished, then made {} at Stripe by hand; "
                 "not billing it", invoice_id, key, status,
             )
             return None
@@ -653,7 +752,7 @@ def resume_invoice(record, payment_method: str | None = None) -> dict | None:
             wanted = Counter(_same_charge(item) for item in sent)
             on_it = Counter(_same_charge(item) for item in _items_of(stripe, invoice_id))
             if not sent or on_it - wanted:
-                stranded_draft(invoice_id, key, "renewal", MISMATCHED)
+                stranded_draft(invoice_id, key, where, MISMATCHED)
                 return None
             missing = wanted - on_it
             # In reverse, as ``issue_invoice`` creates them (Stripe lists newest first).
@@ -664,7 +763,7 @@ def resume_invoice(record, payment_method: str | None = None) -> dict | None:
             now_on_it = _items_of(stripe, invoice_id)
             total = int(stripe.Invoice.retrieve(invoice_id).get("total") or 0)
             if len(now_on_it) != len(sent) or total != int(record.total or 0):
-                stranded_draft(invoice_id, key, "renewal", MISMATCHED)
+                stranded_draft(invoice_id, key, where, MISMATCHED)
                 return None
             found = _finalize(stripe, record, invoice_id)
         else:
@@ -673,7 +772,7 @@ def resume_invoice(record, payment_method: str | None = None) -> dict | None:
     except Exception as exc:
         raise failed(exc) from exc
     logger.info(
-        "billing: finished invoice {} ({}), left a draft by an earlier attempt: now {}",
+        "billing: finished invoice {} ({}), left unfinished by an earlier attempt: now {}",
         invoice_id, key, result.get("status"),
     )
     return result
@@ -683,6 +782,11 @@ def resume_invoice(record, payment_method: str | None = None) -> dict | None:
 #: marker for ``dunning``, which re-issues the invoice (``refresh_invoice``) and charges the
 #: replacement instead. Never a message - nothing a customer reads may carry it.
 DEAD_PAYMENT = "payment_intent_canceled"
+
+#: What ``retry_invoice`` reports when the PROCESSOR failed (an outage, a timeout, our key)
+#: rather than the card: a marker for ``dunning``, which spends no attempt on it and mails
+#: nothing, because nothing is known about the card. Never a message either.
+UNAVAILABLE = "processor_unavailable"
 
 #: The metadata a replacement carries naming the invoice it replaces.
 REPLACES = "replaces"
@@ -705,19 +809,20 @@ def _payment_is_dead(invoice) -> bool:
     return isinstance(intent, dict) and intent.get("status") == "canceled"
 
 
-def _died(invoice_id: str) -> bool:
-    """Re-read after a failed pay: did THAT call cancel the payment? Never raises.
+def _after_failed_retry(invoice_id: str) -> dict | None:
+    """Re-read after a failed pay, payment expanded - or None when it cannot be read. Never
+    raises.
 
-    The call that crosses the processor's limit is the one that cancels - and it fails with an
-    invalid-request error, not a decline - so the invoice's STATE decides, not the error.
+    The invoice's STATE decides what the failure was, not the error. The call that crosses the
+    processor's confirmation limit is the one that cancels the payment, and it fails with an
+    invalid-request error, not a decline; and a reply lost on the way back can leave an invoice
+    PAID behind an exception.
     """
     try:
-        return _payment_is_dead(
-            get_stripe().Invoice.retrieve(invoice_id, expand=["payment_intent"])
-        )
+        return get_stripe().Invoice.retrieve(invoice_id, expand=["payment_intent"])
     except Exception:
         logger.warning("dunning: could not re-check invoice {} after a failed retry", invoice_id)
-        return False
+        return None
 
 
 def retry_invoice(invoice_id: str,
@@ -748,9 +853,13 @@ def retry_invoice(invoice_id: str,
     Whatever the outcome, the local record is brought up to date. A recovered invoice
     that still reads "open" months later would make the table lie about the one thing it
     is for — a declined renewal is precisely the case someone asks "was I charged?" of.
+
+    ``(False, UNAVAILABLE)`` is the processor failing, not the card: nothing is known about
+    the customer's card, so the caller spends no attempt on it and tells nobody. And an
+    invoice found PAID after a failed call - a reply lost on the way back - is paid.
     """
-    stripe = get_stripe()
     try:
+        stripe = get_stripe()
         invoice = stripe.Invoice.retrieve(invoice_id, expand=["payment_intent"])
         if invoice.get("status") == "paid":
             record = _local(invoice_id)
@@ -779,8 +888,25 @@ def retry_invoice(invoice_id: str,
     except Exception as exc:
         reason = getattr(exc, "user_message", None) or str(exc)
         logger.info("dunning: retry of invoice {} failed: {}", invoice_id, reason)
-        if _died(invoice_id):
+        after = _after_failed_retry(invoice_id)
+        if after is not None and after.get("status") == "paid":
+            logger.warning(
+                "dunning: the retry of invoice {} failed, but it is PAID - a lost reply or a "
+                "payment made elsewhere; recording it as paid", invoice_id,
+            )
+            record = _local(invoice_id)
+            _settle(record, **_record_of(after))
+            _capture_payment_method(record, invoice_id)
+            return True, None
+        if after is not None and _payment_is_dead(after):
             return False, DEAD_PAYMENT
+        if retryable(exc):
+            logger.error(
+                "dunning: could not retry invoice {} - the payment processor failed, not the "
+                "card ({}); nothing is counted, and the next attempt tries again",
+                invoice_id, reason,
+            )
+            return False, UNAVAILABLE
         return False, reason
 
 
@@ -798,7 +924,7 @@ def open_invoices(customer_id: str) -> list[dict]:
     return sorted(listing.auto_paging_iter(), key=lambda i: i.get("created") or 0)
 
 
-def void_invoice(invoice_id: str) -> None:
+def void_invoice(invoice_id: str) -> str:
     """Void a finalized invoice, or delete it if still a draft. Mirrors it locally.
 
     Finalized invoices cannot be deleted — only voided — and neither their lines nor
@@ -813,14 +939,34 @@ def void_invoice(invoice_id: str) -> None:
     The row is kept rather than deleted. ``discard_invoice`` exists for a reservation the
     processor never saw; this one WAS raised, and may well have been seen by the customer
     before it was withdrawn. That is history, not a mistake to erase.
+
+    Returns what became of it: ``"deleted"`` (a draft), ``"voided"``, or ``"paid"`` - an
+    invoice that turns out to have been PAID cannot be withdrawn, and is recorded as paid
+    instead. That is the lost reply: the charge went through, the answer never arrived, and
+    the caller took the exception for a decline. Told "paid", it grants what was bought
+    rather than refusing it and charging again on the next attempt.
     """
     stripe = get_stripe()
     invoice = stripe.Invoice.retrieve(invoice_id)
-    if invoice.get("status") == "draft":
-        stripe.Invoice.delete(invoice_id)
-    else:
-        stripe.Invoice.void_invoice(invoice_id)
+    status = invoice.get("status")
+    if status == "paid":
+        record_found_invoice(_local(invoice_id), invoice)
+        return "paid"
+    if status != "void":
+        try:
+            if status == "draft":
+                stripe.Invoice.delete(invoice_id)
+            else:
+                stripe.Invoice.void_invoice(invoice_id)
+        except Exception:
+            # Paid between the read and the void - or paid all along, behind a stale read.
+            paid = _paid_after_all(stripe, invoice_id)
+            if paid is None:
+                raise
+            record_found_invoice(_local(invoice_id), paid)
+            return "paid"
     _settle(_local(invoice_id), status="void")
+    return "deleted" if status == "draft" else "voided"
 
 
 def _items_of(stripe, invoice_id: str) -> list:

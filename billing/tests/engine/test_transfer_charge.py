@@ -256,15 +256,107 @@ def test_a_failed_charge_reports_no_cycle(monkeypatch):
     assert result["anchor"] is None
 
 
-def test_an_established_payer_s_cycle_is_never_advanced(monkeypatch):
-    """``paid_through`` is the ACCOUNT's marker. Moving it for one entity's charge
-    announces that every other entity on the account is settled too, silently cancelling
-    their renewal."""
-    checkout, calls = _wire(monkeypatch)
+class _DatedGroup(_Group):
+    """A card that has collected before: it already has a cycle."""
+
+    def __init__(self):
+        super().__init__()
+        self.paid_through = datetime(2027, 9, 1, tzinfo=UTC)
+
+
+def test_an_established_card_s_cycle_is_never_advanced(monkeypatch):
+    """``paid_through`` is the CARD's marker. Moving it for one entity's charge announces
+    that every other entity on the card is settled too, silently cancelling their renewal.
+
+    (This test used to hand in a card with NO date and assert nothing was written - pinning
+    the bug below as if it were the rule.)"""
+    checkout, calls = _wire(monkeypatch, group=_DatedGroup())
 
     _charge(checkout)
 
     assert calls["paid_through"] == []
+
+
+def test_an_anchored_payer_s_never_charged_card_gets_its_cycle(monkeypatch):
+    """A payer already paying on another card takes the company onto a card that has never
+    collected. Judged on the payer, that was "not a first charge" - and the card was left with
+    no date: never renewed, and read as no access at all."""
+    checkout, calls = _wire(monkeypatch, group=_Group())
+
+    result = _charge(checkout)
+
+    assert result["paid"] is True
+    assert calls["paid_through"] == [("new-payer", PERIOD_END)]
+
+
+def test_a_retried_first_charge_still_starts_the_card_s_cycle(monkeypatch):
+    """The first attempt declined AFTER writing the anchor (it is written before the charge),
+    so the retry no longer looks like a payer's first charge. The card still has no date."""
+    from billing.services import store
+
+    checkout, calls = _wire(monkeypatch, anchor=None, raises=RuntimeError("declined"))
+    assert _charge(checkout)["paid"] is False
+    assert calls["paid_through"] == []
+
+    # The anchor the failed attempt committed, and a card that works now.
+    monkeypatch.setattr(store, "billing_cycle_for_user", lambda uid: (AT, "HKD"))
+    checkout, calls = _wire(monkeypatch, anchor=AT, group=_Group())
+    result = _charge(checkout)
+
+    assert result["paid"] is True
+    assert calls["paid_through"] == [("new-payer", result["period_end"])]
+
+
+def test_a_zero_total_handover_starts_the_card_s_cycle(monkeypatch):
+    """Nothing to collect is still a settled window - and a card with no date is never renewed
+    and grants no access."""
+    from billing.services.billing import Period
+
+    checkout, calls = _wire(monkeypatch, group=_Group())
+    monkeypatch.setattr(
+        checkout, "_transfer_invoice",
+        lambda eid, anchor, codes, at: (None, Period(ANCHOR.replace(month=9), PERIOD_END)),
+    )
+
+    result = _charge(checkout)
+
+    assert result["paid"] is True and result["invoice_id"] is None
+    assert calls["paid_through"] == [("new-payer", PERIOD_END)]
+
+
+def test_a_handover_whose_answer_was_lost_is_paid(monkeypatch):
+    """The void finds the invoice PAID: the charge went through, the answer did not. Reported
+    as a decline, the recipient accepted again - under a fresh key - and paid twice."""
+    from billing.services import checkout as checkout_mod
+    from billing.services.billing_gateway import BillingError
+
+    checkout, calls = _wire(
+        monkeypatch, group=_Group(),
+        raises=BillingError("no answer from the processor", invoice_id="in_lost"),
+    )
+    monkeypatch.setattr(checkout_mod, "_void_unpaid_invoice", lambda inv, eid, what: "paid")
+
+    result = _charge(checkout)
+
+    assert result["paid"] is True
+    assert result["invoice_id"] == "in_lost"
+    assert calls["paid_through"] == [("new-payer", PERIOD_END)]
+
+
+def test_an_adopted_handover_charge_starts_the_card_s_cycle(monkeypatch):
+    """An earlier attempt was paid and died before recording it: adopted, not charged again -
+    and the card it paid on still gets its date."""
+    from types import SimpleNamespace
+
+    from billing.services import store
+
+    checkout, calls = _wire(monkeypatch, existing="paid", group=_Group())
+    monkeypatch.setattr(store, "invoice_for_key", lambda key: SimpleNamespace(external_id="in_0"))
+
+    result = _charge(checkout)
+
+    assert result["paid"] is True and calls["issued"] == []
+    assert calls["paid_through"] == [("new-payer", PERIOD_END)]
 
 
 # --- the quote and the charge agree ----------------------------------------------
@@ -294,3 +386,41 @@ def test_quoting_an_unanchored_payer_writes_nothing(monkeypatch):
     assert quote["anchor_is_new"] is True
     assert quote["anchor_at"] == AT
     assert calls["anchored"] == []
+
+
+def test_the_deferred_collection_withdraws_nothing_on_a_decline(monkeypatch):
+    """``keep_open``: the collection's decline stays OPEN for dunning to chase, like a renewal's
+    (the user's call, 2026-09-30) - voided, dunning found nothing open and called it settled."""
+    from billing.services.billing_gateway import BillingError
+
+    checkout, calls = _wire(monkeypatch, group=_Group(),
+                            raises=BillingError("Your card was declined.", invoice_id="in_1"))
+
+    result = _charge(checkout, keep_open=True)
+
+    assert calls["voided"] == []
+    assert (result["paid"], result["declined"], result["transient"]) == (False, True, False)
+    assert result["invoice_id"] == "in_1"
+
+
+def test_the_deferred_collection_withdraws_nothing_on_an_outage(monkeypatch):
+    from billing.services.billing_gateway import BillingError
+
+    checkout, calls = _wire(monkeypatch, group=_Group(),
+                            raises=BillingError("could not connect", retryable=True))
+
+    result = _charge(checkout, keep_open=True)
+
+    assert calls["voided"] == []
+    assert (result["declined"], result["transient"]) == (False, True)
+
+
+def test_the_accept_still_withdraws_a_declined_charge(monkeypatch):
+    """The recipient is at the screen, sees the decline, and accepts again."""
+    from billing.services.billing_gateway import BillingError
+
+    checkout, calls = _wire(monkeypatch, group=_Group(),
+                            raises=BillingError("Your card was declined.", invoice_id="in_1"))
+
+    assert _charge(checkout)["paid"] is False
+    assert calls["voided"] == ["in_1"]

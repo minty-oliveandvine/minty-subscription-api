@@ -647,7 +647,7 @@ def _wire_reinstate(monkeypatch, checkout, *, billed_codes, paid=True, group=_GR
     def _issue(cid, eid, nm, before, after, period, at, **kw):
         charged.append(
             {"before": set(before), "after": set(after), "at": at, "period": period,
-             "group": kw.get("group")}
+             "group": kw.get("group"), "attempts_of": kw.get("attempts_of")}
         )
         if raises is not None:
             raise raises
@@ -795,6 +795,75 @@ def test_a_card_declined_while_reinstating_voids_the_invoice_it_left_open(monkey
     assert exc.value.status == 402
     assert voided == ["in_declined"]
     assert calls["rows"] == []          # still cancelled
+
+
+def test_each_press_to_restore_is_a_new_attempt(monkeypatch):
+    """The key is stable - the company, the day its access ends, the modules - and a declined
+    attempt keeps it claimed, so without attempts every retry was refused unseen
+    (``test_change_attempts`` pins the numbering)."""
+    checkout, _calls = _reinstatable(monkeypatch)
+    charged = _wire_reinstate(monkeypatch, checkout, billed_codes={"PAYMENT_REQUEST", "PETTY_CASH"})
+
+    checkout.reactivate_module(_FakeEntity(), _FakeUser(), "PETTY_CASH")
+
+    assert charged[0]["attempts_of"] is not None
+
+
+def test_a_second_press_while_the_first_is_charging_is_told_so(monkeypatch):
+    """Both presses reach for the same attempt's key; the second is refused by the unique index.
+    That is not a declined card, and "check your payment method" sent people to fix one."""
+    from billing.services.billing_gateway import BillingError
+
+    checkout, calls = _reinstatable(monkeypatch)
+    voided = _capture_voids(monkeypatch)
+    _wire_reinstate(
+        monkeypatch, checkout, billed_codes={"PAYMENT_REQUEST", "PETTY_CASH"},
+        raises=BillingError("already claimed", retryable=True, claimed=True),
+    )
+
+    with pytest.raises(checkout.CheckoutError) as exc:
+        checkout.reactivate_module(_FakeEntity(), _FakeUser(), "PETTY_CASH")
+
+    assert exc.value.status == 409
+    assert voided == [] and calls["rows"] == []
+
+
+def test_a_processor_outage_while_restoring_is_not_a_declined_card(monkeypatch):
+    from billing.services.billing_gateway import BillingError
+
+    checkout, calls = _reinstatable(monkeypatch)
+    _capture_voids(monkeypatch)
+    _wire_reinstate(
+        monkeypatch, checkout, billed_codes={"PAYMENT_REQUEST", "PETTY_CASH"},
+        raises=BillingError("could not connect", retryable=True),
+    )
+
+    with pytest.raises(checkout.CheckoutError) as exc:
+        checkout.reactivate_module(_FakeEntity(), _FakeUser(), "PETTY_CASH")
+
+    assert exc.value.status == 503
+    assert "payment method" not in exc.value.message
+    assert calls["rows"] == []
+
+
+def test_a_reinstatement_whose_answer_was_lost_restores_the_module(monkeypatch):
+    """The void finds the invoice PAID - the charge went through and its answer was lost. It
+    was paid for, so the module comes back; refused, the customer paid and got nothing, and
+    their retry charged them again."""
+    from billing.services import billing_gateway
+    from billing.services.billing_gateway import BillingError
+
+    checkout, calls = _reinstatable(monkeypatch)
+    monkeypatch.setattr(billing_gateway, "void_invoice", lambda iid: "paid")
+    _wire_reinstate(
+        monkeypatch, checkout, billed_codes={"PAYMENT_REQUEST", "PETTY_CASH"},
+        raises=BillingError("no answer from the processor", invoice_id="in_lost"),
+    )
+
+    checkout.reactivate_module(_FakeEntity(), _FakeUser(), "PETTY_CASH")
+
+    code, fields = calls["rows"][-1]
+    assert (code, fields["phase"]) == ("PETTY_CASH", "active")
 
 
 def test_a_reinstatement_whose_void_fails_is_still_refused(monkeypatch):

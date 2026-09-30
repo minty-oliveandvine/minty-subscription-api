@@ -25,6 +25,12 @@ RETRY_MESSAGES = {
         "That invoice can't be retried from here any more. Refresh the page to see what's "
         "outstanding now."
     ),
+    # The payment PROCESSOR failed, not the card: not a decline (no "check your card"), and
+    # nothing was charged.
+    "unavailable": (
+        "We couldn't reach the payment provider. Nothing was charged — please try again "
+        "shortly."
+    ),
 }
 
 

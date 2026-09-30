@@ -47,7 +47,10 @@ def app():
 @pytest.fixture(autouse=True)
 def _no_stripe(monkeypatch):
     """No router test reaches Stripe; an unstubbed ``get_stripe()`` fails loudly."""
-    from billing.services import stripe_client
+    # ``billing_gateway`` too, before anything is patched: it binds ``get_stripe`` by name on
+    # first import, and a first import under a test's fake kept that fake for the rest of the
+    # run (see the engine conftest's ``_no_stripe``).
+    from billing.services import billing_gateway, stripe_client  # noqa: F401
 
     def _refuse():
         raise AssertionError("a test reached stripe_client.get_stripe(); stub it")

@@ -254,3 +254,38 @@ def test_the_closing_window_is_wide_enough_for_a_missed_pass(app, monkeypatch):
     )
     assert card["trial_closing"] is True
     assert card["trial_expired"] is False
+
+
+
+class _PastDueRow(_PaidRow):
+    phase = "past_due"
+
+
+def test_a_card_held_in_a_silent_grace_does_not_say_payment_failed(app, monkeypatch):
+    """Past due because the PROCESSOR failed: the card was never asked and nobody was told
+    (the user's rule, 2026-09-30) - so the card does not say the payment failed either."""
+    from types import SimpleNamespace
+
+    from billing.services import store
+
+    behind = datetime.now(UTC) - timedelta(days=2)
+    silent = SimpleNamespace(dunning_started_at=None, paid_through=behind)
+    monkeypatch.setattr(store, "billing_group_for_entity", lambda eid, uid=None: silent)
+
+    card = _card(app, monkeypatch, paid_through=behind, row=_PastDueRow(), has_access=True)
+
+    assert card["subscription_status"] == "active"
+
+
+def test_a_card_whose_customer_was_told_says_past_due(app, monkeypatch):
+    from types import SimpleNamespace
+
+    from billing.services import store
+
+    behind = datetime.now(UTC) - timedelta(days=2)
+    told = SimpleNamespace(dunning_started_at=behind, paid_through=behind)
+    monkeypatch.setattr(store, "billing_group_for_entity", lambda eid, uid=None: told)
+
+    card = _card(app, monkeypatch, paid_through=behind, row=_PastDueRow(), has_access=True)
+
+    assert card["subscription_status"] == "past_due"

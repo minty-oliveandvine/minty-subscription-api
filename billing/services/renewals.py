@@ -19,7 +19,7 @@ TWO RULES THAT DECIDE THE AMOUNT, both already proven elsewhere:
 """
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from billing.services import access, store
 from billing.services._log import logger
@@ -169,8 +169,13 @@ def billable_codes_by_entity(
     deliberately no fallback to the account default — see ``store.card_for_entity`` — so
     the alternative to skipping it is charging a card the payer never chose for it.
     """
+    # A company handed over with its first charge PARKED is billed by the handover's own
+    # collection, not here (``store.entities_awaiting_handover``) - and it is never "covered
+    # past", so leaving it off cannot advance the card either.
     already = (
-        entities_billed_in(user_id, period) | entities_covered_into(user_id, period)
+        entities_billed_in(user_id, period)
+        | entities_covered_into(user_id, period)
+        | store.entities_awaiting_handover(user_id, period)
         if period is not None
         else set()
     )
@@ -559,7 +564,11 @@ def run_renewals(now: datetime, *, scope, issue: bool = False,
        nothing ever notices;
     4. on failure start dunning FOR THIS CARD, which is what turns a declined renewal into
        the retry schedule rather than a silent lapse — and confines it to the companies
-       that card actually pays for.
+       that card actually pays for;
+    5. unless the PROCESSOR failed rather than the card (an outage, a timeout, our key):
+       then nothing is known about whether the customer can pay, so nobody is told and
+       dunning is not started - the companies keep their grace, and the next pass tries
+       again (the user's rule, 2026-09-30).
     """
     planned: list[dict] = []
     issued: list[dict] = []
@@ -574,18 +583,39 @@ def run_renewals(now: datetime, *, scope, issue: bool = False,
     ]
 
     for account, group, paid_through in candidates[: limit or None]:
-        _out = _renew_one_group(account, group, paid_through, now, issue)
+        try:
+            _out = _renew_one_group(account, group, paid_through, now, issue)
+        except Exception:
+            # One card never stops the pass: every card after it would go unbilled, and -
+            # while mail waited for the end of the batch - every card before it unmailed.
+            _out = _renewal_crashed(account, group, now, issue)
         planned.extend(_out["planned"])
         issued.extend(_out["issued"])
         failed.extend(_out["failed"])
         skipped.extend(_out["skipped"])
-
-    # Emails go out only after the whole batch has been billed and committed. Sending
-    # inside the loop would put SMTP latency between two payers' charges, and would tell
-    # a customer about a charge that a later exception could still roll back.
-    _notify_renewals(failed)
+        # Mailed per card, the moment its outcome is recorded - never batched to the end.
+        # Every write commits as it happens, so there is nothing left to roll back, and a
+        # batch held in memory was lost whole to one exception or one restart.
+        _notify_renewals(_out["failed"])
 
     return {"planned": planned, "issued": issued, "failed": failed, "skipped": skipped}
+
+
+def _renewal_crashed(account, group, now, issue) -> dict[str, list]:
+    """What a card whose renewal RAISED comes to: nothing charged (a charge's own failure is
+    handled inside ``_renew_one_group``), so it is retried on the next pass - and held in its
+    grace meanwhile, or the sweep would switch its companies off for our error."""
+    logger.exception(
+        "renewal: could not bill payer {} on group {}; the next pass tries again",
+        account.user_id, group.id,
+    )
+    out: dict[str, list] = {"planned": [], "issued": [], "failed": [], "skipped": []}
+    store.recover_after_error()
+    if issue:
+        _hold_grace(group, now)
+    out["skipped"].append({"user_id": account.user_id, "billing_group_id": group.id,
+                           "reason": "could not be billed; retrying next pass"})
+    return out
 
 
 def _notify_renewals(failed: list[dict]) -> None:
@@ -638,8 +668,6 @@ def _renew_one_group(account, group, paid_through, now, issue) -> dict[str, list
     ``continue`` in the loop this came from meant "done with this card", which is a
     ``return`` now the body is a function.
     """
-    from billing.services import billing_gateway
-
     out: dict[str, list] = {"planned": [], "issued": [], "failed": [], "skipped": []}
     user_id = account.user_id
     period = next_period(account.anchor_at, paid_through)
@@ -679,6 +707,7 @@ def _renew_one_group(account, group, paid_through, now, issue) -> dict[str, list
             or (entities_covered_past(user_id, period) & in_group)
         ):
             store.set_group_paid_through(group.id, period.end)
+            store.release_group_grace(group.id, now)
             out["skipped"].append({**entry, "reason": "already covered this period"})
         else:
             out["skipped"].append({**entry, "reason": "nothing billable"})
@@ -701,67 +730,187 @@ def _renew_one_group(account, group, paid_through, now, issue) -> dict[str, list
         for row in store.pending_extensions_for_payer(user_id)
         if str(row.entity_id) in riding
     ]
+    # TWO STEPS, each with its own failure. The first charges (or finds the charge already
+    # made); the second records it. A write that failed AFTER the money moved used to land in
+    # the charge's own except - so a paid customer was put into dunning and sent "We couldn't
+    # process your payment", and then "Thank you for your payment" when dunning found nothing
+    # to collect.
     try:
-        status = None
-        record = store.invoice_for_key(key)
-        if not _own_draft(record):
-            status = _already_invoiced(account.stripe_customer_id, key, record=record)
-            # A draft found by its metadata just now: the crash came before its id was
-            # recorded. The same case as below, one step earlier.
-            record = store.invoice_for_key(key) if status == "draft" else None
-        if _own_draft(record):
-            # Our own ``issue_invoice`` started this period's invoice and never saw it
-            # finalized - an error or a crash between creating it and finalizing it. Left
-            # alone it is never billed: dunning chases only open invoices, and every pass
-            # would skip the period as already invoiced. So it is FINISHED, on this card's
-            # current card; ``billing_gateway.resume_invoice`` says why that cannot charge
-            # twice, and refuses (loudly) whatever it cannot vouch for.
-            entry = _as_reserved(entry, record)
-            result = billing_gateway.resume_invoice(
-                record, payment_method=group.stripe_payment_method_id
+        result, how = _charge_period(out, account, group, period, key, invoice, entry,
+                                     extension_ids, now)
+    except Exception as exc:
+        _charge_failed(out, group, key, entry, now, exc)
+        return out
+    if result is not None:
+        _record_charge(out, group, period, entry, extension_ids, result, how, now)
+    return out
+
+
+def _charge_period(out, account, group, period, key, invoice, entry, extension_ids, now):
+    """Charge THIS card for its period - or find the charge already made. Step one of
+    ``_renew_one_group``.
+
+    Returns ``(invoice, how)`` for ``_record_charge`` - ``how`` is ``"charged"`` or
+    ``"adopted"`` (raised on an earlier run and found paid) - or ``(None, None)`` when there
+    is nothing to record, the reason already in ``out``. RAISES when the charge failed: a
+    decline, or the processor (``_charge_failed`` tells them apart).
+
+    The period's invoice decides, and a row that can still move is ASKED about before
+    anything acts on it (``billing_gateway.recheck``): there is no webhook, so our row says
+    only what the process that wrote it last saw.
+    """
+    from billing.services import billing_gateway
+
+    record = store.invoice_for_key(key)
+    status = record.status if record is not None else None
+    if record is not None and not record.external_id:
+        # Claimed, and nothing came back: only the processor knows whether it exists.
+        # ``_already_invoiced`` asks, records what it finds, discards what it does not.
+        status = _already_invoiced(account.stripe_customer_id, key, record=record)
+        record = store.invoice_for_key(key) if status is not None else None
+    if record is None:
+        return billing_gateway.issue_invoice(
+            account.stripe_customer_id,
+            invoice,
+            # Counted off the invoice itself rather than off the rows, so the memo
+            # describes what is actually being charged. An extension is called out
+            # because it is the one line on a renewal nobody is expecting.
+            memo=renewal_memo(
+                period,
+                len(invoice.entity_ids),
+                sum(1 for line in invoice.lines
+                    if "access after cancellation" in line.product_name),
+            ),
+            # ``billing_group`` travels with the document so dunning can pick this
+            # one out of the payer's other open invoices later — a question that did
+            # not exist while a payer had one invoice per period.
+            metadata={"renewal_key": key, "billing_group": str(group.id)},
+            idempotency_key=key,
+            # Known here, so the gateway doesn't have to look up the payer the
+            # customer id came from in the first place.
+            payer_user_id=account.user_id,
+            # THE CARD. Set on the invoice rather than by moving the customer
+            # default, which would repoint every other company of this payer mid-run.
+            payment_method=group.stripe_payment_method_id,
+            billing_group_id=group.id,
+        ), "charged"
+
+    found = None
+    if status in ("draft", "open"):
+        found = billing_gateway.recheck(record)
+        if found is None:
+            # Deleted at the processor by hand - only a draft can be. Nothing collects it.
+            billing_gateway.stranded_draft(
+                record.external_id, key, "renewal", billing_gateway.GONE
             )
-            if result is None:
-                out["skipped"].append({**entry, "reason": "left a draft; not finished"})
-                return out
-        elif status is not None:
-            # Charged on a previous run that failed to record it. Catching up costs
-            # nothing; re-issuing would bill the customer twice for one month.
-            # The extensions rode THAT invoice; leaving them pending would put them on
-            # the next one too. True whether or not it has been PAID yet — an unpaid
-            # one is being chased by dunning with those lines still on it.
-            store.mark_extensions_invoiced(extension_ids)
-            if status == "paid":
-                store.set_group_paid_through(group.id, period.end)
-                out["skipped"].append({**entry, "reason": "already invoiced; adopted"})
-            else:
-                out["skipped"].append({**entry, "reason": "already invoiced; unpaid"})
-            return out
-        else:
-            result = billing_gateway.issue_invoice(
-                account.stripe_customer_id,
-                invoice,
-                # Counted off the invoice itself rather than off the rows, so the memo
-                # describes what is actually being charged. An extension is called out
-                # because it is the one line on a renewal nobody is expecting.
-                memo=renewal_memo(
-                    period,
-                    len(invoice.entity_ids),
-                    sum(1 for line in invoice.lines
-                        if "access after cancellation" in line.product_name),
-                ),
-                # ``billing_group`` travels with the document so dunning can pick this
-                # one out of the payer's other open invoices later — a question that did
-                # not exist while a payer had one invoice per period.
-                metadata={"renewal_key": key, "billing_group": str(group.id)},
-                idempotency_key=key,
-                # Known here, so the gateway doesn't have to look up the payer the
-                # customer id came from in the first place.
-                payer_user_id=user_id,
-                # THE CARD. Set on the invoice rather than by moving the customer
-                # default, which would repoint every other company of this payer mid-run.
-                payment_method=group.stripe_payment_method_id,
-                billing_group_id=group.id,
-            )
+            out["skipped"].append({**entry, "reason": "left a draft; not finished"})
+            return None, None
+        status = found.get("status")
+
+    if status == "draft":
+        # Our own ``issue_invoice`` started this period's invoice and never saw it
+        # finalized - an error or a crash between creating it and finalizing it. Left
+        # alone it is never billed: dunning chases only open invoices, and every pass
+        # would skip the period as already invoiced. So it is FINISHED, on this card's
+        # current card; ``billing_gateway.resume_invoice`` says why that cannot charge
+        # twice, and refuses (loudly) whatever it cannot vouch for.
+        entry.update(_as_reserved(entry, record))
+        result = billing_gateway.resume_invoice(
+            record, payment_method=group.stripe_payment_method_id
+        )
+        if result is None:
+            out["skipped"].append({**entry, "reason": "left a draft; not finished"})
+            return None, None
+        return result, "charged"
+    if status == "open":
+        return _open_invoice(out, group, record, found, key, entry, extension_ids, now)
+    if status == "paid":
+        # Charged on a previous run that failed to record it. Catching up costs
+        # nothing; re-issuing would bill the customer twice for one month.
+        return found or {"id": record.external_id, "status": "paid"}, "adopted"
+    # Void or uncollectible: dealt with on purpose, and not billed again. The extensions
+    # rode it all the same.
+    _mark_ridden(extension_ids)
+    out["skipped"].append({**entry, "reason": "already invoiced; unpaid"})
+    return None, None
+
+
+def _open_invoice(out, group, record, found, key, entry, extension_ids, now):
+    """This period's invoice is OPEN at the processor: charge it if nothing ever did,
+    otherwise leave it where it belongs and say why in ``out``. Returns what
+    ``_charge_period`` returns.
+
+    The processor's own record says whether a charge was ever tried
+    (``billing_gateway.declined``), which is what tells the cases apart:
+
+    * NEVER TRIED - a crash between recording it open and charging it, or the processor
+      failing before the charge reached it (the silent grace). Nothing else will ever charge
+      it: dunning never started, so dunning never looks. It is charged now on the card's
+      current card (the user's call, 2026-09-30) - unless dunning already owns it, or the
+      card's collection is over, which a person has to resolve;
+    * TRIED AND REFUSED - dunning's to chase. But the customer must have been told: a decline
+      whose dunning never started (a crash just after it) is started now, and a notice that
+      never went out (mail down, a restart) is sent now - once, by its period key.
+    """
+    from billing.services import billing_gateway, dunning, notify, policy
+
+    tried = billing_gateway.declined(found)
+    over = dunning.collection_over(group, now, policy.current().past_due_window_days)
+    if tried is None:
+        logger.error(
+            "renewal: cannot tell whether invoice {} ({}) was ever charged; leaving it for a "
+            "person", record.external_id, key,
+        )
+    elif over and not tried:
+        logger.error(
+            "renewal: invoice {} ({}) was NEVER CHARGED, and this card's access has run out - "
+            "resolve it by hand", record.external_id, key,
+        )
+    elif tried and not over:
+        if group.dunning_started_at is None:
+            try:
+                store.begin_group_dunning(group.id, now)
+            except Exception:
+                logger.exception("renewal: could not start dunning for group {}", group.id)
+        if not notify.already_sent(notify.RENEWAL_FAILED, key):
+            _mark_ridden(extension_ids)
+            entry.update(_as_reserved(entry, record))
+            out["failed"].append({**entry, "invoice": record.external_id, "status": "open"})
+            return None, None
+    elif not tried and group.dunning_started_at is None:
+        logger.warning(
+            "renewal: invoice {} ({}) is open and was never charged; charging it now",
+            record.external_id, key,
+        )
+        entry.update(_as_reserved(entry, record))
+        return billing_gateway.resume_invoice(
+            record, payment_method=group.stripe_payment_method_id
+        ), "charged"
+    # Left as it is. It still carries this period's extensions.
+    _mark_ridden(extension_ids)
+    out["skipped"].append({**entry, "reason": "already invoiced; unpaid"})
+    return None, None
+
+
+def _mark_ridden(extension_ids) -> None:
+    """Close out the extensions an invoice ALREADY RAISED carries. Never raises: they are
+    marked again by the next pass that meets the invoice."""
+    try:
+        store.mark_extensions_invoiced(extension_ids)
+    except Exception:
+        logger.exception("renewal: could not close out extensions {}", extension_ids)
+
+
+def _record_charge(out, group, period, entry, extension_ids, result, how, now) -> None:
+    """Step two: record what the charge came to. Its own failures are only logged - the
+    money has moved, and the next pass finds the paid invoice by its key and adopts it.
+    Never a decline, and never mail."""
+    paid = result.get("status") == "paid"
+    if how == "adopted":
+        out["skipped"].append({**entry, "reason": "already invoiced; adopted"})
+    elif paid:
+        out["issued"].append({**entry, "invoice": result.get("id")})
+    try:
         # Closed out because the invoice CARRYING them was raised — not because it
         # was paid. An unpaid renewal is not a dropped charge: the invoice exists and
         # dunning chases that same document, extension lines and all. Marking only on
@@ -773,38 +922,88 @@ def _renew_one_group(account, group, paid_through, now, issue) -> dict[str, list
         # the extension is closed without being collected — but there is no next
         # renewal on a closed account to collect it on either, so nothing is actually
         # lost, and the alternative overcharges every customer who does recover.
-        # Skipped entirely when issuing raised, because then no invoice exists.
-        if result.get("id"):
+        if result.get("id") or how == "adopted":
             store.mark_extensions_invoiced(extension_ids)
-        if result.get("status") == "paid":
+        if paid:
             store.set_group_paid_through(group.id, period.end)
-            out["issued"].append({**entry, "invoice": result.get("id")})
-        else:
-            # THIS CARD only. The payer's other cards have their own periods and
-            # their own companies, and a decline here says nothing about them.
-            store.begin_group_dunning(group.id, now)
-            out["failed"].append({**entry, "invoice": result.get("id"),
-                           "status": result.get("status")})
-    except Exception as exc:
+            # Back out of a SILENT grace, if the processor had failed on an earlier pass.
+            store.release_group_grace(group.id, now)
+    except Exception:
         logger.exception(
-            "renewal: failed to bill payer {} on group {}", user_id, group.id
+            "renewal: invoice {} on group {} is {}, but recording it failed; the next pass "
+            "adopts it by its key", result.get("id"), group.id, result.get("status"),
         )
-        # Named when it was left a draft: nothing but the next pass will ever finalize it,
-        # and it is the one document an operator needs to find.
-        try:
-            left = store.invoice_for_key(key)
-            if _own_draft(left):
-                billing_gateway.stranded_draft(
-                    left.external_id, key, "renewal", billing_gateway.RESUMED
-                )
-        except Exception:
-            logger.exception("renewal: could not check what {} left behind", key)
-        try:
-            store.begin_group_dunning(group.id, now)
-        except Exception:
-            logger.exception(
-                "renewal: could not start dunning for group {}", group.id
+    if paid:
+        return
+    # An unpaid ANSWER rather than a raised decline: the card is failing all the same.
+    # THIS CARD only. The payer's other cards have their own periods and their own
+    # companies, and a decline here says nothing about them.
+    try:
+        store.begin_group_dunning(group.id, now)
+    except Exception:
+        logger.exception("renewal: could not start dunning for group {}", group.id)
+    out["failed"].append({**entry, "invoice": result.get("id"),
+                          "status": result.get("status")})
+
+
+def _charge_failed(out, group, key, entry, now, exc) -> None:
+    """The charge RAISED. A decline starts dunning for this card, and its notice goes out; the
+    PROCESSOR failing does neither (``_hold_for_the_processor``)."""
+    from billing.services import billing_gateway
+
+    logger.exception(
+        "renewal: failed to bill payer {} on group {}", entry["user_id"], group.id
+    )
+    # Named when it was left a draft: nothing but the next pass will ever finalize it,
+    # and it is the one document an operator needs to find.
+    try:
+        left = store.invoice_for_key(key)
+        if _own_draft(left):
+            billing_gateway.stranded_draft(
+                left.external_id, key, "renewal", billing_gateway.RESUMED
             )
-        out["failed"].append({**entry, "status": "error",
-                              "invoice": getattr(exc, "invoice_id", None)})
-    return out
+    except Exception:
+        logger.exception("renewal: could not check what {} left behind", key)
+    if billing_gateway.retryable(exc):
+        _hold_for_the_processor(out, group, entry, now)
+        return
+    try:
+        store.begin_group_dunning(group.id, now)
+    except Exception:
+        logger.exception(
+            "renewal: could not start dunning for group {}", group.id
+        )
+    out["failed"].append({**entry, "status": "error",
+                          "invoice": getattr(exc, "invoice_id", None)})
+
+
+def _hold_for_the_processor(out, group, entry, now) -> None:
+    """The PROCESSOR failed, not the card - an outage, a timeout, our key. The user's rule
+    (2026-09-30): retry on the next pass. Nothing is known about whether this customer can
+    pay, so nobody is told and dunning is not started; the companies keep their past-due
+    grace meanwhile (``store.hold_group_grace``), or the sweep would switch them off for our
+    outage. The ERROR above fires on every pass it lasts; with three days of grace left it
+    turns CRITICAL, because the grace ending is the one thing that would reach the customer.
+    """
+    _hold_grace(group, now)
+    out["skipped"].append({**entry, "reason": "processor unavailable; retrying next pass"})
+
+
+def _hold_grace(group, now) -> None:
+    """Hold THIS card in its past-due grace without dunning (``store.hold_group_grace``), and
+    turn CRITICAL once three days of it are left - the grace ending is the one thing that
+    would reach the customer, and every pass before it has only logged. Never raises."""
+    from billing.services import policy
+
+    try:
+        store.hold_group_grace(group.id, now)
+    except Exception:
+        logger.exception("renewal: could not hold the grace for group {}", group.id)
+    if group.paid_through is not None:
+        ends = group.paid_through + timedelta(days=policy.current().past_due_window_days)
+        if ends - now <= timedelta(days=3):
+            logger.critical(
+                "renewal: group {} has not been billed for days - the payment processor, or "
+                "our own error; its grace ends {} and nothing has been collected",
+                group.id, ends,
+            )

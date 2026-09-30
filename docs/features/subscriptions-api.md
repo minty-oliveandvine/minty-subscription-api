@@ -2,10 +2,11 @@
 
 The subscription engine and its API, moved out of the Flask app in Part 2 of
 `Minty/docs/modernisation/modernisation_plan.md`. This page is the map of the service as it
-stands (**step 1: every route exists and answers `501 not_implemented`**) and of what each later
-step fills in. Minty's `docs/features/modules-and-subscriptions.md` describes the Flask original,
-which this is a 1:1 port of; when a rule there and here disagree, the Flask page is the spec
-until step 2 lands and this page becomes it.
+stands, route by route, and - since step 2 landed (2026-09-21) - the spec of its rules. It began
+as a 1:1 port of the Flask original (Minty's `docs/features/modules-and-subscriptions.md`).
+Since 2026-09-30 the two differ: that day's billing fixes (§6) are in this service only,
+because Flask's subscription engine is to be deleted (the user's decision), so where the Flask
+page and this one disagree, this one is right.
 
 ## 1. What a person gets
 
@@ -48,7 +49,7 @@ already done, 5xx upstream. `billing/tests/test_contract.py` pins every table be
 | POST | `/subscriptions/transfer/cancel` | `my_transfer_cancel_api` | withdraw an offer |
 | GET | `/subscriptions/transfers` | `my_transfers_api` | offers made TO me |
 | GET | `/invoices/{invoice_id}/breakdown` | — (**new**, 2026-09-25) | 08-B's "Billing Breakdown · Download csv": ONE invoice, company by company - a row per line it charged (the subscription, the monthly rate that line was priced at, the days it paid for, what was charged; a credit negative, a zero line left out). The days and rate are the ones the line RECORDED when it was issued (`subscription_invoice_line.period_start` / `period_end` / `unit_amount`, schema item 23, same day - written by whatever priced it: a renewal is the whole period at its plan's price; a mid-period start or upgrade, and the credit for the plan it replaced, run from the change to the period's end; a cancellation extension runs from the paid-through date to its access end at the rate the cancellation priced it at - the marginal step for a module leaving a bundle). An extension priced at two rates recorded none: its row shows the rate its days add up to. A line issued BEFORE then is read back from how its kind is priced (`portal.build_invoice_breakdown`) - an extension's end from the module's `app_access_until` while the row still holds it, left out (null) once a resume has cleared it, never guessed. Someone else's invoice, or a malformed id, is 404; the web writes the CSV |
-| POST | `/invoices/{invoice_id}/retry` | — (**new**, 2026-09-28) | 08-B's *Retry payment* on a declined invoice's row (08-K): collect THIS invoice now, on its account's card (`billing_accounts.retry_invoice` → `dunning.retry_now(group_id=…, expect_invoice=…)` - the engine's own manual collection: the same attempt budget and give-up deadline as the scheduled retries, the period settled and access switched back on when paid). Pinned from the row: the CARD (the invoice's account; the payer's oldest for one from before accounts) and the INVOICE (charged only if it is the one the engine's rules pick - else `not_this_invoice`, nothing charged, no attempt spent). Refused before the engine unless the list marks it `retryable`. Answers `{ok, status, message}` in the module page's own words (`api/_retry.py`, shared with `retry-payment`): `paid`, `failed` (the processor's reason), `no_card`, `gave_up`, `nothing_owed`, `older_debt_only`, `not_this_invoice`, `not_collectable` (the processor will no longer collect it and it could not be re-issued automatically - nothing charged; §6). An invoice Stripe will no longer collect is RE-ISSUED and the replacement charged in the same press (§6). Someone else's invoice or a malformed id is 404; one not waiting for a payment is 409 - or `not_this_invoice` when it was re-issued since the page was drawn; a processor failure is 502 |
+| POST | `/invoices/{invoice_id}/retry` | — (**new**, 2026-09-28) | 08-B's *Retry payment* on a declined invoice's row (08-K): collect THIS invoice now, on its account's card (`billing_accounts.retry_invoice` → `dunning.retry_now(group_id=…, expect_invoice=…)` - the engine's own manual collection: the same attempt budget and give-up deadline as the scheduled retries, the period settled and access switched back on when paid). Pinned from the row: the CARD (the invoice's account; the payer's oldest for one from before accounts) and the INVOICE (charged only if it is the one the engine's rules pick - else `not_this_invoice`, nothing charged, no attempt spent). Refused before the engine unless the list marks it `retryable`. Answers `{ok, status, message}` in the module page's own words (`api/_retry.py`, shared with `retry-payment`): `paid`, `failed` (the processor's reason), `no_card`, `gave_up`, `nothing_owed`, `older_debt_only`, `not_this_invoice`, `not_collectable` (the processor will no longer collect it and it could not be re-issued automatically - nothing charged; §6), `unavailable` (2026-09-30: the payment processor itself failed - nothing charged, no attempt spent; §6). An invoice Stripe will no longer collect is RE-ISSUED and the replacement charged in the same press (§6). Someone else's invoice or a malformed id is 404; one not waiting for a payment is 409 - or `not_this_invoice` when it was re-issued since the page was drawn; a processor failure is 502 |
 | GET | `/invoices/{invoice_id}/pdf` | — (**new**, 2026-09-29) | 08-B's "Invoice PDF" download, and since 2026-09-30 its view-only Inv# preview (minty-web fetches the bytes and draws them with pdf.js, so the `attachment` header below does not apply to it): the invoice drawn as Figma 09-A (`invoice_document.build_invoice_document` → `invoice_pdf.render_invoice_pdf`; fpdf2, Inter embedded, Noto Sans HK loaded only for a document with Chinese in it), NOT Stripe's hosted page - Stripe's PDF cannot be restyled, and its Bill to is the Stripe customer (one per payer). **Bill to = the invoice's billing account** as 08-B prints it (`account_name`, `store.account_email` - the billing email, else the business email every company on the account shares - else the payer's, the charged card's address laid out as the web's `addressLines`), read LIVE - a rename reaches old invoices; an invoice from before accounts is the payer's oldest account's (`portal.invoice_account_id`, the list's and dunning's rule). **Lines**: 09-A's plan lines ("Petty cash module only", "Payment request module only", "SuperMinty"), each with its companies listed under it, one row per Stripe item in Stripe's own words (`billing.line_description`) minus the plan the heading names. The lines must add up to `total` or nothing is served (500, ERROR logged); a character no font can draw is logged at ERROR with the invoice. `application/pdf`, `Content-Disposition: attachment; filename="Inv-<ref>.pdf"`, `Cache-Control: private, no-store`. 404 not the caller's (or a malformed id); 409 no document - never sent, a draft, void (`has_pdf` false); 502 the address could not be read from the processor |
 | GET | `/invoices` | `my_invoices_api` | my invoices, newest first; `entity`, `page`, `per_page`, and **`account`** (added 2026-09-25) — ONE billing account's invoices for 08-B; a pre-accounts invoice (no `billing_group_id`) belongs to the payer's OLDEST account, the attribution dunning already collects by; someone else's account matches nothing. Echoes `account_id`. Each row carries **`retryable`** (2026-09-28): whether *Retry payment* would charge it now - per card, the ONE open invoice `dunning.retry_now` picks (`portal.retryable_invoice_ids`, calling `dunning._manual_target` over our own rows: the current period's renewal, else an open mid-period charge, never an abandoned give-up bill), and nothing on a card past its give-up deadline or whose access has run out - with or without a dunning stamp, since giving up leaves `paid_through` where it stopped. Judged over ALL the payer's failed invoices, before the `account` / `entity` narrowing (narrowed first, a company's own charge could be offered while the engine would collect the renewal), from the rows the list already read; a list with nothing failed reads nothing more. No Stripe call, no writes. And **`has_pdf`** (2026-09-29): whether `/invoices/{id}/pdf` has a document to serve - sent to the processor and paid, open or uncollectible (`portal.has_document`, the same rule the route's 409 asks, so the button never refuses). `hosted_invoice_url` is still answered, but minty-web no longer links it |
 | GET | `/billing/payment-methods` | `my_payment_methods_api` | my saved cards and the default |
@@ -92,7 +93,12 @@ Actions (`billing/api/modules.py::ACTIONS`): `checkout`, `authorize-billing`, `p
 `restart-quote`, `restart-billing`, `confirm-billing`, `checkout-complete`, `start-trial`,
 `resume-preview`, `subscribe-preview`, `cancel-preview`, `retry-payment`, `cancel`,
 `payment-method`, `renew`, `manage-billing`. Reading needs `MODULE_VIEW`, acting needs
-`MODULE_MANAGE` **and** the payer rule (`store.may_manage_subscription`).
+`MODULE_MANAGE` **and** the payer rule (`store.may_manage_subscription`). `retry-payment`
+answers in `api/_retry.py`'s words, `unavailable` included. `renew` - undoing a cancellation
+whose extension was already invoiced charges the rest of the period - is 402 only for a real
+decline; 409 "This module is already being restored. Refresh the page in a moment." while
+another press's charge is in flight, and 503 "We couldn't reach the payment provider. Nothing
+was charged - please try again shortly." when the processor failed (both 2026-09-30, §6).
 
 **Live since step 3 slice B (2026-09-21)** — `billing/api/modules.py`. The gate is one function
 every request runs through (`_gate`): the path's company must be the one the token was checked
@@ -257,6 +263,14 @@ request scope itself (`billing.services._context.scope()` — what Flask's `app.
 gave the timer: the clock, policy, catalog and default-card memos) and calls
 `close_old_connections()` either side of the pass.
 
+**What the jobs answer since 2026-09-30 (this service only; §6).** `close-trials` has a fourth
+bucket, `deferred`: a conversion the payment processor failed to make, kept in its trial and
+tried again next pass. `collect-transfers` no longer re-charges a declined handover every hour -
+it is chased like a renewal decline, by dunning. `run-renewals` and `retry-dunning` mail each
+card the moment its outcome is recorded, and a card that raises is logged, held in its grace and
+skipped ("could not be billed; retrying next pass") instead of ending the pass; a processor
+failure skips the card as "processor unavailable; retrying next pass", with no email.
+
 `manage.py subscriptions <job>`, the port of `flask subscriptions` (ASCII output, every job
 inside a scope): `tick` (what a cron will call — full at the full hour, light otherwise),
 `run-daily --mode full|light [--issue] [--days-before N]`, `close-trials [--limit N]`,
@@ -400,7 +414,8 @@ the one HTTP call). Now:
   and keeps the episode open — no recovery, no email, no attempt counted; the deadline still
   closes it. Only the CURRENT period's row counts, so a draft some abandoned purchase left can
   never hold a card in dunning. Pay now (`_retry_context`) answers `nothing_owed` as before but
-  no longer closes the episode.
+  no longer closes the episode. Widened the same day to any missing or unconfirmed invoice
+  ("Settled needs evidence", below).
 Pinned by `engine/test_invoice_resume.py` (14, on the real store with the refresh tests' fake
 processor, which now keeps a draft's total live and answers 404 for a deleted invoice), the
 resume and stranded-draft cases in `engine/test_renewal_runner.py`, three in
@@ -445,6 +460,164 @@ cancelled company's extension as kind `full` too, so a card renewing only to col
 company's extension read "Renewal · Petty Cash". A renewal now needs a whole-period line that is
 not an extension; one carrying an extension is still a renewal. Headline only — the emails, the
 PDF and the CSV never read it.
+
+**The billing fixes of 2026-09-30 — this service only.** Six failures found while fixing the
+stranded drafts (above), fixed with the user's decisions of that day; a review of the fixes found
+five defects in them, fixed the same day and folded in below. Flask's engine is to be deleted
+(the user's decision), so none of this was carried back: from here the two engines differ on
+these paths.
+
+**The processor failing is not the card declining (the user's rule: "retry next hour").** Every
+failure used to read as a decline: a Stripe outage, a timeout, a rate limit or our own key
+expired a trial at its end, and told a renewing customer "We couldn't process your payment".
+`stripe_client.is_transient(exc)` names the processor's failures (`APIConnectionError`,
+`APIError`, `RateLimitError`, `AuthenticationError`, `PermissionError`, `IdempotencyError`, and
+`StripeNotConfigured`, which `get_stripe` now raises — inside `issue_invoice`'s try, so it is a
+`BillingError` like any other); `billing_gateway.retryable(exc)` answers for a raw error or a
+`BillingError` (`.retryable`, `.claimed`). A card error, an invalid request and anything
+unrecognised — our own bugs included — stay declines: the conservative reading, and what every
+path was written for.
+- **Renewal** — a retryable failure holds a SILENT grace (`store.hold_group_grace`: the card's
+  rows go past due with NO dunning stamp), sends nothing, starts no dunning, and is logged at
+  ERROR every pass — CRITICAL with three days of grace left (`renewals._hold_grace`, which a
+  card whose renewal RAISED gets too: the processor, or our own error). The next paid, adopted
+  or covered outcome ends it (`store.release_group_grace`). Down for the whole grace, access
+  lapses as after any grace.
+- **A dunning stamp now means exactly "the customer was told".** `dunning.customer_told` (a
+  stamp, or collection over) and its per-company form `dunning.told_of_failure(entity_id, now)`
+  (unknown is told) are the one rule the banner (`notices`), the module cards'
+  `subscription_status`, the subscriptions list (`portal._module_state(told=)`) and the
+  accounts' `past_due` ask: a silent grace shows as active, never as a failed payment.
+- **Dunning and Pay now** — `retry_invoice` answers `(False, UNAVAILABLE)`, a marker like
+  `DEAD_PAYMENT`: the attempt is given back (`store.refund_group_dunning_attempt`), nothing is
+  mailed, and Pay now answers its own status, `unavailable` ("We couldn't reach the payment
+  provider. Nothing was charged — please try again shortly." — `api/_retry.py`), never "that
+  card was declined". A `refresh_invoice` that raises on the processor counts the same.
+- **Trial end** — a retryable failure raises `checkout.ChargeDeferred`: nothing is withdrawn,
+  the trial stays in `trial` and keeps its access (`access_sweep._conversion_pending` leaves a
+  trial past its end on for up to the grace), and the next pass tries again; past the grace
+  window it expires as a decline would (ERROR). `convert_or_expire_due_trials` reports these
+  under `deferred`. Each attempt takes a fresh `convert-<entity>-<when>-<codes>` key
+  (`changes.change_key(kind="convert")`), and before a new one
+  `checkout._resolve_prior_conversions` settles the earlier attempts of THIS close-out — those
+  whose WHEN (read off the key: the app's clock, the one `trial_end` is on, in whole seconds, so
+  an attempt in the second the trial ended counts) is not before the trial's end. PAID is
+  adopted, never charged again — unless its period has ENDED by now: it paid for that period,
+  and adopted, the company entered the new one marked as billed and its renewal skipped it (a
+  free month). OPEN and never tried is charged on the current card; OPEN and refused is
+  withdrawn and the trial expires; a DRAFT is withdrawn; one paid for a different module set
+  waits for a person (ERROR). The processor unreadable defers again.
+
+**A charge whose answer was lost is a charge.** When Stripe took the money but the reply never
+arrived, the attempt read as a decline: a buy or a handover was refused and charged again on the
+retry (a fresh key), a trial conversion expired paid. Now `billing_gateway._collect` re-reads the
+invoice after a failed `pay` and records it PAID when it is; `retry_invoice` does the same (and
+still spots a cancelled payment, `DEAD_PAYMENT`); and `void_invoice` answers
+`"paid" | "voided" | "deleted"` — a paid invoice cannot be withdrawn and is recorded paid.
+`checkout._void_unpaid_invoice` passes the answer on, and conversion, buy, handover and
+reinstatement GRANT what was paid for (WARNING: "lost reply"). Wherever a reservation is
+recognised by its metadata, the row is read again after `record_found_invoice`: the store
+settles a FRESH copy, so the old object still had no id, and the re-check after it asked Stripe
+for invoice None and read the refusal as a decline (`changes._next_attempt`,
+`checkout._resolve_prior_conversions`, `transfers._settle_last_attempt`).
+
+**A paid charge is never reported as a decline.** The renewal's post-charge writes (extensions,
+the card's date) sat in the charge's own try: one failing put a PAID card into dunning, sent "We
+couldn't process your payment", then "Thank you for your payment". `renewals._renew_one_group` is
+two steps now — `_charge_period` (resolve, issue, resume or charge; its failure is a decline or a
+processor failure, `_charge_failed`) and `_record_charge` (its own try; a failure is an ERROR and
+the next pass adopts the paid invoice by its key). Dunning marks a paid retry `_paid` the moment
+the money moves — never mailed as "failed again" — and records the recovery in its own try,
+counting it `recovered` (the "Thank you") only once the episode has actually ended. Before GIVING
+UP it re-reads the current period's invoice (`_paid_at_the_deadline`) and asks whether the card
+is paid up (`_paid_up`: `paid_through` past now and no handover's first charge owed — the renewal
+pass adopted a payment and moved it on, so a re-read by the period it WAS behind on finds
+nothing): either is recovered, not closed. Pay now at the deadline makes the same check
+(`_retry_context`: `nothing_owed`, the episode ended active), and answers `paid` whatever becomes
+of recording it (it used to be a 500).
+
+**Settled needs evidence.** "Nothing open for the card" ended dunning as recovered — "Thank you
+for your payment", companies back on — for any failure that left no open invoice.
+`dunning._nothing_open_but_owed(account, group, now)` now calls a card still BEHIND
+(`paid_through` not past `now`) owed unless its current period's invoice exists and was paid,
+voided or written off: missing, never confirmed at Stripe, a draft (STRANDED DRAFT) or still open
+after a failed re-read is owed — no recovery, no email, no attempt. A handover's first charge
+still due (`store.handover_owed`) is owed too.
+
+**An open renewal nobody charged is charged (the user's call).** A crash between recording the
+invoice open and calling `pay` left it open, never tried, with dunning never started — so dunning
+never looked, every pass skipped it "already invoiced; unpaid", and the companies went dark at
+the next sweep (an active row gets no grace). `renewals._open_invoice` asks Stripe's own record
+(`billing_gateway.recheck` + `declined`: `attempted` and the payment's `last_payment_error` —
+checked in Stripe test mode: false and none before `pay`, true and `card_declined` after a
+decline): NEVER TRIED, no dunning running and collection not over → charged now on the account's
+current card (`resume_invoice`, which also takes an open row now); TRIED AND REFUSED → dunning's,
+but a decline whose dunning never started (a crash just after it) is started, and a decline
+notice that never went out (mail down, a restart) is sent — once, by its period key
+(`notify.already_sent`); collection over → left, with an ERROR if it was never charged; unknown
+→ left, ERROR.
+
+**Mail per card.** Renewals and dunning mailed after the whole batch, so an exception or a
+restart lost every notice before it — for good. Both now mail each card as soon as its outcome
+is recorded (`notify`'s rule 3, rewritten). `run_renewals` also catches a card that raises:
+logged, held in its grace (`_hold_grace`), "could not be billed; retrying next pass", and the
+pass goes on.
+
+**A declined reinstatement can be retried.** Its key (`change-<entity>-<covered_to>-<codes>`)
+never changed between presses, and the declined attempt's voided invoice kept it claimed: every
+retry was refused — 402 "check your payment method", the card never tried — until the
+cancellation window ran out. `changes.issue_change(attempts_of=payer)` now raises each press
+under the next attempt's key (`<key>~2`, `~3`: `~`, because `dunning._names_period` reads `-` as
+the same period, and never a refresh's retired `~in_…`), settling the latest attempt first
+(`changes._next_attempt`): paid → adopted, open → withdrawn, draft → deleted. A reservation
+Stripe cannot show yet is another press's charge IN FLIGHT for its first ten minutes
+(`changes.IN_FLIGHT`) and is refused as claimed — discarded, the next attempt charged the
+customer twice the moment the first landed; after that it is looked up, and discarded only if it
+never reached Stripe. A new attempt never reuses a key (Stripe replays a keyed error for 24
+hours). A press racing another answers 409, the processor failing 503, and only a real decline
+402 (§2). Jammed rows heal themselves: their key is void, so the next press is `~2`.
+
+**A handover onto a card that has never collected.** `_bill_transfer_in_house` set the card's
+`paid_through` only on the PAYER's first charge — so a retried first charge (the anchor is
+written before the charge), an already-paying payer's new card, a zero-total or an adopted charge
+left the card with no date: never renewed, and read as no access at all.
+`checkout._establish_card_cycle(group, first_charge, period)` — the trial rule, judged on the
+CARD — now runs on every paid return. A PARKED handover's company is paid through its
+`collect_at` (`store.paid_through_for_entity` answers the later of the card's date and that), so
+a brand-new payer's company is no longer switched off at accept; and the renewal leaves a
+company whose parked charge falls in or after its period off the invoice
+(`store.entities_awaiting_handover`), which billed the old payer's days and then the window
+again.
+
+**A deferred handover charge is chased like a renewal decline (the user's call).**
+`transfers.collect_due` voided a failed charge's invoice and retried hourly under a fresh key
+with no end, told the new payer nothing, and dunning — finding nothing open — thanked them for a
+payment nobody made, every day or two. Now (`_collect_one`): the LAST attempt is settled first
+(`_settle_last_attempt`: paid → settled; open and refused → dunning's, made sure to be running
+with its notice sent; open and never tried → charged; a draft → finished). A fresh attempt
+(`_bill_transfer_in_house(keep_open=True)`) leaves a declined invoice OPEN: dunning starts, the
+`renewal_failed` notice goes out once (deduped per attempt key), and dunning retries it daily;
+dunning collecting it runs `transfers.settle_paid_handover` (the claim, the offer, the audit — as
+the collection would have). A processor failure holds the silent grace; no card is logged at
+ERROR and chased as a decline (the notice, and dunning) rather than silently; a card whose
+collection is already over is not put back into dunning. `collect_at` stays set until the window
+is paid. Past the grace the last attempt is read once more — paid at the last moment is settled,
+not abandoned — and otherwise the offer is abandoned ("its grace ran out unpaid") and the invoice
+it left open is withdrawn with it: left open, dunning or *Retry payment* could still collect it
+for a handover that is over.
+
+**Still open (found 2026-09-30, not fixed):**
+- two double-charge windows: a buy or a handover accept whose reply is lost AND whose re-read
+  after the void fails too; a crash between a buy's charge and `_grant_purchased_modules`;
+- an operator-voided renewal still gets "Thank you for your payment", and its card's date never
+  moves;
+- a module combination the catalogue cannot price is handed over free (`_bill_transfer_in_house`);
+- cards the handover bug already left without a date are not repaired ("only prevent new ones");
+- a non-Stripe exception (our own bug) still reads as a decline;
+- during a silent grace the invoice list still shows the period's open, never-tried invoice as
+  failed;
+- a deferred trial's module card says `trial_closing` for its first six hours
+  (`TRIAL_CLOSING_WINDOW`) and trial expired after that, while its access stays on for the grace.
 
 Mail: Django `EMAIL_*` on the same Brevo SMTP Minty uses, sender `SUBSCRIPTION_EMAIL` (fallback
 `DEFAULT_FROM_EMAIL`). `notify.mail_configured()` is false for the console and dummy backends
@@ -554,7 +727,17 @@ backlog crash): 1468 + 2 skipped on SQLite (00:17), 1470 on Postgres (00:21) —
 `test_stripe_api_version.py` (6) and new cases in the renewal, dunning, change, transfer,
 portal and notification files; Minty 2130 + 2 skipped. Every fix was proven by a mutation that
 puts its old behaviour back (20 mutants, each failing at least one of the new tests, in both
-engines).
+engines). After the billing fixes of 2026-09-30 (§6, this service only): 1597 + 2 skipped on
+SQLite (00:20), 1599 on Postgres (00:27), no call reaching Stripe — `engine/test_processor_failures.py`
+(25), `engine/test_change_attempts.py` (7), `engine/test_conversion_attempts.py` (10) and new
+cases in the renewal, dunning, retry-now, transfer, transfer-charge, trial, manage, change,
+portal, notice, module-card and lifecycle files. The fake processor in
+`engine/test_invoice_refresh.py` raises the SDK's own error classes for an outage, can lose a
+`pay` reply, and answers `attempted` / `last_payment_error` as Stripe does. Every fix was proven
+by a mutation that puts its old behaviour back — 42 mutants (31 for the six failures, 11 for the
+review's findings), each failing at least one test. Both conftests (`engine/`, `api/`) now import
+`billing_gateway` before `_no_stripe` stubs the client: first imported under the stub, the module
+kept the stub's `get_stripe` after the test that installed it.
 
 How the ported tests differ from Minty's, by rule: DB tests use pytest-django's `db` (a
 transaction per test) where Flask's `db_session` DELETEd tables afterwards — which is why the
@@ -590,7 +773,8 @@ angelika.tardaguela+django-<key>@… --tag <tag of the SAME length as the run's>
 --setup --replay --report` (a fresh payer, because Stripe keeps an idempotency key for 24 h and the
 keys are per payer; the same length because the report truncates names to fixed widths); then
 `python scripts/replay_diff.py <flask log> <django log> --tags <run tag>=<clone tag>` — IDENTICAL is
-the only acceptable answer. Keys: `X1 C1 L1 L2 R1 E1 angelika angelika-lifecycle angelika-split`.
+the only acceptable answer where a run stays off the paths §6's fixes of 2026-09-30 changed; the
+Flask engine (to be deleted) does not have them. Keys: `X1 C1 L1 L2 R1 E1 angelika angelika-lifecycle angelika-split`.
 **L2** (2026-09-28) is the re-issue's live proof: the card dies before the day-30 renewal and is
 fixed on day 42, after Stripe gave up on the invoice (day 40: `dunning REFRESHED in_… -> in_…`,
 then the replacement declines; day 41 declines; day 42 `dunning retry -> paid`, `RECOVERED`). The

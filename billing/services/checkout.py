@@ -84,6 +84,13 @@ class CheckoutError(Exception):
         self.status = status
 
 
+class ChargeDeferred(Exception):
+    """A trial's conversion the PAYMENT PROCESSOR failed to make - an outage, a timeout, our
+    own key - rather than one the card refused. Nothing is known about whether the customer
+    can pay, so the trial is not expired: it keeps running and the next pass tries again
+    (the user's rule, 2026-09-30), for as long as the past-due grace would have lasted."""
+
+
 def _session_currency(plans: list[PlanView]) -> str:
     """The billing currency for a setup-mode Checkout session. Raises if there is none.
 
@@ -1022,11 +1029,17 @@ def convert_or_expire_due_trials(limit: int | None = None) -> dict:
     thing that ends an app-level trial — the access sweep deliberately leaves modules
     with no Stripe subscription alone.
 
-    Returns ``{"converted": [...], "expired": [...]}``.
+    A conversion the PROCESSOR failed to make (``ChargeDeferred``) is neither: the trial
+    keeps running - and its access with it (``access_sweep``) - and the next pass tries
+    again. Not for ever: past the same grace a failed renewal gets, it expires as a decline
+    would, loudly.
+
+    Returns ``{"converted": [...], "expired": [...], "deferred": [...]}``.
     """
     now = clock.now()
     converted: list[dict] = []
     expired: list[dict] = []
+    deferred: list[dict] = []
     # Grouped by ENTITY, because an entity bills on ONE line: two modules whose trials
     # end together are a single swap to the bundle price, not two. Converting them
     # row-by-row cut two invoices seconds apart — the first billing a standalone price
@@ -1038,6 +1051,22 @@ def convert_or_expire_due_trials(limit: int | None = None) -> dict:
     for entity_id, rows in by_entity.items():
         try:
             billed, unbilled = _convert_due_trials(entity_id, rows)
+        except ChargeDeferred:
+            ended = _ended(rows) or now
+            if now < ended + timedelta(days=policy.current().past_due_window_days):
+                logger.error(
+                    "trial: the payment processor failed converting entity {}; the trial "
+                    "keeps running and the next pass tries again", entity_id,
+                )
+                deferred.extend(
+                    {"entity_id": entity_id, "code": row.function_code} for row in rows
+                )
+                continue
+            logger.error(
+                "trial: the payment processor has failed converting entity {} since {} - "
+                "past the grace window; expiring as a decline would", entity_id, ended,
+            )
+            billed, unbilled = [], rows
         except Exception:
             logger.exception(
                 "trial: failed to close out trials for entity {}", entity_id
@@ -1062,7 +1091,13 @@ def convert_or_expire_due_trials(limit: int | None = None) -> dict:
     # "trial expired" notice nor a conversion note is in the approved designs, and the
     # receipt that used to announce a conversion's first charge is retired too. A lapse
     # shows on the module page. See the retired-events block in ``notify``.
-    return {"converted": converted, "expired": expired}
+    return {"converted": converted, "expired": expired, "deferred": deferred}
+
+
+def _ended(rows):
+    """When the earliest of these trials ended - where their conversion's attempts start."""
+    return min((row.trial_end for row in rows if getattr(row, "trial_end", None)),
+               default=None)
 
 
 def _entity_names_for_notice(entity_ids) -> dict[str, str]:
@@ -1381,6 +1416,10 @@ def _convert_due_trials(entity_id, rows) -> tuple[list, list]:
     paid_through = _bill_module_change_in_house(
         entity_id, payer_user_id, customer_id,
         _billed_codes_in_house(entity_id), codes,
+        # A conversion is its own kind of change: its earlier attempts are found again by
+        # it, and a processor failure defers it rather than expiring the trial.
+        kind="convert", defer_transient=True,
+        prior_since=_ended(billable),
     )
     if paid_through is None:
         # Could not collect. Treat it exactly like "no card": the caller expires the
@@ -1454,7 +1493,7 @@ def _billed_codes_in_house(entity_id) -> set[str]:
     }
 
 
-def _void_unpaid_invoice(invoice_id, entity_id, what: str) -> None:
+def _void_unpaid_invoice(invoice_id, entity_id, what: str) -> str | None:
     """Withdraw the invoice of a purchase the customer is not getting.
 
     Every purchase that is refused when its charge fails lands here — a trial conversion,
@@ -1476,21 +1515,33 @@ def _void_unpaid_invoice(invoice_id, entity_id, what: str) -> None:
 
     Never raises. The refusal has already happened; a void that cannot be completed must
     not turn it into a crash the caller reads as something worse.
+
+    Returns ``"paid"`` when the invoice turns out to have been PAID - the charge went through
+    and its answer never arrived - and the caller must then GRANT what it paid for: refused,
+    the customer retries and is charged a second time. ``"voided"`` when it was withdrawn,
+    None when there was nothing to withdraw or the void could not be completed (logged).
     """
     if not invoice_id:
-        return
+        return None
     from billing.services import billing_gateway
 
     try:
-        billing_gateway.void_invoice(invoice_id)
-        logger.info(
-            "{}: voided unpaid invoice {} for entity {}", what, invoice_id, entity_id,
-        )
+        outcome = billing_gateway.void_invoice(invoice_id)
     except Exception:
         logger.exception(
             "{}: could not void the unpaid invoice {} for entity {}",
             what, invoice_id, entity_id,
         )
+        return None
+    if outcome == "paid":
+        logger.warning(
+            "{}: invoice {} for entity {} was PAID after all - its answer was lost on the way "
+            "back; granting what it paid for rather than refusing it",
+            what, invoice_id, entity_id,
+        )
+        return "paid"
+    logger.info("{}: voided unpaid invoice {} for entity {}", what, invoice_id, entity_id)
+    return "voided"
 
 
 def _entity_invoice_name(entity_id) -> str:
@@ -1602,12 +1653,19 @@ def _transfer_invoice(entity_id, anchor, codes, *, at, before=None):
 
 
 def _bill_transfer_in_house(entity_id, payer_user_id, customer_id: str, codes, *,
-                            at, idempotency_key):
+                            at, idempotency_key, keep_open: bool = False):
     """Charge the NEW payer for taking over ``entity_id`` from ``at``.
 
     Returns ``{"paid", "period_end", "invoice_id", "amount", "currency", "anchor",
     "reason"}``. ``paid`` False means nothing was collected and the caller must not move
     the payer pointer — the entity stays where it is.
+
+    ``keep_open`` is the DEFERRED collection's (``transfers.collect_due``): nothing is
+    withdrawn on a failure. A decline leaves the invoice open for dunning to chase, like a
+    renewal's (the user's call, 2026-09-30), and a failure of the PROCESSOR leaves whatever
+    was raised for the next pass to settle by its key. The unpaid answer then also says which
+    it was - ``declined`` or ``transient`` - and names the ``invoice_id`` left open. The
+    accept, with the customer in front of the decline, withdraws it as before.
 
     ``anchor`` is the incoming payer's cycle anchor as it stood for THIS charge — the one
     they already had, or the one established here on a first charge. It is returned so the
@@ -1636,9 +1694,9 @@ def _bill_transfer_in_house(entity_id, payer_user_id, customer_id: str, codes, *
     from billing.services import billing_gateway, renewals
     from billing.services.billing import join_memo
 
-    def _failed(reason):
+    def _failed(reason, **left):
         return {"paid": False, "period_end": None, "invoice_id": None,
-                "amount": 0, "currency": None, "anchor": None, "reason": reason}
+                "amount": 0, "currency": None, "anchor": None, "reason": reason, **left}
 
     anchor, _currency = store.billing_cycle_for_user(payer_user_id)
     first_charge = anchor is None
@@ -1659,6 +1717,11 @@ def _bill_transfer_in_house(entity_id, payer_user_id, customer_id: str, codes, *
             logger.error("transfer: could not anchor payer {}", payer_user_id)
             return _failed("That billing account isn't set up to be charged.")
 
+    # WHICH CARD the incoming payer is charged on: the one they nominated for THIS
+    # company. Read before anything can succeed, because every paid return below has to
+    # establish that card's cycle (``_establish_card_cycle``).
+    group = store.billing_group_for_entity(entity_id, payer_user_id)
+
     invoice, period = _transfer_invoice(entity_id, anchor, codes, at=at)
     if invoice is None or not invoice.total:
         # Nothing to collect — the window is empty or the plan prices it at zero. Treat it
@@ -1668,6 +1731,7 @@ def _bill_transfer_in_house(entity_id, payer_user_id, customer_id: str, codes, *
             "transfer: nothing to charge for entity {} from {}; period ends {}",
             entity_id, at, period.end,
         )
+        _establish_card_cycle(group, first_charge, period)
         return {"paid": True, "period_end": period.end, "invoice_id": None,
                 "amount": 0, "currency": None, "anchor": anchor, "reason": None}
 
@@ -1684,6 +1748,7 @@ def _bill_transfer_in_house(entity_id, payer_user_id, customer_id: str, codes, *
             "transfer: {} was already collected; adopting it rather than charging again",
             idempotency_key,
         )
+        _establish_card_cycle(group, first_charge, period)
         return {"paid": True, "period_end": period.end,
                 "invoice_id": store.invoice_for_key(idempotency_key).external_id,
                 "amount": invoice.total, "currency": invoice.currency,
@@ -1698,11 +1763,9 @@ def _bill_transfer_in_house(entity_id, payer_user_id, customer_id: str, codes, *
             )
         return _failed("There's already an unpaid invoice for this handover.")
 
-    # WHICH CARD the incoming payer is charged on: the one they nominated for THIS
-    # company. Required, not defaulted — the accept blockers ask for it up front, and
+    # The card is required, not defaulted — the accept blockers ask for it up front, and
     # reaching here without one means charging a card they never chose for a company they
     # are only now taking on.
-    group = store.billing_group_for_entity(entity_id, payer_user_id)
     if group is None:
         logger.error(
             "transfer: entity {} has no payment method nominated for payer {}",
@@ -1715,6 +1778,12 @@ def _bill_transfer_in_house(entity_id, payer_user_id, customer_id: str, codes, *
     # period. Without it the customer sees a part-month charge with no explanation of why.
     plan = store.billing_plan_for_codes(set(codes))
     product_name = plan.display_name if plan else "Subscription"
+
+    def _paid(invoice_id):
+        _establish_card_cycle(group, first_charge, period)
+        return {"paid": True, "period_end": period.end, "invoice_id": invoice_id,
+                "amount": invoice.total, "currency": invoice.currency,
+                "anchor": anchor, "reason": None}
 
     try:
         result = billing_gateway.issue_invoice(
@@ -1742,35 +1811,178 @@ def _bill_transfer_in_house(entity_id, payer_user_id, customer_id: str, codes, *
         # A decline arrives HERE, as an exception out of ``Invoice.pay``, by which point
         # the document is finalized and OPEN. Void it: an abandoned open invoice becomes
         # the first thing ``dunning.collect_due`` chases on any later episode, for a
-        # handover that never happened.
-        _void_unpaid_invoice(getattr(exc, "invoice_id", None), entity_id, "transfer")
-        return _failed(
-            getattr(exc, "user_message", None)
-            or "That payment didn't go through. Check the card and try again."
-        )
+        # handover that never happened. Unless it was PAID after all - the lost reply.
+        raised = getattr(exc, "invoice_id", None)
+        reason = (getattr(exc, "user_message", None)
+                  or "That payment didn't go through. Check the card and try again.")
+        if keep_open:
+            transient = billing_gateway.retryable(exc)
+            return _failed(reason, invoice_id=raised, declined=not transient,
+                           transient=transient)
+        if _void_unpaid_invoice(raised, entity_id, "transfer") == "paid":
+            return _paid(raised)
+        return _failed(reason)
 
     if (result or {}).get("status") != "paid":
         logger.warning(
             "transfer: invoice {} for entity {} is {}; not moving the payer",
             (result or {}).get("id"), entity_id, (result or {}).get("status"),
         )
-        _void_unpaid_invoice((result or {}).get("id"), entity_id, "transfer")
+        if keep_open:
+            return _failed("That payment didn't go through. Check the card and try again.",
+                           invoice_id=(result or {}).get("id"), declined=True, transient=False)
+        if _void_unpaid_invoice((result or {}).get("id"), entity_id, "transfer") == "paid":
+            return _paid(result.get("id"))
         return _failed("That payment didn't go through. Check the card and try again.")
 
-    # ESTABLISH the cycle, never ADVANCE one that exists — the same rule, and the same
-    # reason, as ``_bill_module_change_in_house``: ``paid_through`` is the CARD's marker
-    # for every company on it, and moving it for one company's charge announces that the
-    # others are settled too, silently cancelling their renewal.
-    if first_charge:
+    return _paid(result.get("id"))
+
+
+def _establish_card_cycle(group, first_charge: bool, period) -> None:
+    """Start THIS CARD's cycle on a paid charge - never advance one that exists.
+
+    ``paid_through`` is the CARD's marker for every company on it, and ``due_renewals`` reads
+    it to decide whether the card owes anything at all. Moving it forward for one company's
+    charge announces that every other company on the card is settled too, silently
+    cancelling their renewal - so only a renewal may advance it. But a card with NO date is
+    skipped by ``due_renewals`` outright, and measured as no access at all: left unset it
+    never renews, and its companies are switched off at the next sweep.
+
+    So it is set when the payer has never been charged (``first_charge``) OR when this card
+    never has - judged on the CARD, not the payer. The handover biller used to ask only the
+    first: a payer whose first attempt had failed (the anchor is written before the charge),
+    or one already paying on another card, took the company onto a card with no date, and
+    it went dark straight after the handover. The trial rule, which always asked both.
+    """
+    if group is not None and (first_charge or group.paid_through is None):
         store.set_group_paid_through(group.id, period.end)
 
-    return {"paid": True, "period_end": period.end, "invoice_id": result.get("id"),
-            "amount": invoice.total, "currency": invoice.currency,
-            "anchor": anchor, "reason": None}
+
+def _resolve_prior_conversions(entity_id, payer_user_id, customer_id, group, after,
+                               since, now=None):
+    """Settle every earlier attempt at THIS trial's conversion before a new one is raised.
+
+    A conversion the processor failed to make is retried on the next pass under a fresh key
+    (a fixed one would replay the processor's error for a day, and move the anchor and the
+    proration with it), so its earlier attempts are found again by their ``convert-`` key,
+    raised since the trial ended. Each is settled by what the processor says of it:
+
+    * PAID - the answer was lost, or it was paid since: that is the conversion. Returned as
+      its period, to be adopted - never charged again;
+    * OPEN and never tried: charged now, on the company's current card - and if that is
+      refused, withdrawn and the trial expires, as a decline does;
+    * OPEN and tried and refused: withdrawn, and the trial expires;
+    * a DRAFT, or a reservation the processor never saw: withdrawn, and a fresh attempt goes on;
+    * void or uncollectible: dealt with.
+
+    A paid attempt whose period is already OVER by ``now`` paid for that period, not this one:
+    it is left, and the current period is billed afresh. Adopted, the company went into the new
+    period marked as billed in it (``renewals.entities_billed_in``) and its renewal skipped it -
+    a free month.
+
+    Returns the adopted ``Period``, ``"declined"`` (expire the trial), or None (raise a fresh
+    attempt). Raises ``ChargeDeferred`` when the processor cannot say - charging again on a
+    guess is how a trial is paid for twice.
+    """
+    from billing.services import billing_gateway, changes
+    from billing.services.billing import Period
+
+    prefix = f"convert-{entity_id}-"
+    wanted = changes.codes_key(after)
+    for record in store.invoices_with_key_prefix(payer_user_id, prefix):
+        if record.status in ("void", "uncollectible"):
+            continue
+        # ``convert-<entity>-<when>-<codes>[-<replay scope>]``. WHEN is read off the key, not
+        # the row's ``created_at``: it is the app's clock, the one ``trial_end`` is on - the
+        # database's differs wherever the app runs on a test clock.
+        stamp, _, tail = record.idempotency_key[len(prefix):].partition("-")
+        try:
+            made = datetime.strptime(stamp, "%Y%m%d%H%M%S").replace(tzinfo=UTC)
+        except ValueError:
+            continue
+        # Keys carry whole seconds: an attempt made in the second the trial ended is this
+        # trial's, however many microseconds ``since`` holds.
+        if made < since.replace(microsecond=0):
+            continue                      # an earlier conversion, not this trial's
+        codes = tail.split("-")[0]
+        try:
+            if record.external_id:
+                found = billing_gateway.recheck(record)
+                if found is None:                 # a draft deleted by hand
+                    continue
+            else:
+                found = billing_gateway.find_invoice_by_metadata(
+                    customer_id, "change_key", record.idempotency_key
+                )
+                if found is None:
+                    store.discard_invoice(record.id)
+                    continue
+                billing_gateway.record_found_invoice(record, found)
+                # Read again: the store settles a fresh copy, and this one still has no id.
+                record = store.invoice_for_key(record.idempotency_key) or record
+            status = found.get("status")
+            if status in ("open", "draft") and (
+                status == "draft" or billing_gateway.declined(found) or codes != wanted
+            ):
+                # Not one to finish: withdrawn - unless it turns out paid after all.
+                if billing_gateway.void_invoice(found["id"]) == "paid":
+                    status = "paid"
+                elif status == "open" and codes == wanted:
+                    return "declined"
+                else:
+                    continue
+            elif status == "open":
+                try:
+                    found = billing_gateway.resume_invoice(
+                        record, payment_method=group.stripe_payment_method_id, where="trial"
+                    )
+                except billing_gateway.BillingError as exc:
+                    if billing_gateway.retryable(exc):
+                        raise
+                    if _void_unpaid_invoice(record.external_id, entity_id, "trial") != "paid":
+                        return "declined"
+                    found = {"status": "paid"}
+                status = (found or {}).get("status")
+        except billing_gateway.BillingError as exc:
+            if billing_gateway.retryable(exc):
+                raise ChargeDeferred(f"conversion of {entity_id} deferred") from exc
+            raise
+        except Exception as exc:
+            if billing_gateway.retryable(exc):
+                raise ChargeDeferred(f"conversion of {entity_id} deferred") from exc
+            raise
+        if status != "paid":
+            continue
+        ended = record.period_end
+        if now is not None and ended is not None:
+            if ended.tzinfo is None:
+                ended = ended.replace(tzinfo=UTC)
+            if ended <= now:
+                logger.info(
+                    "trial: conversion {} was paid for a period that has ended; the current "
+                    "one is billed afresh", record.idempotency_key,
+                )
+                continue
+        if codes != wanted:
+            # Paid for a DIFFERENT set of modules than is due now - another trial's
+            # conversion inside the same outage. Guessing either way charges twice or gives
+            # modules away, so it waits for a person, and the trial runs on meanwhile.
+            logger.error(
+                "trial: conversion {} was PAID for {} while {} is due on entity {} - resolve "
+                "it by hand", record.idempotency_key, codes, wanted, entity_id,
+            )
+            raise ChargeDeferred(f"conversion of {entity_id} needs a person")
+        logger.warning(
+            "trial: conversion {} was already PAID; adopting it rather than charging again",
+            record.idempotency_key,
+        )
+        return Period(record.period_start, record.period_end)
+    return None
 
 
 def _bill_module_change_in_house(entity_id, payer_user_id, customer_id: str,
-                                 current, codes):
+                                 current, codes, *, kind: str = "change",
+                                 defer_transient: bool = False, prior_since=None):
     """Bill a module change from Minty's own arithmetic. Returns the new paid-through.
 
     Shared by the trial conversion and the BUY path — the money is the same either way,
@@ -1783,6 +1995,11 @@ def _bill_module_change_in_house(entity_id, payer_user_id, customer_id: str,
     starts here and the charge is a full one — matching what Stripe billed at conversion
     (280.00). A later entity joining an existing payer is prorated against the anchor
     already recorded (373.33). Both figures were verified against Stripe before cutover.
+
+    ``defer_transient`` (the conversion): a failure of the PROCESSOR raises ``ChargeDeferred``
+    and withdraws nothing, for the next pass to retry - which it can only do safely because
+    ``kind="convert"`` makes every attempt findable again: before a new one is raised,
+    ``_resolve_prior_conversions`` settles those since ``prior_since``.
     """
     from billing.services import changes
     from billing.services.billing import period_containing
@@ -1822,21 +2039,40 @@ def _bill_module_change_in_house(entity_id, payer_user_id, customer_id: str,
 
     name = _entity_invoice_name(entity_id)
 
+    if kind == "convert" and prior_since is not None:
+        prior = _resolve_prior_conversions(
+            entity_id, payer_user_id, customer_id, group, current | codes, prior_since, now
+        )
+        if prior == "declined":
+            return None
+        if prior is not None:
+            # An earlier attempt was PAID - its answer lost, or collected since.
+            _establish_card_cycle(group, first_charge, prior)
+            return prior.end
+
     try:
         invoice = changes.issue_change(
             customer_id, entity_id, name, current, current | codes, period, now,
-            group=group,
+            group=group, kind=kind,
         )
     except Exception as exc:
         logger.exception(
             "trial: could not bill the conversion for {} {} in-house", entity_id, codes
         )
+        from billing.services import billing_gateway
+
+        if defer_transient and billing_gateway.retryable(exc):
+            # The processor failed, not the card: nothing is withdrawn - whatever was
+            # raised is settled by the next attempt, which finds it by its key.
+            raise ChargeDeferred(f"conversion of {entity_id} deferred") from exc
         # THE path a declined card actually takes. ``Invoice.pay`` raises rather than
         # returning an unpaid invoice, and by then the document is finalized and OPEN —
         # so the branch below, which reads a returned status, never sees a decline at all.
         # Without this the customer keeps a bill for a module this function is in the
-        # middle of refusing them.
-        _void_unpaid_invoice(getattr(exc, "invoice_id", None), entity_id, "trial")
+        # middle of refusing them. A bill found PAID instead is the lost reply: granted.
+        if _void_unpaid_invoice(getattr(exc, "invoice_id", None), entity_id, "trial") == "paid":
+            _establish_card_cycle(group, first_charge, period)
+            return period.end
         return None
 
     # A None invoice means nothing was owed (already at this price), which is a success:
@@ -1858,7 +2094,9 @@ def _bill_module_change_in_house(entity_id, payer_user_id, customer_id: str,
         # retried, for a module whose row has since gone ``expired`` — terminal, never
         # to be granted. A customer would pay for a trial that lapsed months earlier.
         #
-        _void_unpaid_invoice(invoice.get("id"), entity_id, "trial")
+        if _void_unpaid_invoice(invoice.get("id"), entity_id, "trial") == "paid":
+            _establish_card_cycle(group, first_charge, period)
+            return period.end
         return None
 
     # ESTABLISH the card's cycle; never ADVANCE one that already exists.
@@ -1876,8 +2114,7 @@ def _bill_module_change_in_house(entity_id, payer_user_id, customer_id: str,
     # skips a NULL ``paid_through`` outright, so leaving it unset would mean it never
     # renewed at all. Judged on the GROUP, not the payer: a payer who nominates a second
     # card is anchored already, but that card has collected nothing and starts here.
-    if first_charge or group.paid_through is None:
-        store.set_group_paid_through(group.id, period.end)
+    _establish_card_cycle(group, first_charge, period)
     return period.end
 
 
@@ -1962,19 +2199,43 @@ def _bill_reinstatement_in_house(entity, user, code: str, row) -> None:
     before = _billed_codes_in_house(entity.id) - {code}
     name = getattr(entity, "name", None) or str(entity.id)
     try:
+        # Each press is a new ATTEMPT under its own key (``changes._next_attempt``). The key
+        # is otherwise stable - the company, the day its access ends, the modules - and a
+        # declined attempt's voided invoice kept it claimed, so every retry was refused as
+        # "check your payment method" without the card ever being tried.
         invoice = changes.issue_change(
             customer_id, entity.id, name, before, before | {code}, period, covered_to,
-            group=group,
+            group=group, attempts_of=payer_user_id,
         )
     except Exception as exc:
         logger.exception(
             "reinstate: could not bill the uncovered period for {} {}", entity.id, code
         )
+        from billing.services import billing_gateway
+
+        if getattr(exc, "claimed", False):
+            # Another press of the same button got there first; it decides the outcome.
+            raise CheckoutError(
+                "This module is already being restored. Refresh the page in a moment.",
+                status=409,
+            ) from exc
         # A decline RAISES out of ``Invoice.pay``, with the document finalized and OPEN.
         # The module is not given back, so the bill must not survive either: left open,
         # dunning chases it and the portal offers it as *Retry payment* — a customer
-        # paying to restore a module that stays cancelled.
-        _void_unpaid_invoice(getattr(exc, "invoice_id", None), entity.id, "reinstate")
+        # paying to restore a module that stays cancelled. Found PAID instead (the lost
+        # reply), the module is restored: it was paid for.
+        if _void_unpaid_invoice(
+            getattr(exc, "invoice_id", None), entity.id, "reinstate"
+        ) == "paid":
+            return
+        if billing_gateway.retryable(exc):
+            # The processor failed, not the card: "check your payment method" would send the
+            # customer to fix something that is not broken.
+            raise CheckoutError(
+                "We couldn't reach the payment provider. Nothing was charged - please try "
+                "again shortly.",
+                status=503,
+            ) from exc
         raise CheckoutError(
             "We couldn't take the payment to restore this module. Please check your "
             "payment method and try again.",
@@ -1986,7 +2247,8 @@ def _bill_reinstatement_in_house(entity, user, code: str, row) -> None:
             "reinstate: invoice {} for {} {} is {}; not restoring the module",
             invoice.get("id"), entity.id, code, invoice.get("status"),
         )
-        _void_unpaid_invoice(invoice.get("id"), entity.id, "reinstate")
+        if _void_unpaid_invoice(invoice.get("id"), entity.id, "reinstate") == "paid":
+            return
         raise CheckoutError(
             "We couldn't take the payment to restore this module. Please check your "
             "payment method and try again.",

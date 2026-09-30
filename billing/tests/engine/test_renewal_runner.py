@@ -16,6 +16,10 @@ import pytest
 ANCHOR = datetime(2027, 1, 8, 13, tzinfo=UTC)
 PAID_THROUGH = datetime(2027, 2, 8, 13, tzinfo=UTC)
 NOW = datetime(2027, 2, 9, 13, tzinfo=UTC)
+# The processor's answer for an invoice whose charge was TRIED and refused.
+DECLINED = {"id": "in_old", "status": "open", "attempted": True,
+            "payment_intent": {"id": "pi_1", "last_payment_error": {
+                "type": "card_error", "code": "card_declined"}}}
 
 
 class _Account:
@@ -79,7 +83,8 @@ class _Record:
 
 
 def _wire(monkeypatch, *, accounts=None, rows=None, plan=_Plan(), issued=None,
-          existing=None, found=None, extensions=None, groups=None):
+          existing=None, found=None, extensions=None, groups=None, at_processor=None,
+          dunning_since=None, notice_sent=True):
     """Mock the store and the gateway; return (renewals, calls).
 
     ``existing`` is the LOCAL row for this period's key (the guard). ``found`` is what
@@ -102,6 +107,9 @@ def _wire(monkeypatch, *, accounts=None, rows=None, plan=_Plan(), issued=None,
                    card=f"pm_{a.user_id}", paid_through=a.paid_through)
             for a in accounts
         ]
+    for group in groups:
+        # A card whose dunning is running: the customer has been told of a decline.
+        group.dunning_started_at = dunning_since or group.dunning_started_at
 
     def _group(group_id):
         return next((g for g in groups if str(g.id) == str(group_id)), None)
@@ -136,6 +144,8 @@ def _wire(monkeypatch, *, accounts=None, rows=None, plan=_Plan(), issued=None,
     monkeypatch.setattr(store, "billing_group_for_entity", _group_for_entity)
     monkeypatch.setattr(store, "module_rows_for_payer", lambda uid: rows)
     monkeypatch.setattr(store, "billing_plan_for_codes", lambda codes: plan)
+    # Handovers whose first charge is parked; none unless a test says otherwise.
+    monkeypatch.setattr(store, "entities_awaiting_handover", lambda uid, period: set())
     # Cancel-extensions owed but not yet collected; none unless a test says otherwise.
     monkeypatch.setattr(
         store, "pending_extensions_for_payer", lambda uid: extensions or []
@@ -178,6 +188,28 @@ def _wire(monkeypatch, *, accounts=None, rows=None, plan=_Plan(), issued=None,
 
     monkeypatch.setattr(store, "set_group_paid_through", _group_paid_through)
     monkeypatch.setattr(store, "begin_group_dunning", _group_dunning)
+    calls["held"], calls["released"], calls["rechecked"] = [], [], []
+    monkeypatch.setattr(store, "hold_group_grace",
+                        lambda gid, at: calls["held"].append((str(gid), at)) or 1)
+    monkeypatch.setattr(store, "release_group_grace",
+                        lambda gid, at: calls["released"].append((str(gid), at)) or 0)
+
+    # What the processor holds for a row the runner re-reads before acting on it
+    # (``billing_gateway.recheck``): by default exactly what the row says, never charged.
+    def _recheck(record):
+        calls["rechecked"].append(record)
+        answer = at_processor if at_processor is not None else {
+            "id": record.external_id, "status": record.status, "attempted": False,
+            "payment_intent": {"id": "pi_1", "last_payment_error": None},
+        }
+        record.status = answer.get("status")          # recorded, as the gateway records it
+        return answer
+
+    monkeypatch.setattr(billing_gateway, "recheck", _recheck)
+    from billing.services import notify, policy
+
+    monkeypatch.setattr(policy, "current", lambda: policy.DEFAULTS)
+    monkeypatch.setattr(notify, "already_sent", lambda event, key: notice_sent)
     monkeypatch.setattr(
         billing_gateway, "find_invoice_by_metadata",
         lambda cid, k, v: calls["lookups"].append((cid, v)) or found,
@@ -339,8 +371,10 @@ def test_a_period_already_invoiced_is_adopted_not_re_charged(monkeypatch):
 
 
 def test_an_existing_UNPAID_invoice_is_not_re_issued_either(monkeypatch):
-    """It is already out there awaiting collection — a second one would ask twice."""
-    renewals, calls = _wire(monkeypatch, existing=_Record(status="open"))
+    """It is already out there - declined, and dunning is chasing it: a second one would ask
+    twice."""
+    renewals, calls = _wire(monkeypatch, existing=_Record(status="open"),
+                            at_processor=DECLINED, dunning_since=NOW)
 
     result = renewals.run_renewals(NOW, scope=["u1"], issue=True)
 
@@ -422,17 +456,13 @@ def test_a_reservation_the_processor_never_saw_is_discarded_and_retried(monkeypa
 
 
 def test_a_row_left_open_that_the_processor_says_is_paid_is_adopted(monkeypatch):
-    from billing.services import billing_gateway
-
     existing = _Record(external_id="in_open", status="open")
-    renewals, calls = _wire(monkeypatch, existing=existing)
-    asked = []
-    monkeypatch.setattr(billing_gateway, "refresh_record",
-                        lambda record: asked.append(record) or "paid")
+    renewals, calls = _wire(monkeypatch, existing=existing,
+                            at_processor={"id": "in_open", "status": "paid"})
 
     result = renewals.run_renewals(NOW, scope=["u1"], issue=True)
 
-    assert asked == [existing]
+    assert calls["rechecked"] == [existing]
     assert calls["issued"] == []
     assert result["skipped"][0]["reason"] == "already invoiced; adopted"
     assert calls["paid_through"] == [("u1", datetime(2027, 3, 8, 13, tzinfo=UTC))]
@@ -449,7 +479,7 @@ def test_a_settled_row_is_answered_from_the_store_without_asking(monkeypatch):
     result = renewals.run_renewals(NOW, scope=["u1"], issue=True)
 
     assert result["skipped"][0]["reason"] == "already invoiced; adopted"
-    assert calls["lookups"] == []
+    assert calls["lookups"] == [] and calls["rechecked"] == []
 
 
 # --- a draft our own issue left behind is FINISHED, not skipped ------------------------------
@@ -824,6 +854,8 @@ def test_an_unpaid_adopted_invoice_ALSO_closes_its_extensions(monkeypatch):
         monkeypatch,
         extensions=[_Extension()],
         existing=_Record(status="open"),
+        at_processor=DECLINED,
+        dunning_since=NOW,
     )
 
     result = renewals.run_renewals(NOW, scope=["u1"], issue=True)
@@ -954,6 +986,24 @@ def test_a_claim_reaching_into_the_period_is_not_billed_again(monkeypatch):
     assert result["skipped"][0]["reason"] == "nothing billable"
     # NOT advanced: the claim stops partway through, so the rest of the period really is
     # unpaid and the account is legitimately still due.
+    assert calls["paid_through"] == []
+
+
+def test_a_parked_handover_is_left_off_the_renewal_and_the_card_is_not_advanced(monkeypatch):
+    """The company was handed over with its first charge PARKED for a day inside this period:
+    that window is the handover's own collection to take, and the days before it were the old
+    payer's. Billed here too, the new payer paid both twice over. Left off, the card is still
+    due - never advanced past a window nobody has paid for yet."""
+    from billing.services import store
+
+    renewals, calls = _wire(monkeypatch)
+    monkeypatch.setattr(store, "entities_awaiting_handover",
+                        lambda uid, period: {str(r.entity_id) for r in [_Row()]})
+
+    result = renewals.run_renewals(NOW, scope=["u1"], issue=True)
+
+    assert calls["issued"] == []
+    assert result["skipped"][0]["reason"] == "nothing billable"
     assert calls["paid_through"] == []
 
 
@@ -1212,3 +1262,239 @@ def test_a_company_on_no_card_is_not_billed_on_someone_elses(monkeypatch):
     assert kw["payment_method"] == "pm_A"
     assert {line.entity_id for line in invoice.lines} == {"e1"}
     assert "e_orphan" not in str(result)
+
+
+# --- the charge, and recording it, are two steps ----------------------------------------------
+#
+# A write that failed AFTER the money moved used to land in the charge's own except: a paid
+# customer went into dunning, was told "We couldn't process your payment", and then "Thank you
+# for your payment" when dunning found nothing to collect.
+
+
+def test_a_paid_renewal_whose_recording_failed_is_not_a_decline(monkeypatch, caplog):
+    from billing.services import store
+
+    renewals, calls = _wire(monkeypatch)
+
+    def _db_down(group_id, until):
+        raise RuntimeError("database went away")
+
+    monkeypatch.setattr(store, "set_group_paid_through", _db_down)
+
+    result = renewals.run_renewals(NOW, scope=["u1"], issue=True)
+
+    assert [e["invoice"] for e in result["issued"]] == ["in_1"]
+    assert result["failed"] == [] and calls["dunning"] == []
+    assert any(r.levelname == "ERROR" and "recording it failed" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_a_paid_renewal_releases_a_silent_grace(monkeypatch):
+    renewals, calls = _wire(monkeypatch)
+
+    renewals.run_renewals(NOW, scope=["u1"], issue=True)
+
+    assert calls["released"] == [("g_u1", NOW)]
+
+
+# --- the processor failing is not the card declining (the user's rule, 2026-09-30) ------------
+
+
+def test_a_processor_outage_holds_the_grace_without_dunning_or_mail(monkeypatch):
+    """Nothing is known about whether the customer can pay: nobody is told, dunning does not
+    start, and the companies keep their grace while the next pass tries again."""
+    from billing.services import billing_gateway
+
+    renewals, calls = _wire(monkeypatch)
+
+    def _outage(customer_id, invoice, **kw):
+        raise billing_gateway.BillingError("could not connect", retryable=True)
+
+    monkeypatch.setattr(billing_gateway, "issue_invoice", _outage)
+
+    result = renewals.run_renewals(NOW, scope=["u1"], issue=True)
+
+    assert calls["held"] == [("g_u1", NOW)]
+    assert calls["dunning"] == [] and result["failed"] == []
+    assert result["skipped"][0]["reason"] == "processor unavailable; retrying next pass"
+
+
+def test_an_outage_while_asking_after_a_reservation_is_not_a_decline(monkeypatch):
+    """The scan for a reservation nobody confirmed raises the processor's error unwrapped."""
+    import stripe as stripe_lib
+
+    from billing.services import billing_gateway
+
+    renewals, calls = _wire(monkeypatch, existing=_Record(external_id=None, status="draft"))
+
+    def _outage(customer_id, key, value, **kw):
+        raise stripe_lib.APIConnectionError("no route to Stripe")
+
+    monkeypatch.setattr(billing_gateway, "find_invoice_by_metadata", _outage)
+
+    result = renewals.run_renewals(NOW, scope=["u1"], issue=True)
+
+    assert calls["held"] and calls["dunning"] == [] and result["failed"] == []
+
+
+def test_a_decline_still_starts_dunning_and_says_so(monkeypatch):
+    from billing.services import billing_gateway
+
+    renewals, calls = _wire(monkeypatch)
+
+    def _declined(customer_id, invoice, **kw):
+        raise billing_gateway.BillingError("Your card was declined.", invoice_id="in_1")
+
+    monkeypatch.setattr(billing_gateway, "issue_invoice", _declined)
+
+    result = renewals.run_renewals(NOW, scope=["u1"], issue=True)
+
+    assert calls["dunning"] == [("u1", NOW)] and calls["held"] == []
+    assert result["failed"][0]["invoice"] == "in_1"
+
+
+def test_an_outage_that_outlasts_the_grace_turns_critical(monkeypatch, caplog):
+    """The ERROR fires every pass; with three days of grace left the grace ending is the one
+    thing that would reach the customer, so it is said louder."""
+    from billing.services import billing_gateway
+
+    late = NOW - timedelta(days=13)                   # the 15-day grace ends in two days
+    renewals, calls = _wire(monkeypatch, accounts=[_Account(paid_through=late)])
+
+    def _outage(customer_id, invoice, **kw):
+        raise billing_gateway.BillingError("could not connect", retryable=True)
+
+    monkeypatch.setattr(billing_gateway, "issue_invoice", _outage)
+
+    renewals.run_renewals(NOW, scope=["u1"], issue=True)
+
+    assert any(r.levelname == "CRITICAL" and "grace" in r.getMessage() for r in caplog.records)
+
+
+# --- an open invoice nobody charged (the user's call: charge it) ----------------------------------
+
+
+def test_an_open_renewal_nobody_charged_is_charged_on_the_current_card(monkeypatch):
+    """A crash between recording it open and charging it. Dunning never started, so dunning
+    never looks: skipped as "already invoiced", it sat there while the companies went dark."""
+    from billing.services import billing_gateway, store
+
+    existing = _Record(external_id="in_open", status="open")
+    renewals, calls = _wire(monkeypatch, existing=existing)
+    resumed = []
+    monkeypatch.setattr(
+        billing_gateway, "resume_invoice",
+        lambda record, payment_method=None: resumed.append((record, payment_method))
+        or {"id": "in_open", "status": "paid"},
+    )
+    monkeypatch.setattr(store, "invoice_lines", lambda invoice_id: [_LineRow()])
+
+    result = renewals.run_renewals(NOW, scope=["u1"], issue=True)
+
+    assert resumed == [(existing, "pm_u1")]
+    assert calls["issued"] == []                      # the same invoice, never a second one
+    assert [e["invoice"] for e in result["issued"]] == ["in_open"]
+    assert calls["paid_through"] == [("u1", datetime(2027, 3, 8, 13, tzinfo=UTC))]
+
+
+def test_an_open_renewal_dunning_owns_is_left_to_dunning(monkeypatch):
+    from billing.services import billing_gateway
+
+    renewals, calls = _wire(monkeypatch, existing=_Record(external_id="in_open", status="open"),
+                            dunning_since=NOW)
+    monkeypatch.setattr(billing_gateway, "resume_invoice",
+                        lambda record, payment_method=None: pytest.fail("charged"))
+
+    result = renewals.run_renewals(NOW, scope=["u1"], issue=True)
+
+    assert result["skipped"][0]["reason"] == "already invoiced; unpaid"
+
+
+def test_an_open_renewal_after_access_ran_out_is_not_charged(monkeypatch, caplog):
+    """Collection is over: the business does not chase those. Never charged either, so a
+    person has to look - said at ERROR."""
+    from billing.services import billing_gateway
+
+    long_ago = NOW - timedelta(days=40)
+    renewals, calls = _wire(monkeypatch, accounts=[_Account(paid_through=long_ago)],
+                            existing=_Record(external_id="in_open", status="open"))
+    monkeypatch.setattr(billing_gateway, "resume_invoice",
+                        lambda record, payment_method=None: pytest.fail("charged"))
+
+    result = renewals.run_renewals(NOW, scope=["u1"], issue=True)
+
+    assert result["skipped"][0]["reason"] == "already invoiced; unpaid"
+    assert any(r.levelname == "ERROR" and "NEVER CHARGED" in r.getMessage()
+               for r in caplog.records)
+
+
+# --- the decline notice, per card and never lost ----------------------------------------------------
+
+
+def test_a_decline_whose_dunning_never_started_is_started_and_mailed(monkeypatch):
+    """Declined at the processor, but the process died before recording it: no dunning, no
+    notice. The next pass starts both - the notice once, by its period key."""
+    from billing.services import store
+
+    renewals, calls = _wire(monkeypatch, existing=_Record(external_id="in_old", status="open"),
+                            at_processor=DECLINED, notice_sent=False)
+    monkeypatch.setattr(store, "invoice_lines", lambda invoice_id: [_LineRow()])
+
+    result = renewals.run_renewals(NOW, scope=["u1"], issue=True)
+
+    assert calls["dunning"] == [("u1", NOW)]
+    assert [e["invoice"] for e in result["failed"]] == ["in_old"]
+
+
+def test_a_decline_already_told_is_not_told_again(monkeypatch):
+    renewals, calls = _wire(monkeypatch, existing=_Record(external_id="in_old", status="open"),
+                            at_processor=DECLINED, dunning_since=NOW, notice_sent=True)
+
+    result = renewals.run_renewals(NOW, scope=["u1"], issue=True)
+
+    assert result["failed"] == [] and calls["dunning"] == []
+
+
+def test_a_decline_is_mailed_before_the_next_card_is_billed(monkeypatch):
+    """Mail waited for the end of the batch, so anything that stopped the batch - an
+    exception, a restart - lost every decline notice before it."""
+    from billing.services import billing_gateway, notify
+
+    renewals, calls = _wire(monkeypatch, **_two_cards())
+    mailed = []
+    monkeypatch.setattr(notify, "notify_many", lambda events: mailed.extend(events))
+    charges = iter([{"id": "in_A", "status": "open"}, KeyboardInterrupt])
+
+    def _issue(customer_id, invoice, **kw):
+        answer = next(charges)
+        if answer is KeyboardInterrupt:
+            raise KeyboardInterrupt
+        return answer
+
+    monkeypatch.setattr(billing_gateway, "issue_invoice", _issue)
+
+    with pytest.raises(KeyboardInterrupt):
+        renewals.run_renewals(NOW, scope=["u1"], issue=True)
+
+    assert [event for _uid, event, _key, _ctx in mailed] == [notify.RENEWAL_FAILED]
+
+
+def test_one_card_that_raises_does_not_stop_the_pass(monkeypatch):
+    from billing.services import renewals as renewals_mod
+
+    renewals, calls = _wire(monkeypatch, **_two_cards())
+    real = renewals_mod.build_renewal
+
+    def _build(user_id, period, group_id=None, **kw):
+        if group_id == "gA":
+            raise RuntimeError("pricing blew up")
+        return real(user_id, period, group_id=group_id, **kw)
+
+    monkeypatch.setattr(renewals_mod, "build_renewal", _build)
+
+    result = renewals.run_renewals(NOW, scope=["u1"], issue=True)
+
+    assert [e["billing_group_id"] for e in result["issued"]] == ["gB"]
+    assert ("gA", NOW) in calls["held"]
+    assert any(e.get("reason") == "could not be billed; retrying next pass"
+               for e in result["skipped"])

@@ -77,8 +77,13 @@ def notices(app, monkeypatch):
     """
     from billing.services import entity_modules as svc
 
-    def _run(cards, *, can_manage=True, payer=None, user_id="user-1"):
+    def _run(cards, *, can_manage=True, payer=None, user_id="user-1", group=None):
         monkeypatch.setattr(svc, "get_module_cards", lambda _eid: cards)
+        # The card the company is billed on - None reads as "told" (today's banner).
+        monkeypatch.setattr(
+            "billing.services.store.billing_group_for_entity",
+            lambda *_a, **_k: group,
+        )
         monkeypatch.setattr(
             "core.policy.has_permission_by_user_id",
             lambda *_a, **_k: can_manage,
@@ -120,6 +125,25 @@ def test_past_due_names_the_module_and_the_deadline(notices):
     assert item["module"] == "Payment"
     assert "Payment" in item["title"]
     assert "19 Aug 2026" in item["detail"]
+
+
+def test_past_due_while_the_processor_failed_is_not_a_failed_payment(notices, monkeypatch):
+    """Held in its grace because the PROCESSOR failed: the card was never asked, the customer
+    was not emailed, and the app must not tell them their payment failed either."""
+    from datetime import UTC, datetime, timedelta
+    from types import SimpleNamespace
+
+    from billing.services import clock, policy
+
+    now = datetime(2027, 3, 10, tzinfo=UTC)
+    monkeypatch.setattr(clock, "now", lambda: now)
+    monkeypatch.setattr(policy, "current", lambda: policy.DEFAULTS)
+    silent = SimpleNamespace(dunning_started_at=None, paid_through=now - timedelta(days=2))
+    told = SimpleNamespace(dunning_started_at=now, paid_through=now - timedelta(days=2))
+    card = _card("PAYMENT_REQUEST", "Payment", subscription_status="past_due")
+
+    assert notices([card], group=silent)["items"] == []
+    assert notices([card], group=told)["items"][0]["kind"] == "past_due"
 
 
 def test_past_due_without_a_deadline_still_says_something_actionable(notices):

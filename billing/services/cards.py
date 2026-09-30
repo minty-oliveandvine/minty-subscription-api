@@ -87,6 +87,12 @@ def get_module_cards(entity_id: str) -> list[dict]:
     # Stripe view at all because its line had been swapped down. The row plus
     # ``access.py`` answers every question this card asks, from one source.
     rows, payer_id, paid_through = _module_rows_for_cards(entity_id, sub_store)
+    # Past due is "payment failed" only once the customer has been told: a card held in its
+    # grace while the payment PROCESSOR was failing was never asked (``dunning.customer_told``).
+    # Read only when something is past due - most companies, most of the time, nothing is.
+    told = not any(getattr(r, "phase", None) == PHASE_PAST_DUE for r in rows.values()) or (
+        _told_of_failure(entity_id, now)
+    )
 
     # What this period was ALREADY PAID FOR. A trial converting alongside these is a
     # mid-period change priced against them; converting with nothing here just starts the
@@ -275,7 +281,7 @@ def get_module_cards(entity_id: str) -> list[dict]:
             subscription_status = "trialing"
             period_end = getattr(row, "trial_end", None)
         elif granted and phase in (PHASE_ACTIVE, PHASE_PAST_DUE, PHASE_SCHEDULED_CANCEL):
-            subscription_status = "past_due" if phase == PHASE_PAST_DUE else "active"
+            subscription_status = "past_due" if phase == PHASE_PAST_DUE and told else "active"
             period_end = paid_through
         else:
             # Never held it, or held it and lost it. Either way there is nothing live to
@@ -691,6 +697,13 @@ def _module_rows_for_cards(entity_id, sub_store):
     except Exception:
         logger.exception("modules: could not read module rows for entity {}", entity_id)
     return rows, payer_id, paid_through
+
+def _told_of_failure(entity_id, now) -> bool:
+    """``dunning.told_of_failure`` - imported at call time, like the rest of this module."""
+    from billing.services import dunning
+
+    return dunning.told_of_failure(entity_id, now)
+
 
 def _billing_consent_or_assume(entity_id, sub_store) -> bool:
     """Whether THIS entity is authorised to bill its payer's card.

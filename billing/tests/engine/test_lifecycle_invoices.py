@@ -327,6 +327,17 @@ class _World:
     def record(self, invoice_id):
         return next(i for i in self.invoices if i["id"] == invoice_id)
 
+    def recheck(self, record):
+        """What the processor answers for a row re-read before it is acted on
+        (``billing_gateway.recheck``): this world's invoice, with the payment's own record of
+        whether it was ever tried (``billing_gateway.declined``)."""
+        invoice = self.record(record.external_id)
+        tried = invoice["confirms"] > 0
+        refused = tried and invoice["status"] == "open"
+        return {**invoice, "attempted": tried,
+                "payment_intent": {"id": f"pi_{invoice['id']}",
+                                   "last_payment_error": {"type": "card_error"} if refused else None}}
+
     # -- reading the result ---------------------------------------------------
 
     def paid(self):
@@ -370,6 +381,8 @@ def _install(monkeypatch, world):
         store, "billing_cycle_for_user", lambda uid: (ANCHOR, CURRENCY)
     )
     monkeypatch.setattr(store, "pending_extensions_for_payer", lambda uid: [])
+    monkeypatch.setattr(store, "entities_awaiting_handover", lambda uid, period: set())
+    monkeypatch.setattr(store, "handover_owed", lambda group, now: False)
     monkeypatch.setattr(store, "mark_extensions_invoiced", lambda ids: 0)
     monkeypatch.setattr(store, "invoice_for_key", world.invoice_for_key)
     monkeypatch.setattr(
@@ -385,6 +398,11 @@ def _install(monkeypatch, world):
     monkeypatch.setattr(billing_gateway, "open_invoices", world.open_invoices)
     monkeypatch.setattr(billing_gateway, "retry_invoice", world.retry_invoice)
     monkeypatch.setattr(billing_gateway, "refresh_invoice", world.refresh_invoice)
+    monkeypatch.setattr(billing_gateway, "recheck", world.recheck)
+    # Every decline's notice went out when it happened (mail is not what is compared here).
+    from billing.services import notify
+
+    monkeypatch.setattr(notify, "already_sent", lambda event, key: True)
     # Pay now asks whether there is a card to charge at all; the world's group always has one.
     from billing.services import stripe_client
 

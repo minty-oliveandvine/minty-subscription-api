@@ -181,12 +181,16 @@ def test_a_charged_card_stripe_no_longer_holds_reads_as_no_card(app, wallet):  #
     assert view["address"] is None
 
 
-def test_companies_are_listed_with_what_is_owed(app, wallet):  # noqa: F811
-    from billing.services import store
+def test_companies_are_listed_with_what_is_owed(app, wallet, monkeypatch):  # noqa: F811
+    from billing.services import clock, store
 
+    monkeypatch.setattr(clock, "now", lambda: NOW)
     payer = _payer()
     first = _open(payer, "pm_a", company="Acme Ltd", age_days=2)
     second = _open(payer, "pm_b", company="Beta Ltd", age_days=1)
+    # Past due with no dunning running: a collection given up on long ago. The customer was
+    # told (``dunning.customer_told``), so it shows.
+    store.set_group_paid_through(first.id, NOW - timedelta(days=40))
     _billed(_entity(None, "Zeta Co"), payer, first, phase="active")
     _billed(_entity(None, "Alpha Co"), payer, first, phase="past_due")
     _billed(_entity(None, "Trial Co"), payer, second, phase="trial")
@@ -207,6 +211,26 @@ def test_companies_are_listed_with_what_is_owed(app, wallet):  # noqa: F811
 
     two = _account(_read(payer), second.id)
     assert (two["past_due"], two["in_dunning"]) == (True, True)
+
+
+def test_a_company_held_past_due_while_the_processor_failed_is_not_shown_failed(
+    app, wallet, monkeypatch  # noqa: F811
+):
+    """Held in its grace while the PROCESSOR was failing - nobody was told, because the card
+    was never asked. The account must not say otherwise (the user's rule, 2026-09-30)."""
+    from billing.services import clock, store
+
+    monkeypatch.setattr(clock, "now", lambda: NOW)
+    payer = _payer()
+    account = _open(payer, "pm_a", company="Acme Ltd")
+    store.set_group_paid_through(account.id, NOW - timedelta(days=2))   # inside the grace
+    _billed(_entity(None, "Held Co"), payer, account, phase="past_due")
+    wallet["methods"] = [_card("pm_a")]
+
+    one = _account(_read(payer), account.id)
+
+    assert [(c["entity_name"], c["past_due"]) for c in one["companies"]] == [("Held Co", False)]
+    assert (one["past_due"], one["in_dunning"]) == (False, False)
 
 
 def test_a_company_handed_away_is_history_not_a_listing(app, wallet):  # noqa: F811

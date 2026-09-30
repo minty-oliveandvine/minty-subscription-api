@@ -39,7 +39,7 @@ def build_subscription_notices(entity_id: str, user_id) -> dict:
     Returns ``items: []`` when there is nothing to say; callers treat that as
     "render nothing" rather than rendering an empty modal.
     """
-    from billing.services import clock
+    from billing.services import clock, dunning
     from billing.services import store as sub_store
     from core.policy import Permission, has_permission_by_user_id
     from shared_models.models import User
@@ -53,8 +53,11 @@ def build_subscription_notices(entity_id: str, user_id) -> dict:
         code = card.get("code")
 
         # 1. Money already failed. The most urgent thing that can be true: access
-        #    ends on a date the payer can still act before.
-        if card.get("subscription_status") == "past_due":
+        #    ends on a date the payer can still act before. Only once the customer has
+        #    been told - past due because the PROCESSOR failed is not a failed payment.
+        if card.get("subscription_status") == "past_due" and dunning.told_of_failure(
+            entity_id, now
+        ):
             items.append(
                 {
                     "kind": "past_due",
@@ -255,3 +258,4 @@ def claim_subscription_notice(session, entity_id: str) -> bool:
     # on __setitem__, so appending to the existing list would not persist.
     session[entity_modules.NOTICE_SEEN_SESSION_KEY] = [*seen, str(entity_id)]
     return True
+

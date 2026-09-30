@@ -301,6 +301,8 @@ def _wire_runner(monkeypatch, *, account, invoices=None, paid=True, group=None):
     # and no stranded draft for the period (``dunning._nothing_open_but_owed``).
     monkeypatch.setattr(store, "open_invoices_for_group", lambda gid: [])
     monkeypatch.setattr(store, "invoice_for_key", lambda key: None)
+    # No handover's first charge owed on these cards (``store.handover_owed``).
+    monkeypatch.setattr(store, "handover_owed", lambda group, now: False)
     # Recorded under the PAYER, so the assertions below read the same whether the cycle
     # lives on the account or on its one card.
     monkeypatch.setattr(
@@ -326,6 +328,14 @@ def _wire_runner(monkeypatch, *, account, invoices=None, paid=True, group=None):
         lambda iid, pm=None: calls["retried"].append(iid)
         or (paid, None if paid else "declined"),
     )
+    calls["refunded"], calls["mailed"] = 0, []
+    monkeypatch.setattr(
+        store, "refund_group_dunning_attempt",
+        lambda gid: calls.__setitem__("refunded", calls["refunded"] + 1),
+    )
+    from billing.services import notify
+
+    monkeypatch.setattr(notify, "notify_many", lambda events: calls["mailed"].extend(events))
     return dunning, calls
 
 
@@ -380,6 +390,8 @@ def test_a_debt_settled_OUTSIDE_the_app_is_left_for_the_renewal_run_to_adopt(mon
     self-heals: the next renewal run finds the paid invoice by its key."""
     account = _Account(started=day(0), attempts=0, paid_through=PAID_TO, anchor=ANCHOR)
     dunning, calls = _wire_runner(monkeypatch, account=account, invoices=None)
+    # The period's invoice is there, and the processor says it was paid - the evidence.
+    _stranded_period(monkeypatch, _InvoiceRow("in_paid", "open"), "paid")
 
     dunning.collect_due(day(1))
 
@@ -451,14 +463,154 @@ def test_nothing_open_re_reads_the_cards_rows_still_saying_open(monkeypatch):
     dunning, calls = _wire_runner(monkeypatch, account=account, invoices=None)
     stale = _InvoiceRow("in_stale", "open")
     monkeypatch.setattr(store, "open_invoices_for_group", lambda gid: [stale])
+    monkeypatch.setattr(store, "invoice_for_key", lambda key: stale)
     reread = []
     monkeypatch.setattr(billing_gateway, "refresh_record",
                         lambda record: reread.append(record) or "paid")
 
     dunning.collect_due(day(1))
 
-    assert reread == [stale]
+    assert reread[0] is stale
     assert calls["ended"] == [("u1", "active")]
+
+
+# --- settled is a claim, and needs evidence ----------------------------------------------------
+#
+# "Nothing open" alone ended dunning as recovered - "Thank you for your payment", companies back
+# on - for any failure that left no open invoice behind.
+
+
+def test_nothing_open_and_no_invoice_for_the_period_is_not_a_recovery(monkeypatch, caplog):
+    """A renewal that failed before raising anything: nothing to collect, nothing collected."""
+    account = _Account(started=day(0), attempts=0, paid_through=PAID_TO, anchor=ANCHOR)
+    dunning, calls = _wire_runner(monkeypatch, account=account, invoices=None)
+
+    result = dunning.collect_due(day(1))
+
+    assert result["recovered"] == [] and calls["ended"] == []
+    assert calls["mailed"] == []
+    assert any(r.levelname == "WARNING" and "not calling it settled" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_nothing_open_and_a_reservation_never_confirmed_is_not_a_recovery(monkeypatch):
+    account = _Account(started=day(0), attempts=0, paid_through=PAID_TO, anchor=ANCHOR)
+    dunning, calls = _wire_runner(monkeypatch, account=account, invoices=None)
+    _stranded_period(monkeypatch, _InvoiceRow(None, "draft"), "draft")
+
+    result = dunning.collect_due(day(1))
+
+    assert result["recovered"] == [] and calls["ended"] == []
+
+
+def test_nothing_open_on_a_card_paid_up_again_is_a_recovery(monkeypatch):
+    """The renewal pass adopted the paid invoice and moved the card on: settled."""
+    account = _Account(started=day(0), attempts=0, paid_through=day(20), anchor=ANCHOR)
+    dunning, calls = _wire_runner(monkeypatch, account=account, invoices=None)
+
+    result = dunning.collect_due(day(1))
+
+    assert calls["ended"] == [("u1", "active")] and len(result["recovered"]) == 1
+
+
+# --- a paid charge is never a failed one ---------------------------------------------------------
+
+
+def test_a_paid_retry_whose_recording_failed_is_never_mailed_as_failed(monkeypatch, caplog):
+    from billing.services import notify, store
+
+    account = _Account(started=day(0), attempts=0, paid_through=PAID_TO, anchor=ANCHOR)
+    dunning, calls = _wire_runner(monkeypatch, account=account, invoices=[RENEWAL_INV])
+
+    def _db_down(gid, until):
+        raise RuntimeError("database went away")
+
+    monkeypatch.setattr(store, "set_group_paid_through", _db_down)
+
+    result = dunning.collect_due(day(1))
+
+    assert result["recovered"] == []                  # not recorded - the next pass settles it
+    assert [e for _u, e, _k, _c in calls["mailed"] if e == notify.DUNNING_RETRY_FAILED] == []
+    assert any(r.levelname == "ERROR" and "was PAID" in r.getMessage() for r in caplog.records)
+
+
+def test_a_card_paid_on_its_last_day_is_recovered_not_closed(monkeypatch):
+    """Giving up is the one outcome a late payment cannot undo: the sweep then cancels the
+    companies of a card that paid."""
+    from billing.services import billing_gateway
+
+    account = _Account(started=day(0), attempts=13, paid_through=PAID_TO, anchor=ANCHOR)
+    dunning, calls = _wire_runner(monkeypatch, account=account, invoices=None)
+    _stranded_period(monkeypatch, _InvoiceRow("in_r", "open"), "paid")
+    monkeypatch.setattr(billing_gateway, "recheck", lambda record: {**RENEWAL_INV, "status": "paid"})
+
+    result = dunning.collect_due(day(15))
+
+    assert result["given_up"] == []
+    assert calls["ended"] == [("u1", "active")]
+    assert calls["paid_through"] == [("u1", NEXT_PERIOD_END)]
+
+
+def test_a_card_that_never_paid_is_still_given_up(monkeypatch):
+    from billing.services import billing_gateway
+
+    account = _Account(started=day(0), attempts=13, paid_through=PAID_TO, anchor=ANCHOR)
+    dunning, calls = _wire_runner(monkeypatch, account=account, invoices=None)
+    _stranded_period(monkeypatch, _InvoiceRow("in_r", "open"), "open")
+    monkeypatch.setattr(billing_gateway, "recheck", lambda record: {**RENEWAL_INV, "status": "open"})
+
+    result = dunning.collect_due(day(15))
+
+    assert len(result["given_up"]) == 1 and calls["ended"] == [("u1", "closed")]
+
+
+# --- the processor failing is not the card declining ----------------------------------------------
+
+
+def test_a_retry_the_processor_failed_spends_no_attempt_and_sends_nothing(monkeypatch):
+    """Counted, an outage spent the customer's retries - and would give up on them - for us."""
+    from billing.services import billing_gateway
+
+    account = _Account(started=day(0), attempts=0, paid_through=PAID_TO, anchor=ANCHOR)
+    dunning, calls = _wire_runner(monkeypatch, account=account, invoices=[RENEWAL_INV])
+    monkeypatch.setattr(billing_gateway, "retry_invoice",
+                        lambda iid, pm=None: (False, billing_gateway.UNAVAILABLE))
+
+    result = dunning.collect_due(day(1))
+
+    assert calls["attempts"] == 1 and calls["refunded"] == 1
+    assert result["retried"] == [] and calls["mailed"] == []
+
+
+# --- mail per card -------------------------------------------------------------------------------
+
+
+def test_each_card_is_mailed_as_its_outcome_is_known(monkeypatch):
+    """Mail waited for the end of the cycle, so anything that stopped the cycle lost every
+    notice before it - for good: the retry key counts the attempt, and a recovered card leaves
+    the dunning list."""
+    from billing.services import notify, store
+
+    account = _Account(started=day(0), attempts=0, paid_through=PAID_TO, anchor=ANCHOR)
+    dunning, calls = _wire_runner(monkeypatch, account=account, invoices=[RENEWAL_INV],
+                                  paid=False)
+    first = _Group(account)
+    second = _Group(account)
+    second.id = "g2"
+    monkeypatch.setattr(store, "groups_in_dunning", lambda: [first, second])
+    real = dunning._collect_one_group
+
+    def _one(group, now, offsets, window):
+        if group.id == "g2":
+            raise KeyboardInterrupt
+        return real(group, now, offsets, window)
+
+    monkeypatch.setattr(dunning, "_collect_one_group", _one)
+
+    with pytest.raises(KeyboardInterrupt):
+        dunning.collect_due(day(1))
+
+    assert [e for _u, e, _k, _c in calls["mailed"]] == [notify.DUNNING_RETRY_FAILED]
 
 
 def test_a_failed_retry_advances_nothing(monkeypatch):
@@ -743,3 +895,49 @@ def test_a_refreshed_STALE_invoice_is_collected_not_recovered(monkeypatch):
 
     assert result["collected"][0]["invoice"] == "in_s2"
     assert (result["recovered"], calls["ended"], calls["paid_through"]) == ([], [], [])
+
+
+
+# --- a handover's first charge, in dunning (the user's call, 2026-09-30) ------------------------
+
+
+def test_nothing_open_while_a_handover_charge_is_owed_is_not_a_recovery(monkeypatch):
+    """No card to charge it on, or not raised yet: the parked offer is the only record of the
+    debt, and without it dunning thanked the payer for nothing."""
+    from billing.services import store
+
+    account = _Account(started=day(0), attempts=0, paid_through=None, anchor=ANCHOR)
+    dunning, calls = _wire_runner(monkeypatch, account=account, invoices=None)
+    monkeypatch.setattr(store, "handover_owed", lambda group, now: True)
+
+    result = dunning.collect_due(day(1))
+
+    assert result["recovered"] == [] and calls["ended"] == []
+
+
+def test_a_handover_charge_dunning_collects_finishes_the_handover(monkeypatch):
+    from billing.services import transfers
+
+    account = _Account(started=day(0), attempts=0, paid_through=PAID_TO, anchor=ANCHOR)
+    handover = {"id": "in_t", "metadata": {"transfer_key": "transfer-o1-1"}}
+    dunning, calls = _wire_runner(monkeypatch, account=account, invoices=[handover])
+    settled: list = []
+    monkeypatch.setattr(transfers, "settle_paid_handover", lambda inv: settled.append(inv["id"]))
+
+    dunning.collect_due(day(1))
+
+    assert settled == ["in_t"]
+
+
+
+def test_a_card_paid_up_by_the_deadline_is_recovered_not_closed(monkeypatch):
+    """The renewal pass adopted a payment and moved the card on, so the deadline's re-read -
+    keyed by the period the card is behind on - finds nothing. Paid up is paid: closed, it
+    stayed past due with no episode and never heard "Thank you"."""
+    account = _Account(started=day(0), attempts=13, paid_through=day(40), anchor=ANCHOR)
+    dunning, calls = _wire_runner(monkeypatch, account=account, invoices=None)
+
+    result = dunning.collect_due(day(15))
+
+    assert result["given_up"] == []
+    assert calls["ended"] == [("u1", "active")] and len(result["recovered"]) == 1

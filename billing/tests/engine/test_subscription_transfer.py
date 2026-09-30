@@ -129,8 +129,9 @@ def _wire(monkeypatch, db, *, rows=None, payer=OLD, dunning=(), admin=True,
         lambda payer_user_id=None: calls["swept"].append(payer_user_id),
     )
 
-    def _charge(entity_id, payer_user_id, customer_id, codes, *, at, idempotency_key):
-        calls["charges"].append({"at": at, "key": idempotency_key})
+    def _charge(entity_id, payer_user_id, customer_id, codes, *, at, idempotency_key,
+                keep_open=False):
+        calls["charges"].append({"at": at, "key": idempotency_key, "keep_open": keep_open})
         if callable(charge):
             return charge(len(calls["charges"]))
         return charge or {"paid": True, "period_end": PERIOD_END, "invoice_id": "in_1",
@@ -754,9 +755,8 @@ def test_a_declined_collection_stays_owed_and_retries_with_a_fresh_key(db_sessio
 
 def test_a_declined_collection_puts_the_company_past_due(db_session, monkeypatch):
     """A company nobody has paid for is past due, which is what starts the grace window
-    and eventually revokes access. Dunning cannot collect this debt - it chases the
-    payer's oldest OPEN invoice and the failed charge voided its own - so the retry above
-    is what settles it; this is the access half."""
+    and eventually revokes access - exactly as a declined renewal does (the user's call,
+    2026-09-30). Its invoice stays open for dunning to chase."""
     from billing.services import store
 
     transfers, _calls = _wire(
@@ -820,7 +820,7 @@ def test_the_module_set_is_re_read_at_collection(db_session, monkeypatch):
     codes: list = []
     from billing.services import checkout
 
-    def _charge(entity_id, payer, customer_id, c, *, at, idempotency_key):
+    def _charge(entity_id, payer, customer_id, c, *, at, idempotency_key, keep_open=False):
         codes.append(set(c))
         return {"paid": True, "period_end": PERIOD_END, "invoice_id": "in_1",
                 "amount": 19000, "currency": "HKD", "anchor": ANCHOR, "reason": None}
@@ -1790,3 +1790,375 @@ def test_the_flip_is_all_or_nothing(db_session, monkeypatch):
         "the offer is NOT accepted: the flip's own writes were rolled back with it"
     )
     assert calls["audit"] == [] and calls["swept"] == [], "nothing after the block ran"
+
+
+# --- the parked window: paid for, and not renewed ---------------------------------------------
+#
+# Against the REAL store: ``_wire`` stubs ``paid_through_for_entity``, which is the rule these
+# pin. The company is the new payer's, on a card of theirs; the handover's first charge is
+# parked on ``collect_at``, where the old payer's money runs out.
+
+
+def _parked_on_real_store(*, card_paid_through=None):
+    import uuid
+
+    from billing.services import store
+    from billing.tests.engine.conftest import make_entity, make_user, seed_currency
+    from shared_models.models import SubscriptionTransfer
+
+    old = make_user(f"old-{uuid.uuid4().hex[:6]}@payer.test")
+    new = make_user(f"new-{uuid.uuid4().hex[:6]}@payer.test")
+    entity = make_entity(new, name="Parked Co", currency=seed_currency("HKD"))
+    group = store.create_billing_account(new.id, "pm_new")
+    store.nominate_group_for_entity(entity.id, new.id, group.id)
+    store.upsert_module_row(entity.id, "PAYMENT_REQUEST", new.id, phase="active")
+    if card_paid_through is not None:
+        store.set_group_paid_through(group.id, card_paid_through)
+    SubscriptionTransfer.objects.create(
+        entity_id=entity.id, from_user_id=old.id, to_user_id=new.id, status="accepted",
+        expires_at=NOW + timedelta(days=7), collect_at=PAID_THROUGH,
+    )
+    return new, entity, group
+
+
+def test_a_parked_handover_is_paid_through_where_the_old_payers_money_ends(db_session):
+    """On a card that has never collected, the company read as paid through NOTHING - no
+    access at all - and was switched off the moment the handover was accepted."""
+    from billing.services import access, store
+
+    _new, entity, group = _parked_on_real_store()
+
+    assert store.paid_through_for_entity(entity.id) == PAID_THROUGH
+    assert store.billing_group(group.id).paid_through is None, "the card's own date is untouched"
+    assert access.grants_access(NOW, phase="active",
+                                period_end=store.paid_through_for_entity(entity.id))
+
+
+def test_a_card_paid_further_than_the_parked_window_answers_for_itself(db_session):
+    from billing.services import store
+
+    later = PAID_THROUGH + timedelta(days=20)
+    _new, entity, _group_ = _parked_on_real_store(card_paid_through=later)
+
+    assert store.paid_through_for_entity(entity.id) == later
+
+
+def test_a_parked_company_is_left_off_the_new_payers_renewal_until_collected(db_session):
+    """A renewal of the new payer's card before the charge date billed the company for the old
+    payer's days, and the collection then billed the window again."""
+    from billing.services import store
+    from billing.services.billing import Period
+
+    new, entity, _group_ = _parked_on_real_store()
+    before = Period(ANCHOR, PERIOD_END)                       # 1 Sept - 1 Oct: reaches 12 Sept
+    after = Period(PERIOD_END, PERIOD_END + timedelta(days=31))
+
+    assert store.entities_awaiting_handover(new.id, before) == {str(entity.id)}
+    assert store.entities_awaiting_handover(new.id, after) == set(), (
+        "a period after the parked window starts is billed as normal"
+    )
+
+
+
+# --- a failed deferred charge is chased like a renewal decline (the user's call, 2026-09-30) ----
+#
+# It used to void its invoice and try again every hour under a fresh key: a declining card was
+# hit hourly with no end, the new payer was told nothing, and dunning - finding nothing open -
+# thanked them for a payment nobody made, every day or two.
+
+DECLINED_CHARGE = {"paid": False, "period_end": None, "invoice_id": "in_1", "amount": 0,
+                   "currency": None, "anchor": None, "reason": "Your card was declined.",
+                   "declined": True, "transient": False}
+
+
+def _mail(monkeypatch):
+    from billing.services import notify
+
+    sent: list = []
+    monkeypatch.setattr(notify, "notify",
+                        lambda uid, event, *, dedupe_key, context=None:
+                        sent.append((uid, event, dedupe_key)) or True)
+    return sent
+
+
+def _last_attempt(monkeypatch, *, status, tried):
+    """The last attempt's invoice, as the store and the processor answer for it."""
+    from types import SimpleNamespace
+
+    from billing.services import billing_gateway, store
+
+    row = SimpleNamespace(id="row_1", external_id="in_1", status=status,
+                          idempotency_key=f"transfer-{OFFER}-1", total=19000, currency="hkd",
+                          period_start=PAID_THROUGH, period_end=PERIOD_END)
+    monkeypatch.setattr(store, "invoice_for_key",
+                        lambda key: row if key == f"transfer-{OFFER}-1" else None)
+    answer = {"id": "in_1", "status": status, "attempted": tried,
+              "payment_intent": {"id": "pi_1", "last_payment_error": (
+                  {"type": "card_error"} if tried else None)}}
+    monkeypatch.setattr(billing_gateway, "recheck", lambda record: answer)
+    return row
+
+
+def test_a_declined_deferred_charge_stays_open_and_starts_dunning_with_one_notice(
+    db_session, monkeypatch
+):
+    from billing.services import notify, store
+
+    transfers, calls = _wire(monkeypatch, db_session, payer=NEW, charge=DECLINED_CHARGE)
+    group = _group(monkeypatch)
+    started: list = []
+    monkeypatch.setattr(store, "begin_group_dunning", lambda gid, at: started.append(gid))
+    sent = _mail(monkeypatch)
+    offer = _parked(db_session, transfers)
+
+    result = transfers.collect_due(PAID_THROUGH)
+    offer.refresh_from_db()
+
+    assert calls["charges"][0]["keep_open"] is True        # nothing withdrawn
+    assert started == [group.id]
+    assert sent == [(NEW, notify.RENEWAL_FAILED, f"transfer-{OFFER}-1")]
+    assert result["failed"][0]["invoice"] == "in_1"
+    assert transfers._aware(offer.collect_at) == PAID_THROUGH, "still owed"
+
+
+def test_a_declined_deferred_charge_is_not_charged_again_the_next_hour(db_session, monkeypatch):
+    """Dunning chases it now - daily, with a give-up. Hourly re-charging is over."""
+    from billing.services import store
+
+    transfers, calls = _wire(monkeypatch, db_session, payer=NEW, charge=DECLINED_CHARGE)
+    _group(monkeypatch, dunning_at=PAID_THROUGH)
+    monkeypatch.setattr(store, "begin_group_dunning", lambda gid, at: None)
+    _mail(monkeypatch)
+    _parked(db_session, transfers)
+    transfers.collect_due(PAID_THROUGH)
+    _last_attempt(monkeypatch, status="open", tried=True)
+
+    later = transfers.collect_due(PAID_THROUGH + timedelta(hours=1))
+
+    assert len(calls["charges"]) == 1
+    assert later["failed"][0]["reason"] == "declined; dunning is chasing it"
+
+
+def test_a_charge_found_paid_since_is_settled_not_charged_again(db_session, monkeypatch):
+    """Paid through dunning, a Pay now or the hosted page: the collection settles it."""
+    transfers, calls = _wire(monkeypatch, db_session, payer=NEW, charge=DECLINED_CHARGE)
+    _group(monkeypatch)
+    _mail(monkeypatch)
+    offer = _parked(db_session, transfers)
+    offer.charge_attempt, offer.charge_key = 1, f"transfer-{OFFER}-1"
+    offer.save(update_fields=["charge_attempt", "charge_key"])
+    _last_attempt(monkeypatch, status="paid", tried=True)
+
+    result = transfers.collect_due(PAID_THROUGH + timedelta(days=2))
+    offer.refresh_from_db()
+
+    assert calls["charges"] == []
+    assert len(result["collected"]) == 1
+    assert offer.collect_at is None and offer.charge_invoice_id == "in_1"
+    assert calls["flips"] == [(ENTITY, NEW, PERIOD_END)]
+
+
+def test_a_processor_outage_keeps_the_charge_owed_and_tells_nobody(db_session, monkeypatch):
+    from billing.services import store
+
+    outage = {**DECLINED_CHARGE, "declined": False, "transient": True, "invoice_id": None}
+    transfers, calls = _wire(monkeypatch, db_session, payer=NEW, charge=outage)
+    group = _group(monkeypatch)
+    held: list = []
+    monkeypatch.setattr(store, "hold_group_grace", lambda gid, at: held.append(gid))
+    monkeypatch.setattr(store, "begin_group_dunning",
+                        lambda gid, at: pytest.fail("dunning started for an outage"))
+    sent = _mail(monkeypatch)
+    offer = _parked(db_session, transfers)
+
+    transfers.collect_due(PAID_THROUGH)
+    offer.refresh_from_db()
+
+    assert held == [group.id] and sent == []
+    assert transfers._aware(offer.collect_at) == PAID_THROUGH
+
+
+def test_a_card_gone_since_the_accept_is_told_not_left_silent(db_session, monkeypatch):
+    """It started dunning with nothing to collect - and dunning, finding nothing open, called
+    it settled. Now the payer is told, and the charge is taken once there is a card again."""
+    from billing.services import notify, store
+
+    transfers, calls = _wire(monkeypatch, db_session, payer=NEW)
+    monkeypatch.setattr(store, "billing_group_for_entity", lambda eid, uid=None: None)
+    sent = _mail(monkeypatch)
+    offer = _parked(db_session, transfers)
+
+    transfers.collect_due(PAID_THROUGH)
+    offer.refresh_from_db()
+
+    assert calls["charges"] == []
+    assert [event for _u, event, _k in sent] == [notify.RENEWAL_FAILED]
+    assert transfers._aware(offer.collect_at) == PAID_THROUGH
+
+
+def test_a_charge_unpaid_past_its_grace_is_abandoned(db_session, monkeypatch):
+    """As long as a declined renewal is chased, and no longer."""
+    transfers, calls = _wire(monkeypatch, db_session, payer=NEW)
+    _group(monkeypatch)
+    offer = _parked(db_session, transfers)
+
+    result = transfers.collect_due(PAID_THROUGH + timedelta(days=16))
+    offer.refresh_from_db()
+
+    assert calls["charges"] == [] and len(result["abandoned"]) == 1
+    assert offer.collect_at is None
+
+
+def test_a_handover_charge_dunning_collected_is_settled(db_session, monkeypatch):
+    """Dunning paid the handover's invoice: the claim, the offer and the audit, as the
+    collection would have written them."""
+    transfers, calls = _wire(monkeypatch, db_session, payer=NEW)
+    _group(monkeypatch)
+    offer = _parked(db_session, transfers)
+    offer.charge_attempt, offer.charge_key = 1, f"transfer-{OFFER}-1"
+    offer.save(update_fields=["charge_attempt", "charge_key"])
+    _last_attempt(monkeypatch, status="paid", tried=True)
+
+    transfers.settle_paid_handover(
+        {"id": "in_1", "metadata": {"transfer_key": f"transfer-{OFFER}-1"}})
+    offer.refresh_from_db()
+
+    assert offer.collect_at is None and offer.charge_invoice_id == "in_1"
+    assert calls["flips"] == [(ENTITY, NEW, PERIOD_END)]
+
+
+def test_settling_ignores_an_invoice_that_is_no_handovers(db_session, monkeypatch):
+    transfers, calls = _wire(monkeypatch, db_session, payer=NEW)
+
+    transfers.settle_paid_handover({"id": "in_r", "metadata": {"renewal_key": "renewal-x"}})
+
+    assert calls["flips"] == []
+
+
+def test_a_due_handover_charge_is_a_debt_dunning_can_see(db_session):
+    """With nothing open at the processor, the parked offer is the only record anything is
+    owed - and dunning, blind to it, called the debt settled."""
+    from billing.services import store
+
+    new, entity, group = _parked_on_real_store()
+
+    assert store.handover_owed(group, PAID_THROUGH + timedelta(hours=1))
+    assert not store.handover_owed(group, PAID_THROUGH - timedelta(days=1))    # not due yet
+
+
+# --- the review's findings (2026-09-30) ------------------------------------------------------------
+
+
+def _row_of(key, *, external_id, status):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(id="row_1", external_id=external_id, status=status,
+                           idempotency_key=key, total=19000, currency="hkd",
+                           period_start=PAID_THROUGH, period_end=PERIOD_END)
+
+
+def _with_last_attempt(db_session, transfers):
+    offer = _parked(db_session, transfers)
+    offer.charge_attempt, offer.charge_key = 1, f"transfer-{OFFER}-1"
+    offer.save(update_fields=["charge_attempt", "charge_key"])
+    return offer
+
+
+def test_a_last_attempt_found_by_its_metadata_is_charged_not_declined(db_session, monkeypatch):
+    """Its create answered too late to be recorded: the row had no id, Stripe had a draft
+    finalized since. The store records what it finds on a FRESH copy of the row - acted on
+    through the old one, the read asked Stripe for invoice None and the refusal read as a
+    decline: dunning started and the payer was told their payment failed."""
+    from billing.services import billing_gateway, store
+
+    transfers, calls = _wire(monkeypatch, db_session, payer=NEW, charge=DECLINED_CHARGE)
+    _group(monkeypatch)
+    sent = _mail(monkeypatch)
+    _with_last_attempt(db_session, transfers)
+    key = f"transfer-{OFFER}-1"
+    reads = iter([_row_of(key, external_id=None, status="draft")])
+    monkeypatch.setattr(store, "invoice_for_key",
+                        lambda k: next(reads, None) or _row_of(k, external_id="in_1",
+                                                                status="open"))
+    monkeypatch.setattr(billing_gateway, "find_invoice_by_metadata",
+                        lambda *a, **k: {"id": "in_1", "status": "open"})
+    monkeypatch.setattr(billing_gateway, "record_found_invoice",
+                        lambda record, found: found.get("status"))
+
+    def _recheck(record):
+        assert record.external_id == "in_1", "acted on the stale row"
+        return {"id": "in_1", "status": "open", "attempted": False,
+                "payment_intent": {"id": "pi_1", "last_payment_error": None}}
+
+    monkeypatch.setattr(billing_gateway, "recheck", _recheck)
+    monkeypatch.setattr(billing_gateway, "resume_invoice",
+                        lambda record, payment_method=None, where="renewal":
+                        {"id": record.external_id, "status": "paid"})
+
+    result = transfers.collect_due(PAID_THROUGH + timedelta(hours=1))
+
+    assert len(result["collected"]) == 1
+    assert sent == [] and calls["charges"] == []
+
+
+def test_an_abandoned_handover_withdraws_the_invoice_it_left_open(db_session, monkeypatch):
+    """Past its grace, unpaid. Left open, dunning or a Retry payment could still collect it -
+    for a handover that is over, and that nothing would then grant anything for."""
+    from billing.services import billing_gateway, checkout, store
+
+    transfers, calls = _wire(monkeypatch, db_session, payer=NEW)
+    _group(monkeypatch)
+    offer = _with_last_attempt(db_session, transfers)
+    key = f"transfer-{OFFER}-1"
+    monkeypatch.setattr(store, "invoice_for_key",
+                        lambda k: _row_of(k, external_id="in_1", status="open"))
+    monkeypatch.setattr(billing_gateway, "recheck",
+                        lambda record: {"id": "in_1", "status": "open", "attempted": True})
+    voided: list = []
+    monkeypatch.setattr(checkout, "_void_unpaid_invoice",
+                        lambda inv, eid, what: voided.append(inv))
+
+    result = transfers.collect_due(PAID_THROUGH + timedelta(days=16))
+    offer.refresh_from_db()
+
+    assert len(result["abandoned"]) == 1 and offer.collect_at is None
+    assert voided == ["in_1"]
+    assert key == offer.charge_key
+
+
+def test_a_charge_paid_at_the_last_moment_is_settled_not_abandoned(db_session, monkeypatch):
+    from billing.services import billing_gateway, checkout, store
+
+    transfers, calls = _wire(monkeypatch, db_session, payer=NEW)
+    _group(monkeypatch)
+    offer = _with_last_attempt(db_session, transfers)
+    monkeypatch.setattr(store, "invoice_for_key",
+                        lambda k: _row_of(k, external_id="in_1", status="open"))
+    monkeypatch.setattr(billing_gateway, "recheck",
+                        lambda record: {"id": "in_1", "status": "paid"})
+    monkeypatch.setattr(checkout, "_void_unpaid_invoice",
+                        lambda *a: pytest.fail("withdrew a paid charge"))
+
+    result = transfers.collect_due(PAID_THROUGH + timedelta(days=16))
+    offer.refresh_from_db()
+
+    assert len(result["collected"]) == 1 and result["abandoned"] == []
+    assert calls["flips"] == [(ENTITY, NEW, PERIOD_END)]
+
+
+def test_a_card_whose_collection_is_over_is_not_put_back_into_dunning(db_session, monkeypatch):
+    """Its episode was closed on purpose; starting one each pass only to close it again told
+    nobody anything."""
+    from billing.services import store
+
+    transfers, calls = _wire(monkeypatch, db_session, payer=NEW, charge=DECLINED_CHARGE)
+    group = _group(monkeypatch)
+    group.paid_through = PAID_THROUGH - timedelta(days=40)           # its access ran out
+    started: list = []
+    monkeypatch.setattr(store, "begin_group_dunning", lambda gid, at: started.append(gid))
+    _mail(monkeypatch)
+    _parked(db_session, transfers)
+
+    transfers.collect_due(PAID_THROUGH)
+
+    assert started == []

@@ -14,7 +14,7 @@ What is pinned: the report reads the list as it really is, counts only cards bil
 from __future__ import annotations
 
 from billing.services import daily
-from billing.tests.engine.test_renewal_runner import NOW, _Record, _wire
+from billing.tests.engine.test_renewal_runner import DECLINED, NOW, _Record, _wire
 
 
 def test_a_card_billed_and_still_due_is_reported_from_the_real_list(monkeypatch):
@@ -37,10 +37,9 @@ def test_a_card_whose_charge_failed_is_dunnings_not_a_backlog(monkeypatch):
 
 def test_a_card_that_failed_on_an_earlier_pass_is_not_a_backlog_either(monkeypatch):
     """Skipped as already invoiced and unpaid - dunning's, every hour, not "behind"."""
-    from billing.services import billing_gateway
 
-    renewals, _calls = _wire(monkeypatch, existing=_Record(external_id="in_o", status="open"))
-    monkeypatch.setattr(billing_gateway, "refresh_record", lambda record: "open")
+    renewals, _calls = _wire(monkeypatch, existing=_Record(external_id="in_o", status="open"),
+                             at_processor=DECLINED, dunning_since=NOW)
     result = renewals.run_renewals(NOW, scope=["u1"], issue=True)
     assert result["skipped"][0]["reason"] == "already invoiced; unpaid"
 

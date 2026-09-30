@@ -586,7 +586,7 @@
     },
     "/api/me/invoices/{invoice_id}/retry": {
       "post": {
-        "description": "08-B's *Retry payment*: collect this failed invoice now, on its account's card\n(``billing_accounts.retry_invoice``). Answers ``{\"ok\", \"status\", \"message\"}`` in the words\nthe module page's retry uses (``api._retry``): ``paid``, ``failed`` (with the processor's\nreason), ``no_card``, ``gave_up``, ``nothing_owed``, ``older_debt_only``,\n``not_this_invoice``, ``not_collectable``. An invoice the processor will no longer collect\nis re-issued and the replacement charged in the same press; one that cannot be re-issued\nautomatically is ``not_collectable``. Someone else's invoice is 404; one not waiting for a\npayment, 409 (or ``not_this_invoice`` when it was re-issued since the page was drawn).",
+        "description": "08-B's *Retry payment*: collect this failed invoice now, on its account's card\n(``billing_accounts.retry_invoice``). Answers ``{\"ok\", \"status\", \"message\"}`` in the words\nthe module page's retry uses (``api._retry``): ``paid``, ``failed`` (with the processor's\nreason), ``no_card``, ``gave_up``, ``nothing_owed``, ``older_debt_only``,\n``not_this_invoice``, ``not_collectable``, and ``unavailable`` when the processor failed\nrather than the card (nothing charged, no attempt spent). An invoice the processor will no\nlonger collect is re-issued and the replacement charged in the same press; one that cannot\nbe re-issued automatically is ``not_collectable``. Someone else's invoice is 404; one not waiting for a\npayment, 409 (or ``not_this_invoice`` when it was re-issued since the page was drawn).",
         "operationId": "billing_api_me_my_invoice_retry",
         "parameters": [
           {

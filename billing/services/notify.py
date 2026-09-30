@@ -19,10 +19,13 @@ THREE RULES, all of them load-bearing:
    that already succeeded short-circuits. See that model for why the constraint lives in
    the database rather than here.
 
-3. **Send after the money, never during.** Callers collect events and flush them once
-   their loop has finished and ``store`` has committed. Mailing mid-loop risks telling a
-   customer about a charge that then rolls back, and puts network latency inside a
-   billing transaction.
+3. **Send once the money is recorded, never during - and card by card.** The money jobs
+   (``renewals.run_renewals``, ``dunning.collect_due``) mail each card's outcome as soon as
+   it is recorded, not at the end of the run: mailed after the whole batch, an exception or
+   a restart part-way through lost every notice before it, for good - the next pass skips a
+   declined card, the retry key counts the attempt, a recovered card leaves the list
+   (2026-09-30). Every write commits as it happens, so there is nothing staged left to roll
+   back under a notice already sent; and nothing is mailed while a charge is in flight.
 
 The copy for all eight events lives in ``_COPY`` below rather than in eight templates, so
 the entire customer-facing vocabulary of the billing system is reviewable on one screen —
@@ -854,6 +857,25 @@ def address_for(user_id, event: str, context: dict | None) -> tuple[str | None, 
     return address, first_name
 
 
+def already_sent(event: str, dedupe_key: str) -> bool:
+    """Whether this email has been DELIVERED. A claim still reading "failed" - the send died,
+    was refused, or never finished - has not, and the next ``notify`` retries it.
+
+    For a caller deciding whether a notice still owed has to be sent again (the renewal pass's
+    decline catch-up), so that it does not report the same failure on every pass. Never
+    raises: an unreadable log answers False, and ``_claim`` still refuses a second delivery.
+    """
+    try:
+        from shared_models.models import SubscriptionEmailLog
+
+        return SubscriptionEmailLog.objects.filter(
+            event=event, dedupe_key=str(dedupe_key), status=STATUS_SENT
+        ).exists()
+    except Exception:
+        logger.exception("notify: could not read whether {} / {} went out", event, dedupe_key)
+        return False
+
+
 def _claim(user_id, event: str, dedupe_key: str):
     """Reserve this send, or return None if it has already gone out.
 
@@ -1001,9 +1023,10 @@ def notify(user_id, event: str, *, dedupe_key: str, context: dict | None = None)
 def notify_many(events) -> int:
     """Flush a batch of prepared notifications; returns how many were delivered.
 
-    ``events`` are ``(user_id, event, dedupe_key, context)`` tuples. Callers accumulate
-    these during their run and flush ONCE at the end — see rule 3 in the module
-    docstring. Nothing here raises, so a batch always drains completely.
+    ``events`` are ``(user_id, event, dedupe_key, context)`` tuples: ONE card's outcomes,
+    flushed as soon as they are recorded (renewals, dunning - rule 3 in the module
+    docstring), or a whole run's trial-ending notices. Nothing here raises, so a batch
+    always drains completely.
     """
     sent = 0
     for user_id, event, dedupe_key, context in events:

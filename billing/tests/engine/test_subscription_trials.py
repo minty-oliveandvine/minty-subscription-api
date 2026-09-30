@@ -132,6 +132,8 @@ def _setup(monkeypatch, *, existing_row=None, now=None, anchor=None, paid=True):
         lambda gid, until: calls["paid_through"].append(("u1", until)),
     )
     monkeypatch.setattr(checkout, "_billed_codes_in_house", lambda eid: set())
+    # No earlier attempt at a conversion on record (``_resolve_prior_conversions``).
+    monkeypatch.setattr(store, "invoices_with_key_prefix", lambda payer, prefix: [])
 
     monkeypatch.setattr(
         store, "upsert_module_row",
@@ -405,6 +407,74 @@ def test_a_DECLINED_card_voids_its_conversion_invoice(monkeypatch):
     assert result["expired"] == [{"entity_id": "e1", "code": "PAYMENT_REQUEST"}]
 
 
+def test_a_conversion_whose_answer_was_lost_converts(monkeypatch):
+    """The charge went through and its answer never arrived: the void finds it PAID. Expiring
+    the trial then left a customer charged for modules they were refused - and a restart
+    charged them again."""
+    from billing.services import billing_gateway, changes, store
+
+    checkout, calls = _setup(monkeypatch, now=_NOW, anchor=_ANCHOR)
+
+    def _lost(*_a, **_k):
+        raise billing_gateway.BillingError("no answer from the processor", invoice_id="in_lost")
+
+    monkeypatch.setattr(changes, "issue_change", _lost)
+    monkeypatch.setattr(billing_gateway, "void_invoice", lambda iid: "paid")
+    monkeypatch.setattr(store, "due_trials", lambda now, limit=None: [_Row(code="PAYMENT_REQUEST")])
+
+    result = checkout.convert_or_expire_due_trials()
+
+    assert result["converted"] == [{"entity_id": "e1", "code": "PAYMENT_REQUEST"}]
+    assert result["expired"] == []
+    assert calls["access"] != [("e1", "PAYMENT_REQUEST", False)]
+
+
+def test_a_processor_outage_at_the_trial_end_keeps_the_trial(monkeypatch):
+    """The user's rule (2026-09-30): Stripe failing is not the card declining. The trial is
+    not expired and nothing is withdrawn - the next pass tries again, and finds whatever this
+    attempt raised by its key."""
+    from billing.services import billing_gateway, changes, store
+
+    checkout, calls = _setup(monkeypatch, now=_NOW, anchor=_ANCHOR)
+    voided: list[str] = []
+
+    def _outage(*_a, **_k):
+        raise billing_gateway.BillingError("could not connect", invoice_id="in_x", retryable=True)
+
+    monkeypatch.setattr(changes, "issue_change", _outage)
+    monkeypatch.setattr(billing_gateway, "void_invoice", lambda iid: voided.append(iid))
+    monkeypatch.setattr(store, "due_trials", lambda now, limit=None: [
+        _Row(code="PAYMENT_REQUEST", trial_end=_NOW - timedelta(hours=2))])
+
+    result = checkout.convert_or_expire_due_trials()
+
+    assert result == {"converted": [], "expired": [],
+                      "deferred": [{"entity_id": "e1", "code": "PAYMENT_REQUEST"}]}
+    assert voided == []
+    assert ("e1", "PAYMENT_REQUEST", False) not in calls["access"]
+
+
+def test_a_trial_the_processor_failed_for_the_whole_grace_expires(monkeypatch, caplog):
+    """Not for ever: a revoked key nobody noticed must not keep a trial free indefinitely."""
+    from billing.services import billing_gateway, changes, policy, store
+
+    checkout, calls = _setup(monkeypatch, now=_NOW, anchor=_ANCHOR)
+    monkeypatch.setattr(policy, "current", lambda: policy.DEFAULTS)
+
+    def _outage(*_a, **_k):
+        raise billing_gateway.BillingError("could not connect", retryable=True)
+
+    monkeypatch.setattr(changes, "issue_change", _outage)
+    monkeypatch.setattr(store, "due_trials", lambda now, limit=None: [
+        _Row(code="PAYMENT_REQUEST", trial_end=_NOW - timedelta(days=16))])
+
+    result = checkout.convert_or_expire_due_trials()
+
+    assert result["expired"] == [{"entity_id": "e1", "code": "PAYMENT_REQUEST"}]
+    assert any(r.levelname == "ERROR" and "past the grace window" in r.getMessage()
+               for r in caplog.records)
+
+
 def test_a_failure_with_no_invoice_raised_voids_nothing(monkeypatch):
     """``Invoice.create`` itself failing leaves no document, so there is nothing to
     withdraw — and calling void with None would be an error of its own."""
@@ -475,7 +545,8 @@ def test_due_trial_without_a_card_expires_and_revokes_access(monkeypatch):
 
     result = checkout.convert_or_expire_due_trials()
 
-    assert result == {"converted": [], "expired": [{"entity_id": "e1", "code": "PAYMENT_REQUEST"}]}
+    assert result == {"converted": [], "expired": [{"entity_id": "e1", "code": "PAYMENT_REQUEST"}],
+                      "deferred": []}
     assert calls["writes"][-1][3]["phase"] == "expired"
     assert calls["access"] == [("e1", "PAYMENT_REQUEST", False)]  # access revoked
 
@@ -498,7 +569,8 @@ def test_due_trial_expires_when_the_entity_never_consented_to_billing(monkeypatc
 
     result = checkout.convert_or_expire_due_trials()
 
-    assert result == {"converted": [], "expired": [{"entity_id": "e1", "code": "PAYMENT_REQUEST"}]}
+    assert result == {"converted": [], "expired": [{"entity_id": "e1", "code": "PAYMENT_REQUEST"}],
+                      "deferred": []}
     assert calls["writes"][-1][3]["phase"] == "expired"
     assert calls["access"] == [("e1", "PAYMENT_REQUEST", False)]
 
@@ -521,7 +593,8 @@ def test_due_trial_expires_when_no_card_is_nominated_for_the_entity(monkeypatch)
 
     result = checkout.convert_or_expire_due_trials()
 
-    assert result == {"converted": [], "expired": [{"entity_id": "e1", "code": "PAYMENT_REQUEST"}]}
+    assert result == {"converted": [], "expired": [{"entity_id": "e1", "code": "PAYMENT_REQUEST"}],
+                      "deferred": []}
     assert calls["writes"][-1][3]["phase"] == "expired"
     assert calls["access"] == [("e1", "PAYMENT_REQUEST", False)]
 
@@ -579,7 +652,8 @@ def test_a_cancelled_trial_expires_instead_of_converting(monkeypatch):
 
     result = checkout.convert_or_expire_due_trials()
 
-    assert result == {"converted": [], "expired": [{"entity_id": "e1", "code": "PAYMENT_REQUEST"}]}
+    assert result == {"converted": [], "expired": [{"entity_id": "e1", "code": "PAYMENT_REQUEST"}],
+                      "deferred": []}
     assert calls["writes"][-1][3]["phase"] == "expired"
     assert calls["access"] == [("e1", "PAYMENT_REQUEST", False)]  # free days used up, access ends
 
@@ -680,3 +754,41 @@ def test_module_card_surfaces_an_app_level_trial(app, monkeypatch):
     assert card["can_cancel"] is True  # the Cancel button appears
     assert card["trial_eligible"] is False  # the trial is already used
     assert card["needs_card"] is True  # no card -> it will expire, not convert
+
+
+def test_a_retried_conversion_adopts_what_its_last_attempt_paid(monkeypatch):
+    """The processor failed at the trial end, then the attempt it left turned out PAID. The
+    next pass must find it (``_resolve_prior_conversions``) - and never raise a second charge."""
+    from billing.services import billing_gateway, changes, store
+    from billing.services.billing import Period
+
+    checkout, calls = _setup(monkeypatch, now=_NOW, anchor=_ANCHOR)
+    monkeypatch.setattr(checkout, "_resolve_prior_conversions",
+                        lambda *a, **k: Period(_ANCHOR, _PERIOD_END))
+
+    def _second_charge(*_a, **_k):
+        raise AssertionError("charged the conversion a second time")
+
+    monkeypatch.setattr(changes, "issue_change", _second_charge)
+    monkeypatch.setattr(billing_gateway, "void_invoice", lambda iid: None)
+    monkeypatch.setattr(store, "due_trials", lambda now, limit=None: [
+        _Row(code="PAYMENT_REQUEST", trial_end=_NOW - timedelta(hours=2))])
+
+    result = checkout.convert_or_expire_due_trials()
+
+    assert result["converted"] == [{"entity_id": "e1", "code": "PAYMENT_REQUEST"}]
+
+
+def test_a_retried_conversion_whose_last_attempt_was_refused_expires(monkeypatch):
+    from billing.services import changes, store
+
+    checkout, calls = _setup(monkeypatch, now=_NOW, anchor=_ANCHOR)
+    monkeypatch.setattr(checkout, "_resolve_prior_conversions", lambda *a, **k: "declined")
+    monkeypatch.setattr(changes, "issue_change",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("charged again")))
+    monkeypatch.setattr(store, "due_trials", lambda now, limit=None: [
+        _Row(code="PAYMENT_REQUEST", trial_end=_NOW - timedelta(hours=2))])
+
+    result = checkout.convert_or_expire_due_trials()
+
+    assert result["expired"] == [{"entity_id": "e1", "code": "PAYMENT_REQUEST"}]

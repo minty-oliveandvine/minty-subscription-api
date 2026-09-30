@@ -967,15 +967,20 @@ def collect_due(now=None, *, limit=None) -> dict:
     no second flag to disagree with it, and nothing infers the state from an absent
     invoice id — a zero-total charge legitimately has none.
 
-    WHAT A FAILURE DOES, and why it is not simply handed to dunning. A declined card
-    here leaves the row UNCOLLECTED, so the next pass tries again with a fresh key: the
-    counter keeps climbing and the key carries it, exactly as a re-attempted accept does,
-    because voiding an invoice keeps its key claimed and a stable one would jam the retry
-    forever. Dunning cannot do that job — it chases the payer's oldest OPEN invoice, and
-    the failed charge voided its own. What dunning IS started for is the consequence:
-    the rows go past due, the grace window begins, and access lapses if the card is never
-    fixed. So the retry is here and the access story is dunning's, which is the split
-    that actually works rather than the one that reads tidiest.
+    WHAT A FAILURE DOES: exactly what a declined renewal does (the user's call,
+    2026-09-30). The invoice stays OPEN and dunning chases it - the "We couldn't process your
+    payment" notice now, a daily retry, "Thank you" only once it is really paid, and the
+    normal give-up. This used to void the invoice and try again every hour under a fresh key:
+    a declining card was hit hourly with no end, the new payer was told nothing, and dunning -
+    finding nothing open - declared the debt settled and thanked them for it, every day or
+    two. Now each pass settles the LAST attempt before any new one (``_settle_last_attempt``),
+    so a declined one is left to dunning and a fresh key is only ever taken after a void.
+
+    A failure of the PROCESSOR is not a decline: nothing is known about the card, so nobody is
+    told and the companies keep their grace while the next pass tries again. And
+    ``collect_at`` stays set until the window is paid: it is what keeps the company off the
+    new payer's renewal meanwhile (``store.entities_awaiting_handover``), and what dunning
+    reads as a debt still owed (``store.handover_owed``).
 
     Returns ``{"collected": [...], "failed": [...], "abandoned": [...]}``.
     """
@@ -1013,7 +1018,22 @@ def _summarise(result: dict[str, list]) -> dict[str, int]:
 
 
 def _abandon(offer, reason: str) -> tuple[str, dict]:
-    """Stop asking for this one. The debt is not collectable and never will be."""
+    """Stop asking for this one. The debt is not collectable and never will be.
+
+    The last attempt's invoice, when it is still OPEN (a decline left for dunning to chase),
+    is withdrawn with it: left open, dunning or a *Retry payment* could still collect it -
+    for a handover that is over, and that ``settle_paid_handover`` would then grant nothing
+    for, because the offer no longer waits to be collected.
+    """
+    from billing.services import checkout
+
+    live = store.invoice_for_key(offer.charge_key) if offer.charge_key else None
+    if live is not None and live.external_id and live.status in ("draft", "open"):
+        if checkout._void_unpaid_invoice(live.external_id, offer.entity_id, "transfer") == "paid":
+            logger.error(
+                "transfer: handover {} was abandoned ({}), but its charge {} was PAID - "
+                "resolve it by hand", offer.id, reason, live.external_id,
+            )
     offer.collect_at = None
     offer.save(update_fields=["collect_at"])
     logger.warning(
@@ -1023,6 +1043,8 @@ def _abandon(offer, reason: str) -> tuple[str, dict]:
 
 
 def _collect_one(offer, due, now, checkout) -> tuple[str, dict] | None:
+    from billing.services import policy
+
     entity_id = offer.entity_id
     to_user_id = offer.to_user_id
 
@@ -1043,23 +1065,152 @@ def _collect_one(offer, due, now, checkout) -> tuple[str, dict] | None:
 
     customer_id = store.customer_id_for_user(to_user_id)
     group = store.billing_group_for_entity(entity_id, to_user_id)
-    if not customer_id or group is None:
-        # Not abandoned. The card was there at accept and has gone since, so this is the
-        # same shape as a decline: past due, and tried again when they put one back.
-        return _fail(offer, group, now, "there is no card to charge for this company")
 
-    # A FRESH KEY PER ATTEMPT, carrying the counter — the accept's rule, and the reason
-    # is the same: the previous attempt's invoice was voided and its key stays claimed.
+    # As long as a declined renewal is chased, and no longer: the business does not chase a
+    # debt past its grace (2026-08-11) - unless the last attempt was paid at the last moment.
+    if now >= due + timedelta(days=policy.current().past_due_window_days):
+        try:
+            paid = _last_attempt_paid(offer)
+        except Exception:
+            logger.exception("transfer: could not read the last attempt at {}", offer.id)
+            return "failed", _entry(offer, "could not read the last attempt; retrying next pass")
+        if paid is not None:
+            return _settle(offer, group, due, _paid_result(offer, paid), now)
+        return _abandon(offer, "its grace ran out unpaid")
+
+    if not customer_id or group is None:
+        # The card was there at accept and has gone since: told, as a decline is, and
+        # charged once there is one again.
+        logger.error(
+            "transfer: there is no card to collect the deferred charge on {} (payer {})",
+            offer.id, to_user_id,
+        )
+        return _declined(offer, group, now, "there is no card to charge for this company")
+
+    if offer.charge_key:
+        settled = _settle_last_attempt(offer, group, customer_id, due, now)
+        if settled is not None:
+            return settled
+
+    # A FRESH KEY PER ATTEMPT, carrying the counter — the accept's rule. Only ever taken once
+    # the last attempt is settled above: its invoice withdrawn, or never raised.
     offer.charge_attempt = int(offer.charge_attempt or 0) + 1
     offer.charge_key = f"transfer-{offer.id}-{offer.charge_attempt}"
     offer.save(update_fields=["charge_attempt", "charge_key"])
 
     result = checkout._bill_transfer_in_house(
         entity_id, to_user_id, customer_id, codes, at=due, idempotency_key=offer.charge_key,
+        keep_open=True,
     )
-    if not result["paid"]:
-        return _fail(offer, group, now, result["reason"])
+    if result["paid"]:
+        return _settle(offer, group, due, result, now)
+    if result.get("transient"):
+        return _held(offer, group, now)
+    return _declined(offer, group, now, result["reason"], invoice=result.get("invoice_id"))
 
+
+def _last_attempt_paid(offer):
+    """The last attempt's row when the processor says it was PAID, else None. Raises when the
+    processor cannot be read - nothing is abandoned on a guess."""
+    from billing.services import billing_gateway
+
+    record = store.invoice_for_key(offer.charge_key) if offer.charge_key else None
+    if record is None or not record.external_id:
+        return None
+    found = billing_gateway.recheck(record)
+    return record if found is not None and found.get("status") == "paid" else None
+
+
+def _settle_last_attempt(offer, group, customer_id, due, now) -> tuple[str, dict] | None:
+    """Settle the last attempt at this handover's charge before any new one is raised.
+    Returns the pass's outcome, or None when a fresh attempt should go on (nothing live).
+
+    By what the processor says of it, so a charge is never taken twice and a decline is
+    never charged again every hour:
+
+    * PAID (an answer lost, or paid since - dunning, a Pay now, the hosted page) is settled;
+    * OPEN and refused is dunning's to chase: it is made sure dunning is running and the
+      customer was told, and nothing is charged here;
+    * OPEN and never tried (the processor failed before the charge) is charged now, on the
+      company's current card - unless dunning already owns it;
+    * a DRAFT left between creating and finalizing it is finished (``resume_invoice``);
+    * VOID, uncollectible or never reserved is over: a fresh attempt goes on.
+    """
+    from billing.services import billing_gateway
+
+    record = store.invoice_for_key(offer.charge_key)
+    if record is None:
+        return None
+    try:
+        if not record.external_id:
+            found = billing_gateway.find_invoice_by_metadata(
+                customer_id, "transfer_key", offer.charge_key
+            )
+            if found is None:
+                store.discard_invoice(record.id)      # it never reached the processor
+                return None
+            billing_gateway.record_found_invoice(record, found)
+            # Read again: the store settles a fresh copy, and this one still has no id.
+            record = store.invoice_for_key(offer.charge_key) or record
+        found = billing_gateway.recheck(record)
+        if found is None:                              # a draft deleted by hand
+            return None
+        status = found.get("status")
+        if status == "open":
+            tried = billing_gateway.declined(found)
+            if tried is None:
+                logger.error(
+                    "transfer: cannot tell whether invoice {} for handover {} was ever "
+                    "charged; leaving it for a person", record.external_id, offer.id,
+                )
+                return "failed", _entry(offer, "cannot tell whether it was charged")
+            if tried:
+                return _declined(offer, group, now, "declined; dunning is chasing it",
+                                 invoice=record.external_id)
+            if group.dunning_started_at is not None:
+                return "failed", _entry(offer, "dunning is chasing it")
+        if status in ("open", "draft"):
+            found = billing_gateway.resume_invoice(
+                record, payment_method=group.stripe_payment_method_id, where="transfer"
+            )
+            status = (found or {}).get("status")
+            if found is not None and status != "paid":
+                return _declined(offer, group, now, "declined", invoice=record.external_id)
+        if status != "paid":
+            return None
+    except Exception as exc:
+        if billing_gateway.retryable(exc):
+            return _held(offer, group, now)
+        return _declined(
+            offer, group, now,
+            getattr(exc, "user_message", None) or "That payment didn't go through.",
+            invoice=record.external_id,
+        )
+    return _settle(offer, group, due, _paid_result(offer, record), now)
+
+
+def _paid_result(offer, record) -> dict:
+    """What ``_bill_transfer_in_house`` answers for a charge found PAID after the fact."""
+    anchor, _currency = store.billing_cycle_for_user(offer.to_user_id)
+    return {"paid": True, "period_end": record.period_end, "invoice_id": record.external_id,
+            "amount": int(record.total or 0), "currency": record.currency,
+            "anchor": anchor, "reason": None}
+
+
+def _settle(offer, group, due, result, now) -> tuple[str, dict]:
+    """The window is PAID: write the claim, close the offer's collection, and give the
+    company its access back.
+
+    Dunning is NOT ended here. When dunning ran for this charge, it ends the episode itself -
+    it finds the card settled on its next pass and says "Thank you" for what was actually
+    paid; ending it here too silenced exactly that notice. A SILENT grace (the processor had
+    failed) has nobody to thank, and is released.
+    """
+    from billing.services import checkout
+    from billing.services.billing import Period
+
+    entity_id = offer.entity_id
+    to_user_id = offer.to_user_id
     # PAID. The claim goes on NOW and not a moment earlier: it is the statement that
     # these days are covered, and until this instant they were not. Written through the
     # same one-statement writer the accept uses, which moves the claim forward only and
@@ -1077,16 +1228,18 @@ def _collect_one(offer, due, now, checkout) -> tuple[str, dict] | None:
         "accepted_anchor_at", "quoted_amount", "quoted_currency",
     ])
 
-    # Out of dunning, if an earlier attempt put it there. Ordered after the money and
-    # before the sweep: the rows have to be out of ``past_due`` for the sweep to restore
-    # what it revoked.
-    if getattr(group, "dunning_started_at", None) is not None:
+    if group is not None:
         try:
-            store.end_group_dunning(group.id, status="active")
+            # A card that had never collected starts its cycle here, whoever collected it.
+            period_start = result.get("period_start") or due
+            checkout._establish_card_cycle(
+                group, False, Period(period_start, _aware(result["period_end"]))
+            )
+            store.release_group_grace(group.id, now)
         except Exception:
-            logger.exception("transfer: could not end dunning for group {}", group.id)
+            logger.exception("transfer: could not bring group {} up to date", group.id)
 
-    for code in sorted(codes):
+    for code in sorted(_billable_codes(entity_id)):
         store.record_action(
             entity_id=entity_id,
             function_code=code,
@@ -1114,28 +1267,74 @@ def _collect_one(offer, due, now, checkout) -> tuple[str, dict] | None:
     }
 
 
-def _fail(offer, group, now, reason) -> tuple[str, dict]:
-    """Left owed, and the company put past due — see ``collect_due``'s docstring.
+def settle_paid_handover(invoice) -> None:
+    """DUNNING collected a handover's parked charge: finish the handover exactly as the
+    collection would have (``_settle``). Called from dunning's paid paths for an invoice
+    carrying ``transfer_key``; a no-op for any other. Never raises - the money is in, and
+    the next collection pass settles what this could not."""
+    key = (invoice.get("metadata") or {}).get("transfer_key")
+    if not key:
+        return
+    try:
+        offer = SubscriptionTransfer.objects.filter(
+            charge_key=key, collect_at__isnull=False
+        ).first()
+        record = store.invoice_for_key(key)
+        if offer is None or record is None:
+            return
+        group = store.billing_group_for_entity(offer.entity_id, offer.to_user_id)
+        _settle(offer, group, _aware(offer.collect_at), _paid_result(offer, record),
+                clock.now())
+    except Exception:
+        logger.exception("transfer: could not settle the handover paid as {}", key)
 
-    ``collect_at`` is deliberately NOT cleared: the next pass tries again with a fresh
-    key, which is what lets a fixed card settle it without anybody re-accepting.
+
+def _entry(offer, reason: str, invoice=None) -> dict:
+    return {"transfer_id": offer.id, "entity_id": offer.entity_id,
+            "user_id": offer.to_user_id, "reason": reason, "invoice": invoice}
+
+
+def _declined(offer, group, now, reason, *, invoice=None) -> tuple[str, dict]:
+    """Refused - or no card to charge: chased as a declined RENEWAL is. Dunning runs for the
+    card (its grace, its daily retries of the invoice, its give-up) and the new payer is told
+    once, by the decline notice, deduped per attempt. ``collect_at`` is kept: the window is
+    still owed.
     """
-    if group is not None:
+    from billing.services import dunning, notify, policy
+
+    # Not a card whose collection is over: that episode was closed on purpose, and starting a
+    # new one each pass only to close it again tells nobody anything.
+    if (group is not None and group.dunning_started_at is None
+            and not dunning.collection_over(group, now, policy.current().past_due_window_days)):
         try:
             store.begin_group_dunning(group.id, now)
         except Exception:
             # The failure entry must survive a failure to record it — the same nested
             # try ``run_renewals`` uses on this exact call.
             logger.exception("transfer: could not start dunning for group {}", group.id)
+    notify.notify(
+        offer.to_user_id, notify.RENEWAL_FAILED,
+        dedupe_key=offer.charge_key or f"transfer-{offer.id}-no-card",
+        context={"billing_group_id": group.id if group is not None else None},
+    )
     logger.warning(
         "transfer: deferred charge on {} was not collected ({})", offer.id, reason
     )
-    return "failed", {
-        "transfer_id": offer.id,
-        "entity_id": offer.entity_id,
-        "user_id": offer.to_user_id,
-        "reason": reason,
-    }
+    return "failed", _entry(offer, reason, invoice)
+
+
+def _held(offer, group, now) -> tuple[str, dict]:
+    """The PROCESSOR failed, not the card: nobody is told, dunning is not started, and the
+    companies keep their grace while the next pass tries again (``store.hold_group_grace``)."""
+    try:
+        store.hold_group_grace(group.id, now)
+    except Exception:
+        logger.exception("transfer: could not hold the grace for group {}", group.id)
+    logger.error(
+        "transfer: the payment processor failed collecting the deferred charge on {}; the "
+        "next pass tries again", offer.id,
+    )
+    return "failed", _entry(offer, "processor unavailable; retrying next pass")
 
 
 # --- the repair step ------------------------------------------------------------------

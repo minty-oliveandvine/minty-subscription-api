@@ -57,5 +57,8 @@ class _BraceLogger:
     def exception(self, message: Any, *args: Any, **kwargs: Any) -> None:
         self._log(logging.ERROR, message, args, kwargs, exc_info=True)
 
+    def critical(self, message: Any, *args: Any, **kwargs: Any) -> None:
+        self._log(logging.CRITICAL, message, args, kwargs)
+
 
 logger = _BraceLogger(_std)

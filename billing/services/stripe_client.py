@@ -82,17 +82,49 @@ def _config_value(key: str) -> str | None:
     return value or None
 
 
+class StripeNotConfigured(RuntimeError):
+    """No Stripe key: nothing can be charged. OUR failure, never the customer's card - so it
+    is retried (``is_transient``), not read as a decline."""
+
+
 def get_stripe():
     """Return the ``stripe`` module with ``api_key`` and the pinned ``api_version`` set, or
-    raise if unconfigured."""
+    raise ``StripeNotConfigured``."""
     api_key = _config_value("STRIPE_SECRET_KEY")
     if not api_key:
-        raise RuntimeError(
+        raise StripeNotConfigured(
             "STRIPE_SECRET_KEY is not configured; cannot make Stripe API calls."
         )
     stripe.api_key = api_key
     stripe.api_version = STRIPE_API_VERSION
     return stripe
+
+
+#: Failures of the PROCESSOR, or of our access to it - never an answer about the card. The
+#: network, a Stripe outage (5xx), a rate limit, our key refused, and a keyed request replayed
+#: with other parameters. Each says nothing about whether the customer can pay, so each is
+#: retried on the next pass (the user's rule, 2026-09-30: "Stripe itself fails -> retry next
+#: hour") instead of expiring a trial or telling the customer their payment failed.
+_TRANSIENT = (
+    stripe.APIConnectionError,
+    stripe.APIError,
+    stripe.RateLimitError,
+    stripe.AuthenticationError,
+    stripe.PermissionError,
+    stripe.IdempotencyError,
+    StripeNotConfigured,
+)
+
+
+def is_transient(exc) -> bool:
+    """Whether ``exc`` is the processor failing rather than the card being refused.
+
+    A card error, an invalid request (no card, a detached card, an invoice that cannot be
+    paid) and anything unrecognised are NOT transient - those keep today's handling, a
+    decline. Unrecognised errors stay declines on purpose: the conservative reading, and the
+    one every existing path was written for.
+    """
+    return isinstance(exc, _TRANSIENT)
 
 
 def lacks_field(obj, field: str) -> bool:

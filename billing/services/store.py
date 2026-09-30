@@ -55,6 +55,7 @@ from shared_models.models import (
     SubscriptionAuditLog,
     SubscriptionInvoice,
     SubscriptionInvoiceLine,
+    SubscriptionTransfer,
     UserStripeCustomer,
 )
 
@@ -356,9 +357,67 @@ def paid_through_for_entity(entity_id) -> datetime | None:
     to fall back to the payer's account row; that column is gone with the one-cycle-per-payer
     design it belonged to. A BILLABLE entity with no group is an error, and the charge paths
     say so rather than reading a date here.
+
+    ONE COMPANY CAN BE PAID THROUGH LATER THAN ITS CARD: a handover whose first charge is
+    PARKED (``transfers._accept``). The previous payer bought the company's days up to
+    ``collect_at``, and the new payer's charge for the window after it is only taken that
+    day - so until then the company is paid through ``collect_at`` whatever the new card
+    says. On a card that has never been charged that date is NULL, and reading it alone
+    switched the company off the moment the handover was accepted. The card's own date is
+    left alone: it is what ``due_renewals`` renews from, and the parked window is collected
+    by ``transfers.collect_due``, not by a renewal (``entities_awaiting_handover``).
     """
     group = billing_group_for_entity(entity_id)
-    return group.paid_through if group is not None else None
+    if group is None:
+        return None
+    parked = _parked_through(entity_id, group.payer_user_id)
+    if parked is not None and (group.paid_through is None or parked > group.paid_through):
+        return parked
+    return group.paid_through
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    """A stored time as an aware one. Some drivers hand back naive datetimes, and comparing
+    one against an aware date raises rather than answering."""
+    if value is not None and value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value
+
+
+def _parked_through(entity_id, payer_user_id) -> datetime | None:
+    """Where the previous payer's money runs out for a company handed to ``payer_user_id``
+    whose first charge is still parked (``collect_at``), or None."""
+    offer = (
+        SubscriptionTransfer.objects.filter(
+            entity_id=str(entity_id), to_user_id=str(payer_user_id), collect_at__isnull=False
+        )
+        .only("collect_at")
+        .order_by("-collect_at")
+        .first()
+    )
+    return _as_utc(offer.collect_at) if offer is not None else None
+
+
+def entities_awaiting_handover(user_id, period) -> set[str]:
+    """Companies handed to this payer whose parked first charge falls in or after ``period``:
+    the renewal must leave them off (``renewals.billable_codes_by_entity``).
+
+    The window from ``collect_at`` is billed by ``transfers.collect_due`` on that day, and the
+    days before it were paid by the previous payer. A renewal of the new payer's card before
+    then billed the company for both - the old payer's days once more, and the window again
+    when the collection took it. Only a charge date at or after the period's start keeps it
+    off: a later period than the one the parked window starts in is billed as normal, so a
+    collection still outstanding cannot lose the next period too.
+
+    Compared in Python, as ``transfers.collect_due`` does, because ``collect_at`` may come
+    back naive and an aware bound pushed into the query can land a day wrong.
+    """
+    rows = SubscriptionTransfer.objects.filter(
+        to_user_id=str(user_id), collect_at__isnull=False
+    ).only("entity_id", "collect_at")
+    return {
+        str(row.entity_id) for row in rows if _as_utc(row.collect_at) >= period.start
+    }
 
 
 def pending_extensions_for_payer(user_id) -> list[EntityModuleSubscription]:
@@ -1174,6 +1233,65 @@ def record_group_dunning_attempt(group_id) -> int:
     return group.dunning_attempts
 
 
+def refund_group_dunning_attempt(group_id) -> int:
+    """Give back an attempt counted for a charge the PROCESSOR failed to make.
+
+    Attempts are counted BEFORE the charge (a double-charge is worse than a skipped retry), so
+    an outage, a timeout or our own key refused would otherwise spend the customer's retries
+    on charges nobody made - and give up on them because of our failure. Returns the total.
+    """
+    group = billing_group(group_id)
+    if group is None:
+        return 0
+    group.dunning_attempts = max(0, int(group.dunning_attempts or 0) - 1)
+    group.save(update_fields=["dunning_attempts"])
+    return group.dunning_attempts
+
+
+def recover_after_error() -> None:
+    """Make the connection usable again after a failed write, before the next card's work.
+    Nothing to do here: the engine runs on autocommit, so a failed statement leaves no
+    transaction behind it. (Flask's twin rolls its SQLAlchemy session back.)"""
+
+
+def hold_group_grace(group_id, at: datetime) -> int:
+    """Put THIS CARD's companies into their past-due grace WITHOUT starting dunning.
+
+    For a charge the PROCESSOR failed to make - an outage, a timeout, our key - rather than
+    one the card refused. The period has ended unpaid, so without the grace access would end
+    at the next sweep; but nothing is known about the card, so nobody is told and dunning is
+    not started. The hourly pass retries, and the first REAL decline starts dunning at the
+    moment the customer is told: a dunning stamp means exactly that, the customer was told.
+
+    A card still paid up past ``at`` needs no grace, and nothing moves. Returns the rows moved.
+    """
+    group = billing_group(group_id)
+    if group is None:
+        logger.warning("billing: no billing group {}", group_id)
+        return 0
+    if group.paid_through is not None and group.paid_through > at:
+        return 0
+    return set_group_module_phase(
+        group_id, from_phase=PHASE_ACTIVE, to_phase=PHASE_PAST_DUE, skip_covered_at=at
+    )
+
+
+def release_group_grace(group_id, now: datetime) -> int:
+    """End a SILENT grace (``hold_group_grace``) once the card is paid up again.
+
+    Only when dunning is not running - an episode ends through ``end_group_dunning`` - and
+    only when ``paid_through`` is past ``now``, the evidence the period was paid. Rows a
+    dunning that GAVE UP left past due carry no stamp either, and come back the same way
+    when a later payment covers them. Returns the rows moved.
+    """
+    group = billing_group(group_id)
+    if group is None or group.dunning_started_at is not None:
+        return 0
+    if group.paid_through is None or group.paid_through <= now:
+        return 0
+    return set_group_module_phase(group_id, from_phase=PHASE_PAST_DUE, to_phase=PHASE_ACTIVE)
+
+
 def end_group_dunning(group_id, *, status: str = "active") -> None:
     """Collection resolved for this card — paid (``active``) or given up on (``closed``).
 
@@ -1770,6 +1888,40 @@ def retired_key(key, external_id) -> str:
     period it has handed over. Still unique, and still says which period it was.
     """
     return f"{key}~{external_id}"
+
+
+def handover_owed(group, now: datetime) -> bool:
+    """Whether THIS card still owes a handover's first charge that has fallen due: one of its
+    companies, handed to its payer, with the charge parked on ``collect_at`` and not yet
+    collected.
+
+    Dunning reads it as a debt NOT settled (``dunning._nothing_open_but_owed``). With nothing
+    open at the processor - no card to charge, or the charge not raised yet - this row is the
+    only record that anything is owed, and without it dunning called the debt settled and
+    thanked the customer for a payment nobody made.
+    """
+    entities = entity_ids_in_group(group.id)
+    if not entities:
+        return False
+    rows = SubscriptionTransfer.objects.filter(
+        to_user_id=str(group.payer_user_id), entity_id__in=sorted(entities),
+        collect_at__isnull=False,
+    ).only("collect_at")
+    return any(_as_utc(row.collect_at) <= now for row in rows)
+
+
+def invoices_with_key_prefix(payer_user_id, prefix: str) -> list[SubscriptionInvoice]:
+    """This payer's invoice rows whose ``idempotency_key`` starts with ``prefix``, oldest
+    first - the attempts of one charge that retries under a fresh key each time.
+
+    ``startswith`` escapes LIKE's wildcards, which matters: ``_`` is in every
+    ``PAYMENT_REQUEST`` key, and would otherwise match any character.
+    """
+    return list(
+        SubscriptionInvoice.objects.filter(
+            payer_user_id=str(payer_user_id), idempotency_key__startswith=prefix
+        ).order_by("created_at", "id")
+    )
 
 
 def invoice_lines(invoice_id) -> list[SubscriptionInvoiceLine]:

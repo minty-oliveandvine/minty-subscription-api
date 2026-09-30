@@ -1195,8 +1195,8 @@ def _patch_change_keys(run: dict) -> None:
     original = changes.change_key
     suffix = customer_id[-12:]
 
-    def _scoped(entity_id, at, after_codes) -> str:
-        return f"{original(entity_id, at, after_codes)}-{suffix}"
+    def _scoped(entity_id, at, after_codes, **kwargs) -> str:
+        return f"{original(entity_id, at, after_codes, **kwargs)}-{suffix}"
 
     changes.change_key = _scoped
 

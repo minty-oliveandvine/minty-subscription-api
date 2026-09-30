@@ -64,7 +64,12 @@ def _no_stripe(monkeypatch):
     """No test reaches Stripe. ``stripe_client`` arrives in slice B; until then the guard is
     settings_test's empty key, and afterwards this makes the unstubbed case loud."""
     try:
-        from billing.services import stripe_client
+        # ``billing_gateway`` too, imported HERE before anything is patched: it binds
+        # ``get_stripe`` by name when first imported, so a first import inside a test that had
+        # swapped in a fake kept THAT fake for the rest of the run - monkeypatch never saw
+        # the binding, so never undid it, and later tests met another file's Stripe (an
+        # invoice "paid" in ``test_char_subscription`` answered a void three files later).
+        from billing.services import billing_gateway, stripe_client  # noqa: F401
     except ImportError:
         return
 

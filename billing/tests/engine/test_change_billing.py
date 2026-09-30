@@ -388,7 +388,7 @@ def test_converting_a_trial_prices_it_against_what_the_entity_ALREADY_bills(monk
 
     seen = {}
 
-    def _bill(entity_id, payer_user_id, customer_id, current, codes):
+    def _bill(entity_id, payer_user_id, customer_id, current, codes, **kw):
         seen["current"], seen["codes"] = set(current), set(codes)
         return datetime(2026, 10, 8, 13, tzinfo=UTC)
 

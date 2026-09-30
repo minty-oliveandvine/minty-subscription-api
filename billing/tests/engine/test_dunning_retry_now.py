@@ -76,6 +76,7 @@ def _wire(app, monkeypatch, *, account, invoices=None, paid=True, reason="ok",
     # and no stranded draft for the period (``dunning._nothing_open_but_owed``).
     monkeypatch.setattr(store, "open_invoices_for_group", lambda gid: [])
     monkeypatch.setattr(store, "invoice_for_key", lambda key: None)
+    monkeypatch.setattr(store, "handover_owed", lambda group, now: False)
     # Patched BY DOTTED PATH: retry_now imports it inside the function, so a reference
     # captured here would not be the one it ends up calling.
     monkeypatch.setattr(
@@ -218,7 +219,17 @@ def test_it_refuses_past_the_give_up_deadline(app, monkeypatch):
 def test_nothing_owed_closes_dunning_rather_than_charging(app, monkeypatch):
     """Settled elsewhere — a portal payment, a manual charge. Same handling as the
     scheduled path, or the customer has paid and stays locked out."""
+    from billing.services import billing_gateway, store
+
     dunning, calls = _wire(app, monkeypatch, account=_Account(), invoices=[])
+
+    class _Paid:
+        id, external_id, status = "row_p", "in_p", "open"
+        idempotency_key = "renewal-u1-20270208-g1"
+
+    # The evidence: the period's invoice is there, and the processor says it was paid.
+    monkeypatch.setattr(store, "invoice_for_key", lambda key: _Paid())
+    monkeypatch.setattr(billing_gateway, "refresh_record", lambda record: "paid")
 
     with app.app_context():
         result = dunning.retry_now("u1")
@@ -540,3 +551,85 @@ def test_a_row_showing_the_replacement_collects_while_the_original_is_still_open
         result = dunning.retry_now("u1", group_id="g1", expect_invoice="in_2")
 
     assert (result["status"], result["invoice"]) == ("paid", "in_2")
+
+
+# --- the processor failing, and a paid charge whatever its recording does ---------------------
+
+
+def _wire_more(monkeypatch, calls):
+    from billing.services import store
+
+    calls["refunded"], calls["released"] = 0, []
+    monkeypatch.setattr(
+        store, "refund_group_dunning_attempt",
+        lambda gid: calls.__setitem__("refunded", calls["refunded"] + 1) or 0,
+    )
+    monkeypatch.setattr(store, "release_group_grace",
+                        lambda gid, at: calls["released"].append(gid) or 0)
+
+
+def test_pay_now_meeting_an_outage_is_its_own_answer_and_spends_nothing(app, monkeypatch):
+    """Not "that card was declined": the customer's card was never asked."""
+    from billing.api._retry import retry_answer
+    from billing.services import billing_gateway
+
+    dunning, calls = _wire(app, monkeypatch, account=_Account(),
+                           invoices=[{"id": "in_1", "metadata": {}}], paid=False,
+                           reason=billing_gateway.UNAVAILABLE)
+    _wire_more(monkeypatch, calls)
+
+    with app.app_context():
+        result = dunning.retry_now("u1")
+
+    assert result["status"] == "unavailable"
+    assert calls["refunded"] == 1
+    answer = retry_answer(result)
+    assert answer["ok"] is False
+    assert "payment provider" in answer["message"] and "declined" not in answer["message"]
+
+
+def test_pay_now_that_paid_is_paid_even_if_recording_it_failed(app, monkeypatch):
+    """A write failing after the money moved used to turn a collected payment into a 500."""
+    dunning, calls = _wire(app, monkeypatch, account=_Account(),
+                           invoices=[{"id": "in_1", "metadata": {}}])
+    _wire_more(monkeypatch, calls)
+
+    def _db_down(acct, grp, inv):
+        raise RuntimeError("database went away")
+
+    monkeypatch.setattr(dunning, "_settle_period", _db_down)
+
+    with app.app_context():
+        result = dunning.retry_now("u1")
+
+    assert result["status"] == "paid"
+
+
+def test_pay_now_ends_a_silent_grace(app, monkeypatch):
+    """No dunning ran - the processor had failed, and the companies were held past due
+    without anyone being told. Paid now, they come back."""
+    dunning, calls = _wire(app, monkeypatch, account=_Account(started=None),
+                           invoices=[{"id": "in_1", "metadata": {}}])
+    _wire_more(monkeypatch, calls)
+
+    with app.app_context():
+        result = dunning.retry_now("u1")
+
+    assert result["status"] == "paid"
+    assert calls["released"] == ["g1"] and calls["ended"] == []
+
+
+
+def test_pay_now_at_the_deadline_on_a_card_paid_up_is_settled_not_closed(app, monkeypatch):
+    """The same re-check the scheduled run makes at its deadline."""
+    dunning, calls = _wire(app, monkeypatch,
+                           account=_Account(started=NOW - timedelta(days=16),
+                                            paid_through=NOW + timedelta(days=20)),
+                           invoices=[])
+    _wire_more(monkeypatch, calls)
+
+    with app.app_context():
+        result = dunning.retry_now("u1")
+
+    assert result["status"] == "nothing_owed"
+    assert calls["ended"] == [("u1", "active")]

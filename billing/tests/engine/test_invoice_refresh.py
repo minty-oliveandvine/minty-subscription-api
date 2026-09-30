@@ -76,6 +76,9 @@ class _Stripe:
         self.declining: set[str] = set()
         self.calls: list[tuple[str, str]] = []
         self.fail: dict[str, str] = {}
+        # Like ``fail``, but raised as what an outage really is - Stripe's own connection
+        # error, which the engine must read as "try again", never as a decline.
+        self.outage: dict[str, str] = {}
         self.counter = 0
         self.Invoice = _Invoices(self)
         self.InvoiceItem = _Items(self)
@@ -88,6 +91,11 @@ class _Stripe:
         if self.fail.get(name) == when:
             del self.fail[name]
             raise _StripeError(f"processor unreachable at {name} ({when})")
+        if self.outage.get(name) == when:
+            del self.outage[name]
+            import stripe as stripe_lib
+
+            raise stripe_lib.APIConnectionError(f"could not connect to Stripe at {name} ({when})")
 
     def view(self, invoice_id, expand=None):
         if invoice_id not in self.invoices:
@@ -134,6 +142,7 @@ class _Invoices:
             "payment_intent": {"id": f"pi_{invoice_id}", "status": "requires_payment_method",
                                "confirms": 0},
             "created": 1800000000 + s.counter, "total": 0, "status_transitions": {},
+            "attempted": False,
         }
         s.items[invoice_id] = []
         if key:
@@ -161,7 +170,9 @@ class _Invoices:
         s = self.s
         invoice = s.invoices[invoice_id]
         intent = invoice["payment_intent"]
+        s.step("pay", "before")
         s.calls.append(("pay", invoice_id))
+        invoice["attempted"] = True
         if intent["status"] == "canceled":
             raise _StripeError(NO_LONGER)
         if intent["confirms"] >= s.LIMIT:
@@ -171,16 +182,31 @@ class _Invoices:
             raise _StripeError(CROSSED)
         intent["confirms"] += 1
         if (payment_method or invoice["default_payment_method"]) in s.declining:
+            intent["last_payment_error"] = {"type": "card_error", "code": "card_declined",
+                                            "message": "Your card was declined."}
             raise _StripeError("Your card was declined.")
         invoice["status"] = "paid"
         invoice["status_transitions"] = {**invoice["status_transitions"],
                                          "paid_at": 1800000200}
         intent["status"] = "succeeded"
+        intent["last_payment_error"] = None
+        # "after": the charge went through and the answer was lost on the way back.
+        s.step("pay", "after")
         return s.view(invoice_id)
+
+    def delete(self, invoice_id, **kw):
+        s = self.s
+        s.step("delete", "before")
+        del s.invoices[invoice_id]
+        s.calls.append(("delete", invoice_id))
+        return {"id": invoice_id, "deleted": True}
 
     def void_invoice(self, invoice_id, **kw):
         s = self.s
         s.step("void", "before")
+        if s.invoices[invoice_id]["status"] not in ("open", "uncollectible"):
+            # What Stripe answers for a paid (or already void) invoice.
+            raise _StripeError("You can only pass in open or uncollectible invoices.")
         s.invoices[invoice_id]["status"] = "void"
         s.calls.append(("void", invoice_id))
         return s.view(invoice_id)

@@ -230,7 +230,7 @@ def _country_names(codes) -> dict[str, str]:
         return {}
 
 
-def _module_state(row, *, now, paid_through, grace_days) -> dict:
+def _module_state(row, *, now, paid_through, grace_days, told=True) -> dict:
     """One module's status and the date printed beside it.
 
     The branches mirror ``get_module_cards`` exactly, including the two subtleties that
@@ -288,8 +288,12 @@ def _module_state(row, *, now, paid_through, grace_days) -> dict:
             }
         return {"status": STATUS_CANCELLED, "date": ends, "date_label": "Expires"}
 
-    if granted and phase == PHASE_PAST_DUE:
+    if granted and phase == PHASE_PAST_DUE and told:
         return {"status": STATUS_PAST_DUE, "date": ends, "date_label": "Access ends"}
+    if granted and phase == PHASE_PAST_DUE:
+        # Held in its grace while the PROCESSOR failed: nobody was told, because the card
+        # was never asked (``dunning.customer_told``). Shown as what it is - active, and due.
+        phase = PHASE_ACTIVE
 
     if granted and phase == PHASE_ACTIVE:
         # "Next billing" is the payer's paid-through: the renewal run bills at that
@@ -426,7 +430,7 @@ def build_payer_subscriptions(
     "how many modules are live") are computed from the access rules above, which SQL
     cannot express without duplicating them.
     """
-    from billing.services import clock, policy
+    from billing.services import clock, dunning, policy
     from billing.services import store as sub_store
 
     payer = _by_pk(User, user_id)
@@ -460,6 +464,9 @@ def build_payer_subscriptions(
         # and each card buys its own periods — so one row of this table can be past due
         # while the one under it is paid up, which is exactly what the screen has to show.
         paid_through = sub_store.paid_through_for_entity(str(entity.id))
+        told = not any(r.phase == PHASE_PAST_DUE for r in entity_rows.values()) or (
+            dunning.told_of_failure(str(entity.id), now)
+        )
         modules = []
         for code in MODULE_CODES:
             state = _module_state(
@@ -467,6 +474,7 @@ def build_payer_subscriptions(
                 now=now,
                 paid_through=paid_through,
                 grace_days=grace_days,
+                told=told,
             )
             modules.append(
                 {
@@ -1116,8 +1124,6 @@ def retryable_invoice_ids(user_id, failed=None) -> set[str]:
     metadata would. A failed invoice not in this set is shown failed, with no button that could
     only refuse.
     """
-    from datetime import timedelta
-
     from billing.services import clock, dunning, policy
     from billing.services import store as sub_store
     from shared_models.models import SubscriptionInvoice
@@ -1161,14 +1167,8 @@ def retryable_invoice_ids(user_id, failed=None) -> set[str]:
         mine = by_card.get(str(group.id))
         if not mine:
             continue
-        started = group.dunning_started_at
-        access_ends_at = (
-            group.paid_through + timedelta(days=window) if group.paid_through else None
-        )
-        if started is not None and dunning.should_give_up(now, started, window, access_ends_at):
-            continue
-        if access_ends_at is not None and now >= access_ends_at:
-            continue  # access has run out: a lapsed account's bill, not one to chase
+        if dunning.collection_over(group, now, window):
+            continue  # past the give-up deadline, or access has run out: not one to chase
         target = dunning._manual_target(mine, dunning._current_period_key(account, group))
         if target is not None:
             retryable.add(target["id"])
@@ -1603,6 +1603,10 @@ def build_billing_accounts(user_id, *, countries: bool = False) -> dict:
         for card in charged_cards.values()
     )
 
+    from billing.services import dunning, policy
+
+    now = clock.now()
+    window = policy.current().past_due_window_days
     accounts = []
     for group, cards in groups:
         charging = group.stripe_payment_method_id
@@ -1616,12 +1620,15 @@ def build_billing_accounts(user_id, *, countries: bool = False) -> dict:
 
         address = card_address(charged, country_names)
 
+        # Past due only once the customer has been told: held past due while the processor
+        # was failing is not a failed payment (``dunning.customer_told``).
+        told = dunning.customer_told(group, now, window)
         companies = sorted(
             (
                 {
                     "entity_id": entity_id,
                     "entity_name": names.get(entity_id, ""),
-                    "past_due": PHASE_PAST_DUE in phases.get(entity_id, set()),
+                    "past_due": told and PHASE_PAST_DUE in phases.get(entity_id, set()),
                 }
                 for entity_id in on_account.get(str(group.id), [])
             ),

@@ -23,6 +23,8 @@ subscription row, entity not mid-onboarding), same update, and it runs on SQLite
 """
 from __future__ import annotations
 
+from datetime import UTC, timedelta
+
 from django.db.models import Exists, OuterRef
 from django.db.models.functions import Now
 
@@ -215,6 +217,8 @@ def sweep_expired_module_access(payer_user_id=None) -> dict:
                     past_due_grace_days=grace_days,
                 ):
                     continue
+                if _conversion_pending(row, now, grace_days):
+                    continue
                 # Access has lapsed — a trial that ended, a cancellation past its
                 # extension, or a past-due account past its grace. Nothing else closes
                 # the gate: the boundary is a DATE, and no event fires when a date passes.
@@ -249,6 +253,26 @@ def sweep_expired_module_access(payer_user_id=None) -> dict:
     # Access Denied page" ever comes back as a complaint, this is the line that explains
     # why.
     return {"disabled": disabled, "restored": restored}
+
+
+def _conversion_pending(row, now, grace_days) -> bool:
+    """Whether ``row`` is a trial past its end whose CONVERSION is still pending - left alone.
+
+    The trial-end job runs before every sweep and converts or expires each due trial, so a
+    row still reading ``trial`` past its end is one that job could not close: the payment
+    processor failed (``checkout.ChargeDeferred``), or the job raised. Either way nothing is
+    decided, and the next pass tries again - so the customer keeps working meanwhile, as the
+    user decided (2026-09-30: when Stripe fails, the trial keeps running). For at most the
+    past-due grace: past it, the job expires the trial itself, and this lets the sweep act.
+    """
+    from billing.services.constants import PHASE_TRIAL
+
+    ended = getattr(row, "trial_end", None)
+    if row.phase != PHASE_TRIAL or ended is None:
+        return False
+    if ended.tzinfo is None:
+        ended = ended.replace(tzinfo=UTC)
+    return now < ended + timedelta(days=grace_days)
 
 
 def _sweep_scope(payer_user_id, sub_store):
