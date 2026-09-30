@@ -986,8 +986,12 @@ EVENT_LABELS = {
 }
 
 
+def _kind(line) -> str:
+    return (getattr(line, "kind", "") or "full").lower()
+
+
 def _event(lines) -> str:
-    kinds = {(getattr(ln, "kind", "") or "full").lower() for ln in lines}
+    kinds = {_kind(ln) for ln in lines}
     charged = [ln for ln in lines if (ln.amount or 0) > 0]
 
     if not charged:
@@ -997,7 +1001,12 @@ def _event(lines) -> str:
     # A renewal that also carries extensions is still a renewal: the whole-period lines
     # are the reason the invoice exists and the extension rides along. Checked BEFORE
     # the extension case for exactly that reason.
-    if "full" in kinds:
+    #
+    # It takes a whole-period line that is NOT itself an extension. The renewal runner
+    # writes a cancelled company's extension as kind "full" too (``Line.kind``'s default,
+    # ``renewals._pending_extension_lines``), so a card renewing only to collect the
+    # extension of its last company read as a "Renewal" of a module nobody still has.
+    if any(_kind(ln) == "full" and not _is_extension(ln) for ln in lines):
         return "renewal"
     if all(_is_extension(ln) for ln in charged):
         return "extension"

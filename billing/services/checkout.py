@@ -1739,6 +1739,12 @@ def _bill_transfer_in_house(entity_id, payer_user_id, customer_id: str, codes, *
                 "anchor": anchor, "reason": None}
     if existing is not None:
         # Raised but unpaid. Do not raise a second document against the same window.
+        if existing == "draft":
+            # Never finalized, so there is nothing anybody can pay: said, loudly.
+            billing_gateway.stranded_draft(
+                getattr(store.invoice_for_key(idempotency_key), "external_id", None),
+                idempotency_key, "transfer", billing_gateway.NOT_RETRIED,
+            )
         return _failed("There's already an unpaid invoice for this handover.")
 
     # WHICH CARD the incoming payer is charged on: the one they nominated for THIS

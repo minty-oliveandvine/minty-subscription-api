@@ -71,10 +71,11 @@ class _Record:
     nothing came back, so the row cannot say whether the processor has the invoice.
     """
 
-    def __init__(self, id="inv_local", external_id="in_old", status="paid"):
+    def __init__(self, id="inv_local", external_id="in_old", status="paid", total=40000):
         self.id = id
         self.external_id = external_id
         self.status = status
+        self.total = total
 
 
 def _wire(monkeypatch, *, accounts=None, rows=None, plan=_Plan(), issued=None,
@@ -365,21 +366,36 @@ def test_a_reservation_that_was_never_confirmed_sent_asks_the_processor(monkeypa
     """A row with no ``external_id`` means the key was claimed and nothing came back, so
     the local record cannot say whether the invoice exists. Assuming it does would leave
     the payer never billed for the period — so this is the one case that still scans."""
+    from billing.services import billing_gateway
+
+    existing = _Record(external_id=None, status="draft")
     renewals, calls = _wire(
         monkeypatch,
-        existing=_Record(external_id=None, status="draft"),
-        found={"id": "in_found", "status": "paid"},
+        existing=existing,
+        found={"id": "in_found", "status": "paid", "total": 40000, "created": 1800000000,
+               "status_transitions": {"finalized_at": 1800000100, "paid_at": 1800000200},
+               "hosted_invoice_url": "https://invoice.stripe.com/i/in_found"},
     )
+    captured = []
+    monkeypatch.setattr(billing_gateway, "_capture_payment_method",
+                        lambda record, invoice_id: captured.append((record, invoice_id)))
 
     result = renewals.run_renewals(NOW, scope=["u1"], issue=True)
 
     assert calls["lookups"] == [("cus_u1", "renewal-u1-20270208-g_u1")]
     assert calls["issued"] == []                       # it was already charged
     assert result["skipped"][0]["reason"] == "already invoiced; adopted"
-    # And the row is completed, so the next run needs no scan at all.
-    assert calls["settled"] == [
-        ("inv_local", {"external_id": "in_found", "status": "paid"})
-    ]
+    # And the row is completed - ALL of it, as the normal path writes it - so the next run
+    # needs no scan, and the list shows when it was paid and links to it rather than "—".
+    assert calls["settled"] == [(
+        "inv_local",
+        {"external_id": "in_found", "status": "paid", "total": 40000,
+         "issued_at": datetime(2027, 1, 15, 8, 1, 40, tzinfo=UTC),
+         "paid_at": datetime(2027, 1, 15, 8, 3, 20, tzinfo=UTC),
+         "hosted_invoice_url": "https://invoice.stripe.com/i/in_found"},
+    )]
+    # ...and which card paid it, exactly as a charge made on the normal path records it.
+    assert captured == [(existing, "in_found")]
 
 
 def test_a_reservation_the_processor_never_saw_is_discarded_and_retried(monkeypatch):
@@ -396,6 +412,177 @@ def test_a_reservation_the_processor_never_saw_is_discarded_and_retried(monkeypa
     assert calls["discarded"] == ["inv_local"]
     assert result["issued"], "the period must still get charged"
     assert calls["paid_through"] == [("u1", datetime(2027, 3, 8, 13, tzinfo=UTC))]
+
+
+# --- a row that can still move is asked about, not believed ---------------------------------
+#
+# There is no webhook. A renewal paid just before a crash - or settled somewhere this code
+# cannot see - kept whatever its row said when the process stopped, and "open" was answered
+# from the store for ever: never adopted, its period never advanced.
+
+
+def test_a_row_left_open_that_the_processor_says_is_paid_is_adopted(monkeypatch):
+    from billing.services import billing_gateway
+
+    existing = _Record(external_id="in_open", status="open")
+    renewals, calls = _wire(monkeypatch, existing=existing)
+    asked = []
+    monkeypatch.setattr(billing_gateway, "refresh_record",
+                        lambda record: asked.append(record) or "paid")
+
+    result = renewals.run_renewals(NOW, scope=["u1"], issue=True)
+
+    assert asked == [existing]
+    assert calls["issued"] == []
+    assert result["skipped"][0]["reason"] == "already invoiced; adopted"
+    assert calls["paid_through"] == [("u1", datetime(2027, 3, 8, 13, tzinfo=UTC))]
+
+
+def test_a_settled_row_is_answered_from_the_store_without_asking(monkeypatch):
+    """Paid, void and uncollectible do not move again: no processor read for those."""
+    from billing.services import billing_gateway
+
+    renewals, calls = _wire(monkeypatch, existing=_Record(external_id="in_paid", status="paid"))
+    monkeypatch.setattr(billing_gateway, "refresh_record",
+                        lambda record: pytest.fail("a settled row was re-read"))
+
+    result = renewals.run_renewals(NOW, scope=["u1"], issue=True)
+
+    assert result["skipped"][0]["reason"] == "already invoiced; adopted"
+    assert calls["lookups"] == []
+
+
+# --- a draft our own issue left behind is FINISHED, not skipped ------------------------------
+#
+# ``issue_invoice`` records the finalize before it asks for payment, so a row still reading
+# "draft" was never charged. Skipped as "already invoiced" it was never billed at all: dunning
+# chases only open invoices and nothing else finalizes a draft.
+
+
+class _LineRow:
+    """A recorded ``subscription_invoice_line``, as ``store.invoice_lines`` returns it."""
+
+    def __init__(self, entity_name="Entity e1", product_name="Petty Cash", kind="full"):
+        self.entity_name = entity_name
+        self.product_name = product_name
+        self.kind = kind
+        self.at = None
+
+
+def _wire_resume(monkeypatch, *, existing, answer):
+    """The renewal world, with ``resume_invoice`` answering ``answer``; returns the calls."""
+    from billing.services import billing_gateway, store
+
+    renewals, calls = _wire(monkeypatch, existing=existing)
+    calls["resumed"] = []
+    monkeypatch.setattr(
+        billing_gateway, "resume_invoice",
+        lambda record, payment_method=None: calls["resumed"].append((record, payment_method))
+        or answer,
+    )
+    monkeypatch.setattr(store, "invoice_lines", lambda invoice_id: [_LineRow()])
+    return renewals, calls
+
+
+def test_a_draft_its_own_issue_left_is_finished_on_the_cards_current_card(monkeypatch):
+    existing = _Record(external_id="in_draft", status="draft", total=40000)
+    renewals, calls = _wire_resume(monkeypatch, existing=existing,
+                                   answer={"id": "in_draft", "status": "paid"})
+
+    result = renewals.run_renewals(NOW, scope=["u1"], issue=True)
+
+    assert calls["resumed"] == [(existing, "pm_u1")]    # the account's card, as it is now
+    assert calls["issued"] == []                        # finished, never raised a second time
+    assert calls["lookups"] == []
+    assert [e["invoice"] for e in result["issued"]] == ["in_draft"]
+    assert calls["paid_through"] == [("u1", datetime(2027, 3, 8, 13, tzinfo=UTC))]
+    # The receipt states what was RESERVED and charged, not today's pricing.
+    assert result["issued"][0]["total"] == 40000
+    assert result["issued"][0]["lines"] == ["Entity e1 - Petty Cash"]
+
+
+def test_a_draft_found_by_its_metadata_is_finished_in_the_same_pass(monkeypatch):
+    """The crash came before the draft's id was recorded: the scan finds it, and the same
+    pass finishes it rather than skipping the period until the next one."""
+    existing = _Record(external_id=None, status="draft")
+    renewals, calls = _wire_resume(monkeypatch, existing=existing,
+                                   answer={"id": "in_draft", "status": "paid"})
+    monkeypatch.setattr(renewals, "_already_invoiced", _found_draft(existing))
+
+    result = renewals.run_renewals(NOW, scope=["u1"], issue=True)
+
+    assert calls["resumed"] == [(existing, "pm_u1")]
+    assert calls["issued"] == []
+    assert [e["invoice"] for e in result["issued"]] == ["in_draft"]
+
+
+def _found_draft(existing):
+    """``_already_invoiced`` finding the draft by metadata and recording its id."""
+
+    def _already(customer_id, key, *, metadata_key="renewal_key", record=None):
+        existing.external_id = "in_draft"
+        return "draft"
+
+    return _already
+
+
+def test_a_draft_that_is_not_finished_is_skipped_without_a_word_to_the_customer(monkeypatch):
+    """``resume_invoice`` refused it (and said so, as a STRANDED DRAFT): nothing charged,
+    nothing mailed, no dunning started over a document nobody could pay."""
+    renewals, calls = _wire_resume(
+        monkeypatch, existing=_Record(external_id="in_draft", status="draft"), answer=None,
+    )
+
+    result = renewals.run_renewals(NOW, scope=["u1"], issue=True)
+
+    assert result["skipped"][0]["reason"] == "left a draft; not finished"
+    assert result["issued"] == [] and result["failed"] == []
+    assert calls["dunning"] == []
+    assert calls["paid_through"] == []
+
+
+def test_a_decline_on_the_finish_is_a_failed_renewal(monkeypatch):
+    from billing.services import billing_gateway, store
+
+    existing = _Record(external_id="in_draft", status="draft")
+    renewals, calls = _wire(monkeypatch, existing=existing)
+    monkeypatch.setattr(store, "invoice_lines", lambda invoice_id: [_LineRow()])
+
+    def _declined(record, payment_method=None):
+        record.status = "open"            # finalized - and recorded - before the charge
+        raise billing_gateway.BillingError("declined", invoice_id="in_draft")
+
+    monkeypatch.setattr(billing_gateway, "resume_invoice", _declined)
+
+    result = renewals.run_renewals(NOW, scope=["u1"], issue=True)
+
+    assert result["failed"][0]["status"] == "error"
+    assert result["failed"][0]["invoice"] == "in_draft"
+    assert calls["dunning"] == [("u1", NOW)]
+
+
+def test_an_error_before_finalizing_names_the_draft_it_left(monkeypatch, caplog):
+    """The error is logged anyway; what was missing is WHICH document it left behind - the
+    one thing an operator needs to find - and what happens to it next."""
+    from billing.services import billing_gateway, store
+
+    renewals, calls = _wire(monkeypatch)
+    left = _Record(external_id="in_left", status="draft")
+    rows = iter([None, left])          # nothing before the issue; the draft after it
+    monkeypatch.setattr(store, "invoice_for_key", lambda key: next(rows))
+
+    def _stopped(customer_id, invoice, **kw):
+        raise billing_gateway.BillingError("finalize failed", invoice_id="in_left")
+
+    monkeypatch.setattr(billing_gateway, "issue_invoice", _stopped)
+
+    result = renewals.run_renewals(NOW, scope=["u1"], issue=True)
+
+    assert result["failed"][0]["invoice"] == "in_left"
+    stranded = [r.getMessage() for r in caplog.records
+                if r.levelname == "ERROR" and "STRANDED DRAFT in_left" in r.getMessage()]
+    assert len(stranded) == 1
+    assert billing_gateway.RESUMED in stranded[0]
 
 
 def test_the_period_key_is_stable_for_the_same_period(monkeypatch):

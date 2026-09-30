@@ -153,29 +153,65 @@ def test_the_change_key_distinguishes_two_changes_in_the_same_minute(monkeypatch
     )
 
 
+def _wire_found(monkeypatch, found):
+    """An earlier attempt at the change raised ``found`` and died before recording it."""
+    from billing.services import billing_gateway, store
+
+    calls = {"issued": [], "recorded": [], "keys": []}
+    reserved = object()     # the row that attempt reserved under the change's key
+    monkeypatch.setattr(billing_gateway, "find_invoice_by_metadata",
+                        lambda cid, k, v: found)
+    monkeypatch.setattr(billing_gateway, "issue_invoice",
+                        lambda *a, **k: calls["issued"].append(a) or {"id": "in_new"})
+    monkeypatch.setattr(store, "invoice_for_key",
+                        lambda key: calls["keys"].append(key) or reserved)
+    monkeypatch.setattr(
+        billing_gateway, "record_found_invoice",
+        lambda record, invoice: calls["recorded"].append((record, invoice))
+        or invoice["status"],
+    )
+    return calls, reserved
+
+
 def test_an_already_invoiced_change_is_not_charged_again(monkeypatch):
     changes = _wire(monkeypatch)
-    from billing.services import billing_gateway
+    found = {"id": "in_old", "status": "paid"}
+    calls, reserved = _wire_found(monkeypatch, found)
+    period = Period(datetime(2026, 11, 8, 13, tzinfo=UTC),
+                    datetime(2026, 12, 8, 13, tzinfo=UTC))
+    at = datetime(2026, 11, 10, 13, tzinfo=UTC)
 
-    issued = []
-    monkeypatch.setattr(
-        billing_gateway, "find_invoice_by_metadata",
-        lambda cid, k, v: {"id": "in_old", "status": "paid"},
+    result = changes.issue_change(
+        "cus_1", "e2", "Beta Co", [], ["PETTY_CASH", "PAYMENT_REQUEST"], period, at,
     )
-    monkeypatch.setattr(
-        billing_gateway, "issue_invoice",
-        lambda *a, **k: issued.append(a) or {"id": "in_new"},
-    )
+
+    assert result["id"] == "in_old"
+    assert calls["issued"] == []          # nothing charged
+    # ...and the row that earlier attempt reserved says what the processor says, rather than
+    # the "draft, no link, no paid date" it was left at.
+    assert calls["keys"] == [changes.change_key("e2", at, ["PETTY_CASH", "PAYMENT_REQUEST"])]
+    assert calls["recorded"] == [(reserved, found)]
+
+
+def test_a_draft_an_earlier_attempt_left_is_reported_as_stranded(monkeypatch, caplog):
+    """Never finalized, so never charged, and nothing will ever finalize it. The callers
+    refuse anything unpaid and withdraw it - but that it happened has to be said, at ERROR."""
+    changes = _wire(monkeypatch)
+    calls, _reserved = _wire_found(monkeypatch, {"id": "in_draft", "status": "draft"})
     period = Period(datetime(2026, 11, 8, 13, tzinfo=UTC),
                     datetime(2026, 12, 8, 13, tzinfo=UTC))
 
     result = changes.issue_change(
-        "cus_1", "e2", "Beta Co", [], ["PETTY_CASH", "PAYMENT_REQUEST"],
-        period, datetime(2026, 11, 10, 13, tzinfo=UTC),
+        "cus_1", "e2", "Beta Co", [], ["PETTY_CASH"], period,
+        datetime(2026, 11, 10, 13, tzinfo=UTC),
     )
 
-    assert result["id"] == "in_old"
-    assert issued == []          # nothing charged
+    assert result["id"] == "in_draft"     # handed back: every caller refuses what is unpaid
+    assert calls["issued"] == []
+    stranded = [r for r in caplog.records
+                if r.levelname == "ERROR" and "STRANDED DRAFT in_draft" in r.getMessage()]
+    assert len(stranded) == 1
+    assert "withdrawn" in stranded[0].getMessage()
 
 
 # --- where "before" comes from --------------------------------------------------

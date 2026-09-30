@@ -292,6 +292,41 @@ def _current_period_key(account, group) -> str | None:
     )
 
 
+def _nothing_open_but_owed(account, group) -> bool:
+    """Called when the processor holds nothing open for THIS card - the moment dunning would
+    call the debt settled elsewhere. True when it is NOT settled.
+
+    Two things about the local rows, which nothing else keeps current (there is no webhook):
+
+    * this card's rows still reading "open" are re-read. Nothing is open at the processor,
+      so each was paid, voided or written off somewhere this code cannot see - and until
+      re-read it goes on showing as failed, with Retry payment on it;
+    * the invoice for the period this card is behind on may be a DRAFT the processor never
+      finalized: an error or a crash between creating and finalizing it. A draft is not in
+      the open list, so it looked exactly like a settled debt - dunning ended as recovered,
+      said "Thank you for your payment" for nothing, and put the companies back on a period
+      nobody paid for. That is logged as a STRANDED DRAFT and dunning carries on; the
+      renewal pass finishes the draft (``renewals._renew_one_group``).
+
+    Only the CURRENT period's invoice counts. A draft some other attempt abandoned - a
+    purchase retried under a fresh key - is not this card's debt, and must not hold it in
+    dunning for ever.
+    """
+    from billing.services import billing_gateway, store
+
+    for record in store.open_invoices_for_group(group.id):
+        billing_gateway.refresh_record(record)
+    current = store.invoice_for_key(_current_period_key(account, group))
+    if current is None or not current.external_id or current.status != "draft":
+        return False
+    if billing_gateway.refresh_record(current) != "draft":
+        return False
+    billing_gateway.stranded_draft(
+        current.external_id, current.idempotency_key, "dunning", billing_gateway.RESUMED
+    )
+    return True
+
+
 def _names_period(renewal_key: str | None, key: str | None) -> bool:
     """Whether an invoice's ``renewal_key`` names the period ``key`` does.
 
@@ -523,10 +558,16 @@ def _notify_dunning(retried: list[dict], recovered: list[dict],
     """
     from billing.services import notify
 
-    settled = {entry["user_id"] for entry in recovered}
+    # Per ACCOUNT, not per payer: a payer's two cards are two episodes, and one card
+    # recovering says nothing about the other's retry failing in the same pass. Keyed by
+    # the payer alone, that second card's "your payment failed again" was dropped.
+    def _account(entry) -> tuple:
+        return entry["user_id"], str(entry.get("billing_group_id"))
+
+    settled = {_account(entry) for entry in recovered}
     events = []
     for entry in retried:
-        if entry["user_id"] in settled:
+        if _account(entry) in settled:
             continue
         # Charged successfully, but on an invoice that did not recover the subscription
         # (see the ``collected`` branch in ``collect_due``). Neither notice fits: "your
@@ -787,6 +828,11 @@ def _collect_one_group(group, now, offsets, window) -> dict[str, list]:
             store.billing_groups_for_payer(user_id),
         )
         if not invoices:
+            if _nothing_open_but_owed(account, group):
+                # Not settled: the period's invoice is a draft nobody finalized. No
+                # recovery, no email, no attempt counted - the renewal pass finishes it,
+                # and the deadline still closes the episode if nothing ever does.
+                return out
             # Nothing outstanding on THIS card — it was settled elsewhere (a portal
             # payment, a manual charge). Collection has no reason to continue, but the
             # period it paid for still has to be recorded, or the customer has paid
@@ -933,8 +979,11 @@ def _retry_context(user_id, entity_id, group_id=None):
         # Nothing owed on this card. If collection was running it was settled somewhere
         # this code cannot see (a portal payment, a manual charge), so close it out and
         # record what it paid for — otherwise the customer has paid and stays locked out
-        # until the next renewal run notices.
-        if started is not None:
+        # until the next renewal run notices. Unless the period's invoice is a draft
+        # nobody finalized: that is not settled, and the episode stays open for the
+        # renewal pass to finish it (``_nothing_open_but_owed``).
+        owed = _nothing_open_but_owed(account, group)
+        if started is not None and not owed:
             _settle_period(account, group, None)
             store.end_group_dunning(group.id, status="active")
         return None, {"status": "nothing_owed", "attempts": attempts,

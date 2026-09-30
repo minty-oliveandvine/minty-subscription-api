@@ -655,6 +655,181 @@ def test_a_xero_only_user_is_still_reachable(app, db_session, mail):
 
 
 # ---------------------------------------------------------------------------
+# Where the MONEY emails go — the billing account's billing email, else the payer
+# ---------------------------------------------------------------------------
+#
+# A billing account's "Billing Email" is where the company wants its invoices, and the
+# invoice prints it as Bill to. The receipt, the declines and the recovery went to the
+# payer's login address regardless.
+
+RECEIPT = {
+    "total": 40000,
+    "currency": "HKD",
+    "period_start": datetime(2026, 8, 1, tzinfo=UTC),
+    "period_end": datetime(2026, 9, 1, tzinfo=UTC),
+    "lines": ["Olive Ltd — Super Minty"],
+}
+
+
+def _billing_account(payer, *, email="accounts@olive.test", company="Olive Holdings Ltd"):
+    from billing.services import store
+
+    return store.create_billing_account(
+        payer, f"pm_{uuid.uuid4().hex[:8]}", billing_email=email, billing_company=company
+    )
+
+
+def test_a_receipt_goes_to_the_accounts_billing_email_and_greets_the_company(
+    app, db_session, mail
+):
+    from billing.services import notify
+
+    with app.app_context():
+        payer = _make_payer(db_session)
+        account = _billing_account(payer)
+
+        assert notify.notify(payer, notify.RENEWAL_PAID, dedupe_key="k",
+                             context={**RECEIPT, "billing_group_id": account.id}) is True
+
+        assert mail.sent[0].to == ["accounts@olive.test"]
+        # Whoever reads a company's billing inbox need not be the payer.
+        assert "Hi Olive Holdings Ltd," in mail.sent[0].html
+        assert "Hi Sam," not in mail.sent[0].html
+
+
+@pytest.mark.parametrize("event", ["renewal_failed", "dunning_retry_failed",
+                                   "payment_recovered"])
+def test_every_money_email_goes_to_the_billing_email(app, db_session, mail, event):
+    from billing.services import notify
+
+    with app.app_context():
+        payer = _make_payer(db_session)
+        account = _billing_account(payer)
+
+        assert notify.notify(payer, event, dedupe_key="k",
+                             context={"billing_group_id": account.id}) is True
+
+        assert mail.sent[0].to == ["accounts@olive.test"]
+
+
+def test_an_account_with_no_billing_email_mails_the_payer_as_before(app, db_session, mail):
+    """The common case: an account opened without one (every backfilled account)."""
+    from billing.services import notify
+
+    with app.app_context():
+        payer = _make_payer(db_session)
+        account = _billing_account(payer, email=None)
+
+        notify.notify(payer, notify.RENEWAL_PAID, dedupe_key="k",
+                      context={**RECEIPT, "billing_group_id": account.id})
+
+        assert mail.sent[0].to == ["payer@test.com"]
+        assert "Hi Sam," in mail.sent[0].html
+
+
+def test_an_account_with_an_email_but_no_company_greets_the_payer(app, db_session, mail):
+    from billing.services import notify
+
+    with app.app_context():
+        payer = _make_payer(db_session)
+        account = _billing_account(payer, company=None)
+
+        notify.notify(payer, notify.RENEWAL_PAID, dedupe_key="k",
+                      context={**RECEIPT, "billing_group_id": account.id})
+
+        assert mail.sent[0].to == ["accounts@olive.test"]
+        assert "Hi Sam," in mail.sent[0].html
+
+
+def test_an_email_naming_no_account_mails_the_payer(app, db_session, mail):
+    from billing.services import notify
+
+    with app.app_context():
+        payer = _make_payer(db_session)
+        _billing_account(payer)
+
+        notify.notify(payer, notify.RENEWAL_PAID, dedupe_key="k", context=RECEIPT)
+
+        assert mail.sent[0].to == ["payer@test.com"]
+
+
+def test_somebody_elses_account_is_never_mailed(app, db_session, mail):
+    """Only an account of THIS payer's counts: an id from anywhere else is not a reason to
+    send one customer's money email to another's inbox."""
+    from billing.services import notify
+
+    with app.app_context():
+        payer = _make_payer(db_session)
+        stranger = _make_payer(db_session, email="stranger@test.com")
+        theirs = _billing_account(stranger, email="accounts@stranger.test")
+
+        notify.notify(payer, notify.RENEWAL_PAID, dedupe_key="k",
+                      context={**RECEIPT, "billing_group_id": theirs.id})
+
+        assert mail.sent[0].to == ["payer@test.com"]
+
+
+def test_trial_and_handover_notices_stay_with_the_person(app, db_session, mail):
+    from billing.services import notify
+
+    with app.app_context():
+        payer = _make_payer(db_session)
+        account = _billing_account(payer)
+
+        notify.notify(payer, notify.TRIAL_EXPIRED, dedupe_key="t",
+                      context={"billing_group_id": account.id})
+        notify.notify(payer, notify.SUBSCRIBER_TRANSFER_DECLINED, dedupe_key="h",
+                      context={"billing_group_id": account.id})
+
+        assert [m.to for m in mail.sent] == [["payer@test.com"], ["payer@test.com"]]
+
+
+def test_a_long_billing_email_is_logged_as_sent_not_sent_again(app, db_session, mail):
+    """The log keeps 200 characters and a billing email may have 255. Uncut, the save AFTER
+    a successful send failed (on Postgres), the claim stayed ``failed``, and the same email
+    went out again on every run."""
+    from billing.services import notify
+    from shared_models.models import SubscriptionEmailLog
+
+    address = "a" * 240 + "@olive.test"
+    with app.app_context():
+        payer = _make_payer(db_session)
+        account = _billing_account(payer, email=address)
+        context = {**RECEIPT, "billing_group_id": account.id}
+
+        assert notify.notify(payer, notify.RENEWAL_PAID, dedupe_key="k", context=context)
+        assert notify.notify(payer, notify.RENEWAL_PAID, dedupe_key="k", context=context) is False
+
+        assert mail.sent[0].to == [address]
+        assert len(mail.sent) == 1
+        row = SubscriptionEmailLog.objects.get(event=notify.RENEWAL_PAID, dedupe_key="k")
+        assert row.status == notify.STATUS_SENT
+        assert row.recipient == address[: notify.RECIPIENT_MAX]
+
+
+def test_the_replay_redirect_also_catches_a_billing_address(app, db_session, mail,
+                                                             monkeypatch):
+    """A replay mails whoever is reading it, never the account it lives on - the billing
+    email included, or a receipt would slip out to it."""
+    from billing.management.commands.replay_scenarios import _patch_notify
+    from billing.services import notify
+
+    # Restored after the test: the harness patches the module for the rest of its run.
+    monkeypatch.setattr(notify, "recipient_for", notify.recipient_for)
+    monkeypatch.setattr(notify, "address_for", notify.address_for)
+    with app.app_context():
+        payer = _make_payer(db_session)
+        account = _billing_account(payer)
+        _patch_notify({"notify_to": "reader+replay@test.com", "user_id": payer,
+                       "email": "payer@test.com"})
+
+        notify.notify(payer, notify.RENEWAL_PAID, dedupe_key="k",
+                      context={**RECEIPT, "billing_group_id": account.id})
+
+        assert mail.sent[0].to == ["reader+replay@test.com"]
+
+
+# ---------------------------------------------------------------------------
 # Call sites — that the billing jobs hand over the right events
 # ---------------------------------------------------------------------------
 
@@ -684,6 +859,29 @@ def test_a_retry_that_then_succeeded_does_not_send_a_failure_notice():
     events = {event for _, event, _, _ in captured}
     assert notify_mod.PAYMENT_RECOVERED in events
     assert notify_mod.DUNNING_RETRY_FAILED not in events
+
+
+def test_one_account_recovering_does_not_silence_anothers_failed_retry(monkeypatch):
+    """Two cards are two episodes. Suppressed by PAYER, card B's "your payment failed again"
+    vanished whenever card A recovered in the same pass - the one notice B needed."""
+    import billing.services.notify as notify_mod
+    from billing.services import dunning
+
+    captured = []
+    monkeypatch.setattr(notify_mod, "notify_many",
+                        lambda events: captured.extend(events) or len(events))
+
+    dunning._notify_dunning(
+        retried=[{"user_id": "u1", "billing_group_id": "gA", "attempts": 2, "_episode": "u1:A"},
+                 {"user_id": "u1", "billing_group_id": "gB", "attempts": 2, "_episode": "u1:B"}],
+        recovered=[{"user_id": "u1", "billing_group_id": "gA", "attempts": 2,
+                    "_episode": "u1:A"}],
+        given_up=[],
+    )
+
+    sent = {(event, context["billing_group_id"]) for _, event, _, context in captured}
+    assert sent == {(notify_mod.PAYMENT_RECOVERED, "gA"),
+                    (notify_mod.DUNNING_RETRY_FAILED, "gB")}
 
 
 def test_dunning_scaffolding_does_not_leak_into_the_reported_result():

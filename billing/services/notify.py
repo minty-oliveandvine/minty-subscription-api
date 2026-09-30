@@ -29,16 +29,22 @@ the entire customer-facing vocabulary of the billing system is reviewable on one
 which matters more here than template purity, because these are the only words Minty ever
 says to a customer about their money.
 
-Recipient is the PAYER, with ONE exception. Every action these emails ask for (add a card,
+Recipient is the PAYER, with TWO exceptions. Every action these emails ask for (add a card,
 settle an invoice, confirm billing) is one only the payer can take; co-admins on an entity
 would receive amounts they cannot act on. The consequence is a known gap — a co-admin
 still watches modules go dark with no explanation — and closing it needs a separate,
 redacted template set rather than a wider recipient list on these.
 
-The exception is ``subscriber_transfer_requested``, which is addressed to someone who is
-NOT yet the payer and is being asked to become one. It belongs here rather than in a
+The first exception is ``subscriber_transfer_requested``, which is addressed to someone
+who is NOT yet the payer and is being asked to become one. It belongs here rather than in a
 separate system because it is a message about money with an amount in it, and the whole
 point of keeping this vocabulary on one screen is that no such message escapes review.
+
+The second is the MONEY emails (``MONEY_EVENTS``: the receipt, the two declines and the
+recovery). They go to the billing account's own billing email when it has one - the
+address the company gave for its invoices, and the one its invoice prints as Bill to -
+greeted by the company's name. With none set they go to the payer. See ``address_for``,
+the one place a recipient is decided.
 
 PORTED FROM FLASK (Part 2 step 2). The copy, the builders and the three rules are Flask's
 ``blueprints/subscription/services/notify.py`` verbatim; what changed is the delivery
@@ -76,6 +82,9 @@ STATIC_ROOT = Path(__file__).resolve().parent.parent / "static"
 # a failure to retry rather than a delivery.
 STATUS_SENT = "sent"
 STATUS_FAILED = "failed"
+
+#: ``subscription_email_log.recipient``'s length. A billing email may be longer (255).
+RECIPIENT_MAX = 200
 
 # --- Events -------------------------------------------------------------------
 # Stable strings: they are persisted as dedupe rows, so renaming one silently
@@ -117,6 +126,12 @@ EVENTS = (
     SUBSCRIBER_TRANSFER_ACCEPTED,
     SUBSCRIBER_TRANSFER_DECLINED,
     SUBSCRIBER_TRANSFER_EXPIRED,
+)
+
+#: The emails about a billing account's MONEY - charged, declined, declined again, settled.
+#: They go to the account's billing email when it has one (``address_for``).
+MONEY_EVENTS = frozenset(
+    {RENEWAL_PAID, RENEWAL_FAILED, DUNNING_RETRY_FAILED, PAYMENT_RECOVERED}
 )
 
 # One template for everything except the receipt. ``renewal_paid`` is a document rather
@@ -792,6 +807,45 @@ def recipient_for(user_id) -> tuple[str | None, str]:
     return (address or None), (user.first_name or "").strip()
 
 
+def address_for(user_id, event: str, context: dict | None) -> tuple[str | None, str]:
+    """``(email, greeting)`` for ONE email - the only place ``notify`` asks who it goes to.
+
+    The payer (``recipient_for``), except for a MONEY email about a billing account that
+    has a billing email: the receipt, the declines and the recovery go there. That address
+    is what a billing account's "Billing Email" is FOR - it is where the company wants its
+    invoices - and it is printed as the invoice's Bill to. Greeted by the account's company
+    name, since whoever reads a company's billing inbox need not be the payer; by the
+    payer's first name when the account names no company.
+
+    Only an account of THIS payer's counts, named by the email's own ``billing_group_id``;
+    anything else - no account, no billing email, somebody else's account - is the payer.
+    Trial and handover notices are about the person and always go to them.
+
+    A failure to read the account falls back to the payer, logged: the notice still has
+    somewhere to go, and a missing receipt is worse than one at the login address.
+    """
+    address, first_name = recipient_for(user_id)
+    group_id = (context or {}).get("billing_group_id")
+    if event not in MONEY_EVENTS or not group_id:
+        return address, first_name
+    try:
+        from billing.services import store
+
+        group = store.billing_group(group_id)
+    except Exception:
+        logger.exception(
+            "notify: could not read billing account {} for {}; mailing the payer",
+            group_id, event,
+        )
+        return address, first_name
+    if group is None or str(group.payer_user_id) != str(user_id):
+        return address, first_name
+    billing_email = (group.billing_email or "").strip()
+    if not billing_email:
+        return address, first_name
+    return billing_email, (group.billing_company or "").strip() or first_name
+
+
 def _claim(user_id, event: str, dedupe_key: str):
     """Reserve this send, or return None if it has already gone out.
 
@@ -841,7 +895,7 @@ def notify(user_id, event: str, *, dedupe_key: str, context: dict | None = None)
             logger.error("notify: unknown billing email event {}", event)
             return False
 
-        address, first_name = recipient_for(user_id)
+        address, first_name = address_for(user_id, event, context)
         if not address:
             logger.warning(
                 "notify: payer {} has no email address; skipping {}", user_id, event
@@ -901,7 +955,12 @@ def notify(user_id, event: str, *, dedupe_key: str, context: dict | None = None)
                 headers={"Content-ID": f"<{ILLUSTRATION_CID}>",
                          "X-Attachment-Id": ILLUSTRATION_CID},
             )
-        row.recipient = address
+        # Cut to the column. A billing email may be 255 characters and the log keeps 200:
+        # uncut, the save AFTER a successful send failed, the claim stayed ``failed``, and
+        # the same email went out again on every run.
+        from billing.services.store import _fits
+
+        row.recipient = _fits(address, RECIPIENT_MAX)
         try:
             message.send()
         except Exception as exc:

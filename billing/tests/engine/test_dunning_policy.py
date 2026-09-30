@@ -297,6 +297,10 @@ def _wire_runner(monkeypatch, *, account, invoices=None, paid=True, group=None):
     monkeypatch.setattr(store, "billing_groups_for_payer", lambda uid: [group])
     monkeypatch.setattr(store, "billing_group", lambda gid: group)
     monkeypatch.setattr(store, "customer_mapping_for_user", lambda uid: account)
+    # No local invoice rows behind these fakes: nothing to re-read when nothing is open,
+    # and no stranded draft for the period (``dunning._nothing_open_but_owed``).
+    monkeypatch.setattr(store, "open_invoices_for_group", lambda gid: [])
+    monkeypatch.setattr(store, "invoice_for_key", lambda key: None)
     # Recorded under the PAYER, so the assertions below read the same whether the cycle
     # lives on the account or on its one card.
     monkeypatch.setattr(
@@ -380,6 +384,80 @@ def test_a_debt_settled_OUTSIDE_the_app_is_left_for_the_renewal_run_to_adopt(mon
     dunning.collect_due(day(1))
 
     assert calls["paid_through"] == []
+    assert calls["ended"] == [("u1", "active")]
+
+
+class _InvoiceRow:
+    """A local ``subscription_invoice`` row, for ``dunning._nothing_open_but_owed``."""
+
+    def __init__(self, external_id, status, key="renewal-u1-20270308-g1"):
+        self.id = f"row_{external_id}"
+        self.external_id = external_id
+        self.status = status
+        self.idempotency_key = key
+
+
+def _stranded_period(monkeypatch, row, now_says):
+    """The card's current-period invoice is ``row``, and re-reading it answers ``now_says``."""
+    from billing.services import billing_gateway, store
+
+    asked = {"keys": [], "reread": []}
+    monkeypatch.setattr(store, "invoice_for_key",
+                        lambda key: asked["keys"].append(key) or row)
+    monkeypatch.setattr(billing_gateway, "refresh_record",
+                        lambda record: asked["reread"].append(record) or now_says)
+    return asked
+
+
+def test_nothing_open_while_the_periods_invoice_is_a_stranded_draft_is_not_recovery(
+    monkeypatch, caplog
+):
+    """A draft nobody finalized is not in the open list, so it looked exactly like a debt
+    settled elsewhere: dunning ended as recovered, thanked the customer for a payment
+    nobody made, and put the companies back on a period nobody paid for. It stays in
+    dunning, says so at ERROR, and the renewal pass finishes the draft."""
+    account = _Account(started=day(0), attempts=0, paid_through=PAID_TO, anchor=ANCHOR)
+    dunning, calls = _wire_runner(monkeypatch, account=account, invoices=None)
+    asked = _stranded_period(monkeypatch, _InvoiceRow("in_draft", "draft"), "draft")
+
+    result = dunning.collect_due(day(1))
+
+    assert asked["keys"] == ["renewal-u1-20270308-g1"]     # the period it is behind on
+    assert calls["ended"] == []
+    assert result["recovered"] == []
+    assert calls["attempts"] == 0
+    assert any(r.levelname == "ERROR" and "STRANDED DRAFT in_draft" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_a_draft_row_the_processor_says_was_paid_is_recovery_as_before(monkeypatch):
+    """"Draft" is only what the row said when its process stopped. Paid is paid."""
+    account = _Account(started=day(0), attempts=0, paid_through=PAID_TO, anchor=ANCHOR)
+    dunning, calls = _wire_runner(monkeypatch, account=account, invoices=None)
+    _stranded_period(monkeypatch, _InvoiceRow("in_left", "draft"), "paid")
+
+    result = dunning.collect_due(day(1))
+
+    assert calls["ended"] == [("u1", "active")]
+    assert len(result["recovered"]) == 1
+
+
+def test_nothing_open_re_reads_the_cards_rows_still_saying_open(monkeypatch):
+    """Settled somewhere this code cannot see, each such row went on showing as failed with
+    Retry payment on it - there is no webhook to tell it otherwise."""
+    from billing.services import billing_gateway, store
+
+    account = _Account(started=day(0), attempts=0, paid_through=PAID_TO, anchor=ANCHOR)
+    dunning, calls = _wire_runner(monkeypatch, account=account, invoices=None)
+    stale = _InvoiceRow("in_stale", "open")
+    monkeypatch.setattr(store, "open_invoices_for_group", lambda gid: [stale])
+    reread = []
+    monkeypatch.setattr(billing_gateway, "refresh_record",
+                        lambda record: reread.append(record) or "paid")
+
+    dunning.collect_due(day(1))
+
+    assert reread == [stale]
     assert calls["ended"] == [("u1", "active")]
 
 

@@ -49,7 +49,7 @@ already done, 5xx upstream. `billing/tests/test_contract.py` pins every table be
 | GET | `/subscriptions/transfers` | `my_transfers_api` | offers made TO me |
 | GET | `/invoices/{invoice_id}/breakdown` | — (**new**, 2026-09-25) | 08-B's "Billing Breakdown · Download csv": ONE invoice, company by company - a row per line it charged (the subscription, the monthly rate that line was priced at, the days it paid for, what was charged; a credit negative, a zero line left out). The days and rate are the ones the line RECORDED when it was issued (`subscription_invoice_line.period_start` / `period_end` / `unit_amount`, schema item 23, same day - written by whatever priced it: a renewal is the whole period at its plan's price; a mid-period start or upgrade, and the credit for the plan it replaced, run from the change to the period's end; a cancellation extension runs from the paid-through date to its access end at the rate the cancellation priced it at - the marginal step for a module leaving a bundle). An extension priced at two rates recorded none: its row shows the rate its days add up to. A line issued BEFORE then is read back from how its kind is priced (`portal.build_invoice_breakdown`) - an extension's end from the module's `app_access_until` while the row still holds it, left out (null) once a resume has cleared it, never guessed. Someone else's invoice, or a malformed id, is 404; the web writes the CSV |
 | POST | `/invoices/{invoice_id}/retry` | — (**new**, 2026-09-28) | 08-B's *Retry payment* on a declined invoice's row (08-K): collect THIS invoice now, on its account's card (`billing_accounts.retry_invoice` → `dunning.retry_now(group_id=…, expect_invoice=…)` - the engine's own manual collection: the same attempt budget and give-up deadline as the scheduled retries, the period settled and access switched back on when paid). Pinned from the row: the CARD (the invoice's account; the payer's oldest for one from before accounts) and the INVOICE (charged only if it is the one the engine's rules pick - else `not_this_invoice`, nothing charged, no attempt spent). Refused before the engine unless the list marks it `retryable`. Answers `{ok, status, message}` in the module page's own words (`api/_retry.py`, shared with `retry-payment`): `paid`, `failed` (the processor's reason), `no_card`, `gave_up`, `nothing_owed`, `older_debt_only`, `not_this_invoice`, `not_collectable` (the processor will no longer collect it and it could not be re-issued automatically - nothing charged; §6). An invoice Stripe will no longer collect is RE-ISSUED and the replacement charged in the same press (§6). Someone else's invoice or a malformed id is 404; one not waiting for a payment is 409 - or `not_this_invoice` when it was re-issued since the page was drawn; a processor failure is 502 |
-| GET | `/invoices/{invoice_id}/pdf` | — (**new**, 2026-09-29) | 08-B's "Invoice PDF": the invoice drawn as Figma 09-A (`invoice_document.build_invoice_document` → `invoice_pdf.render_invoice_pdf`; fpdf2, Inter embedded, Noto Sans HK loaded only for a document with Chinese in it), NOT Stripe's hosted page - Stripe's PDF cannot be restyled, and its Bill to is the Stripe customer (one per payer). **Bill to = the invoice's billing account** as 08-B prints it (`account_name`, the billing email else the payer's, the charged card's address laid out as the web's `addressLines`), read LIVE - a rename reaches old invoices; an invoice from before accounts is the payer's oldest account's (`portal.invoice_account_id`, the list's and dunning's rule). **Lines**: 09-A's plan lines ("Petty cash module only", "Payment request module only", "SuperMinty"), each with its companies listed under it, one row per Stripe item in Stripe's own words (`billing.line_description`) minus the plan the heading names. The lines must add up to `total` or nothing is served (500, ERROR logged); a character no font can draw is logged at ERROR with the invoice. `application/pdf`, `Content-Disposition: attachment; filename="Inv-<ref>.pdf"`, `Cache-Control: private, no-store`. 404 not the caller's (or a malformed id); 409 no document - never sent, a draft, void (`has_pdf` false); 502 the address could not be read from the processor |
+| GET | `/invoices/{invoice_id}/pdf` | — (**new**, 2026-09-29) | 08-B's "Invoice PDF" download, and since 2026-09-30 its view-only Inv# preview (minty-web fetches the bytes and draws them with pdf.js, so the `attachment` header below does not apply to it): the invoice drawn as Figma 09-A (`invoice_document.build_invoice_document` → `invoice_pdf.render_invoice_pdf`; fpdf2, Inter embedded, Noto Sans HK loaded only for a document with Chinese in it), NOT Stripe's hosted page - Stripe's PDF cannot be restyled, and its Bill to is the Stripe customer (one per payer). **Bill to = the invoice's billing account** as 08-B prints it (`account_name`, the billing email else the payer's, the charged card's address laid out as the web's `addressLines`), read LIVE - a rename reaches old invoices; an invoice from before accounts is the payer's oldest account's (`portal.invoice_account_id`, the list's and dunning's rule). **Lines**: 09-A's plan lines ("Petty cash module only", "Payment request module only", "SuperMinty"), each with its companies listed under it, one row per Stripe item in Stripe's own words (`billing.line_description`) minus the plan the heading names. The lines must add up to `total` or nothing is served (500, ERROR logged); a character no font can draw is logged at ERROR with the invoice. `application/pdf`, `Content-Disposition: attachment; filename="Inv-<ref>.pdf"`, `Cache-Control: private, no-store`. 404 not the caller's (or a malformed id); 409 no document - never sent, a draft, void (`has_pdf` false); 502 the address could not be read from the processor |
 | GET | `/invoices` | `my_invoices_api` | my invoices, newest first; `entity`, `page`, `per_page`, and **`account`** (added 2026-09-25) — ONE billing account's invoices for 08-B; a pre-accounts invoice (no `billing_group_id`) belongs to the payer's OLDEST account, the attribution dunning already collects by; someone else's account matches nothing. Echoes `account_id`. Each row carries **`retryable`** (2026-09-28): whether *Retry payment* would charge it now - per card, the ONE open invoice `dunning.retry_now` picks (`portal.retryable_invoice_ids`, calling `dunning._manual_target` over our own rows: the current period's renewal, else an open mid-period charge, never an abandoned give-up bill), and nothing on a card past its give-up deadline or whose access has run out - with or without a dunning stamp, since giving up leaves `paid_through` where it stopped. Judged over ALL the payer's failed invoices, before the `account` / `entity` narrowing (narrowed first, a company's own charge could be offered while the engine would collect the renewal), from the rows the list already read; a list with nothing failed reads nothing more. No Stripe call, no writes. And **`has_pdf`** (2026-09-29): whether `/invoices/{id}/pdf` has a document to serve - sent to the processor and paid, open or uncollectible (`portal.has_document`, the same rule the route's 409 asks, so the button never refuses). `hosted_invoice_url` is still answered, but minty-web no longer links it |
 | GET | `/billing/payment-methods` | `my_payment_methods_api` | my saved cards and the default |
 | POST | `/billing/payment-methods/setup-intent` | `my_payment_method_setup_intent_api` | a Stripe SetupIntent + the publishable key |
@@ -222,8 +222,8 @@ Read-only mirrors: `user`, `user_entity`, `entities`, `entity_function`, `countr
 `billing/scheduler.py` — the port of Minty's `services/app_runtime/scheduler.py`, in-process by
 decision until Part 3's Terraform. FULL pass at `SUBSCRIPTION_SCHEDULER_FULL_HOUR` (05:00
 `Asia/Hong_Kong`): close trials, raise renewals, retry dunning, notify trial-ending, sweep access
-for everyone. LIGHT pass every other hour: close trials and raise renewals, sweep the payers
-touched. Gated by `SUBSCRIPTION_ENABLED` **and** `SUBSCRIPTION_SCHEDULER_ENABLED`; started from
+for everyone. LIGHT pass every hour except the full one: close trials and raise renewals, sweep
+the payers touched. Gated by `SUBSCRIPTION_ENABLED` **and** `SUBSCRIPTION_SCHEDULER_ENABLED`; started from
 `billing.apps.ready()` in the web process only (never from a management command, the test
 runner or the autoreloader parent). Two gunicorn workers → two timers → the pass's advisory lock
 (`daily.daily_lock`) lets one run: `pg_try_advisory_lock` on a **dedicated raw connection**
@@ -243,6 +243,15 @@ grants entitlement failed before it. Both transfer jobs run **before** the renew
 mirrored reasons: `repair-transfers` writes a claim for money already collected, and
 `collect-transfers` writes one by collecting it — run afterwards, the renewal would either
 re-bill days already settled or skip a card that has never collected.
+After run-renewals (with `issue`) the pass reports the cards billed THIS pass and still due —
+more than a period behind, billed again next pass (`_log_renewal_backlog`, WARNING). **Fixed
+2026-09-30, both engines:** it unpacked `due_renewals` as `(account, paid_through)` pairs after
+the list became one `(account, group, paid_through)` per card, so it raised on the very case it
+reports, OUTSIDE the step's try: `run_daily` raised and every pass skipped retry-dunning and the
+sweep, for every payer, as long as one card stayed due (a declined renewal was enough). It now
+reads the triple, counts only cards in the run's `issued` (a declined card is dunning's, not a
+backlog), and sits in its own try (ERROR, the pass carries on) —
+`engine/test_daily_backlog.py`, 4 in each engine (Flask's old test stubbed the two-value shape).
 `scheduler.run_pass_now` runs on APScheduler's worker thread, so it opens the engine's
 request scope itself (`billing.services._context.scope()` — what Flask's `app.app_context()`
 gave the timer: the clock, policy, catalog and default-card memos) and calls
@@ -351,6 +360,92 @@ retry or by either Retry-payment button).
   is still open (mid-refresh); `billing_accounts.retry_invoice` answers `not_this_invoice` for a
   page drawn before the re-issue.
 
+**A draft nobody finalized is loud, a renewal's is FINISHED, and dunning does not call it
+settled (2026-09-30, both engines).** `issue_invoice` creates the invoice (`auto_advance=False`),
+records its id as a draft, adds the items and finalizes — and only then asks for payment. An
+error or a crash in between left a draft that nothing ever touched again: Stripe does not
+finalize it, dunning and Pay now chase only OPEN invoices, and every later renewal pass skipped
+the period as "already invoiced; unpaid" — never billed, its extensions closed uncollected. On
+an error the customer was told "payment failed" and, a day or so later, "Thank you for your
+payment": dunning found nothing open, called it settled elsewhere and closed the episode. The
+only automatic retry anywhere was the SDK's own (stripe 11.4.1, `max_network_retries` 2, within
+the one HTTP call). Now:
+- **Loud.** `billing_gateway.stranded_draft(invoice_id, key, where, next_step)` logs ONE line to
+  grep for — `billing: STRANDED DRAFT <in_…> (<key>, <where>): created at Stripe but never
+  finalized, so it is not billed. <next step>` — where the next step is `RESUMED` ("The next
+  renewal pass finishes it."), `NOT_RETRIED` (a transfer: "finalize or delete it in Stripe"),
+  `MISMATCHED` / `GONE` (a resume that refused) or `WITHDRAWN` (an earlier attempt's draft found
+  by `issue_change`, which every caller refuses and withdraws). It fires from the renewal
+  runner's except (which also puts the draft on the failed entry — `BillingError.invoice_id`
+  was dropped), `repair_stranded` and `_bill_transfer_in_house`, `issue_change`, a refused
+  resume, and dunning; `issue_invoice`'s own ERROR now names the draft and its key. "Loud"
+  means ERROR on stderr and `logs/core.log`: neither repo has an alerting sink.
+- **Finished** (`renewals._renew_one_group` → `billing_gateway.resume_invoice`). A renewal row
+  that still reads "draft" was never charged — the finalize is recorded BEFORE `pay` is called,
+  and Stripe cannot charge an `auto_advance=False` draft — so whatever Stripe now holds is
+  finished on the account's CURRENT card: a DRAFT gets the items it is missing and only those
+  (rebuilt from `store.invoice_lines`, matched by amount, company and days — never the words,
+  which a resume rebuilds from names cut to 255 characters), is finalized and charged; OPEN is
+  charged; PAID is adopted; VOID / UNCOLLECTIBLE are somebody's act and are not billed. An item
+  nobody reserved, a count or total that disagrees with the reservation, or a draft deleted at
+  Stripe (404) is refused: STRANDED DRAFT, nothing finalized, nothing charged, no email, and
+  the pass skips the card ("left a draft; not finished"). A draft found by metadata (the crash
+  came before its id was recorded) is finished in the same pass. The receipt states the
+  RESERVED lines and total (`renewals._as_reserved`). No app idempotency keys on the resume's
+  items or finalize, deliberately: Stripe replays a keyed ERROR for 24 hours, and the pass's
+  advisory lock already serialises resumes. `issue_invoice`'s requests are unchanged — its tail
+  became `_finalize` / `_collect` and its items `_item_kwargs`, shared with the resume.
+- **Not settled.** `dunning._nothing_open_but_owed`: when nothing is open for the card, the row
+  of the period it is behind on (`_current_period_key`) is re-read, and a draft there is logged
+  and keeps the episode open — no recovery, no email, no attempt counted; the deadline still
+  closes it. Only the CURRENT period's row counts, so a draft some abandoned purchase left can
+  never hold a card in dunning. Pay now (`_retry_context`) answers `nothing_owed` as before but
+  no longer closes the episode.
+Pinned by `engine/test_invoice_resume.py` (14, on the real store with the refresh tests' fake
+processor, which now keeps a draft's total live and answers 404 for a deleted invoice), the
+resume and stranded-draft cases in `engine/test_renewal_runner.py`, three in
+`engine/test_dunning_policy.py`, one each in `test_dunning_retry_now.py`,
+`test_subscription_transfer.py` and `test_change_billing.py` — the same in Minty's twins.
+
+**A row says what Stripe says, however it was learned (2026-09-30, both engines).** There is no
+webhook, so the paths that find an invoice after the fact are the only writers of
+`subscription_invoice` — and they left it behind: a reservation recovered by metadata was
+settled with its id and status only (the list showed "—" for its paid date and link for good),
+a renewal row left "open" by a crash after payment was answered from the store for ever (never
+adopted, shown as failed with Retry payment), `changes.issue_change` returned an earlier
+attempt's invoice without touching the row that attempt reserved, and dunning's "settled
+elsewhere" left the card's rows "open". Now `billing_gateway.record_found_invoice(record,
+found)` is the one way an invoice found at Stripe becomes the row — status, total, times, link,
+and the card when paid, exactly what the normal path writes — and `refresh_record(record)`
+re-reads a row that can still move (never raises; the stored status is the answer when Stripe
+cannot be reached). `renewals._already_invoiced` refreshes a stored draft/open row before
+answering (one read per pass for an invoiced, unsettled period — in practice a card in dunning;
+the light pass is hourly) and records a found reservation whole; `issue_change` records what it
+found; `dunning._nothing_open_but_owed` re-reads the card's rows still reading "open"
+(`store.open_invoices_for_group`). This also makes `_settle_period`'s "the next renewal adopts
+it" true for a row that has an `external_id`. Existing rows are not backfilled (the user's
+call: "Only prevent new ones").
+
+**The Stripe API version is pinned (2026-09-30, both engines).** `stripe_client.get_stripe()`
+set only the key, so the API version was whatever the installed SDK defaulted to. stripe-python
+12 defaults to `2025-03-31.basil`, which REMOVED Invoice `charge` and `payment_intent`: the
+card-capture reader (`_capture_payment_method`) would have recorded no card, and the dead-payment
+check (`_payment_is_dead`) would have answered "not dead" for ever — both silently.
+`STRIPE_API_VERSION = "2024-12-18.acacia"` (11.4.1's own default, so nothing changes today) is
+now set on every call, and Minty's `prune_replay_stripe.py` uses the same pin.
+`billing/tests/test_stripe_api_version.py` fails the build when the installed SDK's default or
+its Invoice fields stop matching, naming the migration (`charge` → `payments`, `payment_intent`
+→ `payments.data.payment.payment_intent`); at run time a REAL Stripe invoice with either field
+absent is logged at ERROR (`_api_changed`, judged by `stripe_client.lacks_field`, which ignores
+the hand-made dict fakes the tests use).
+
+**An extension-only invoice says so (2026-09-30, both engines' portal).** `portal._event`
+returned "renewal" for any invoice with a whole-period line, but the renewal runner writes a
+cancelled company's extension as kind `full` too, so a card renewing only to collect its last
+company's extension read "Renewal · Petty Cash". A renewal now needs a whole-period line that is
+not an extension; one carrying an extension is still a renewal. Headline only — the emails, the
+PDF and the CSV never read it.
+
 Mail: Django `EMAIL_*` on the same Brevo SMTP Minty uses, sender `SUBSCRIPTION_EMAIL` (fallback
 `DEFAULT_FROM_EMAIL`). `notify.mail_configured()` is false for the console and dummy backends
 and for SMTP with no `EMAIL_HOST`, and it is checked BEFORE the dedupe claim — an unconfigured
@@ -366,6 +461,25 @@ minty-web through Flask's login-gated re-handoff (`notify.settings_url` →
 `notify.portal_url` → `…?next=/subscription/subscriptions[/incoming]`), so no token ever
 travels in a link from here — Flask stays the only minter. **Until step 5 lands
 `/handoff/minty-web` in Flask those links are dead by design.**
+
+**Who a money email goes to (2026-09-30, both engines).** Every notice went to the payer's login
+address (`notify.recipient_for`), so a billing account's "Billing Email" — where the company
+wants its invoices, and what its invoice prints as Bill to — never received one. Now
+`notify.address_for(user_id, event, context)` is the one place a recipient is decided: the four
+MONEY emails (`MONEY_EVENTS`: `renewal_paid`, `renewal_failed`, `dunning_retry_failed`,
+`payment_recovered`, each already carrying `billing_group_id`) go to that account's
+`billing_email` when it is set and the account is THIS payer's, greeted by its
+`billing_company` ("Hi Olive Holdings Ltd,", the payer's first name when no company is set);
+anything else — no account, no billing email, another payer's account, a failure reading it
+(logged) — goes to the payer as before, and the trial and handover notices always do. Dedupe
+keys never held the address, so nothing is re-sent. Two silent failures fixed with it:
+`subscription_email_log.recipient` holds 200 characters and a billing email 255, so a long one
+failed the save AFTER a successful send and the same email went out on every run (the address
+is now cut to `RECIPIENT_MAX`); and `dunning._notify_dunning` suppressed a retry notice for any
+PAYER that recovered in the pass, swallowing a second card's "your payment failed again" — it is
+keyed by payer AND account now. `replay_scenarios --notify-to` redirects `address_for` as well
+as `recipient_for`, so a replay never mails a real billing address. Pinned in
+`engine/test_subscription_notifications.py` (13 new) and Minty's twin.
 
 ## 7. Configuration
 
@@ -421,7 +535,14 @@ the fake Stripe, and the three refusals), `engine/test_invoice_pdf.py` (10: the 
 coordinates read back from the canvas's own record, the shrink-to-fit reference, flow, paging,
 the CJK fallback and the loud missing glyph), `api/test_invoice_pdf_api.py` (11, incl. `has_pdf`
 against the route for six statuses), and the reinstatement-void and item-period tests (3 + 3,
-the same in Minty's twins).
+the same in Minty's twins). After the follow-ups of §5/§6 (2026-09-30: stranded drafts and their
+resume, the row reconcile, the pinned API version, the extension label, the money emails, the
+backlog crash): 1468 + 2 skipped on SQLite (00:17), 1470 on Postgres (00:21) —
+`engine/test_invoice_resume.py` (14), `engine/test_daily_backlog.py` (4),
+`test_stripe_api_version.py` (6) and new cases in the renewal, dunning, change, transfer,
+portal and notification files; Minty 2130 + 2 skipped. Every fix was proven by a mutation that
+puts its old behaviour back (20 mutants, each failing at least one of the new tests, in both
+engines).
 
 How the ported tests differ from Minty's, by rule: DB tests use pytest-django's `db` (a
 transaction per test) where Flask's `db_session` DELETEd tables afterwards — which is why the

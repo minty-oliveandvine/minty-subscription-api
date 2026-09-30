@@ -706,6 +706,30 @@ def test_an_extension_only_invoice_says_what_it_is(app, payer_invoices):
     assert "extension" not in result["invoices"][0]["description_detail"]
 
 
+def test_a_renewal_that_only_collects_an_extension_says_what_it_is(app, payer_invoices):
+    """A card whose last company was cancelled still renews - to collect the extension that
+    company was promised access for. The renewal runner writes that line as a WHOLE-PERIOD
+    one (``Line.kind``'s default), and a whole-period line alone used to make the invoice a
+    "Renewal · Petty Cash": the renewal of a module nobody has any more."""
+    portal = payer_invoices(
+        [
+            _invoice(
+                "in_1",
+                total=4000,
+                lines=[
+                    _line("e1", "Acme", "Petty Cash (access after cancellation)", 4000,
+                          kind="full")
+                ],
+            )
+        ]
+    )
+
+    with app.app_context():
+        result = portal.build_payer_invoices("u1")
+
+    assert result["invoices"][0]["description"] == "Access extension · Petty Cash"
+
+
 def test_an_invoice_that_only_credits_still_names_its_product(app, payer_invoices):
     """Dropping negative lines must not leave a credit note with an empty description."""
     portal = payer_invoices(
@@ -740,8 +764,9 @@ def test_a_renewal_carrying_an_extension_is_still_a_renewal_and_says_so(
                 total=32000,
                 lines=[
                     _line("e1", "Acme", "Petty Cash", 28000),
+                    # Whole-period, as the renewal runner writes an extension it collects.
                     _line("e2", "Beta", "Petty Cash (access after cancellation)", 4000,
-                          kind="remaining"),
+                          kind="full"),
                 ],
             )
         ]

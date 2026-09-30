@@ -47,9 +47,11 @@ CROSSED = ("This PaymentIntent's payment_method could not be updated because it 
 
 
 class _StripeError(Exception):
-    def __init__(self, message):
+    def __init__(self, message, *, http_status=None, code=None):
         super().__init__(message)
         self.user_message = message
+        self.http_status = http_status
+        self.code = code
 
 
 class _Listing:
@@ -88,7 +90,14 @@ class _Stripe:
             raise _StripeError(f"processor unreachable at {name} ({when})")
 
     def view(self, invoice_id, expand=None):
+        if invoice_id not in self.invoices:
+            # What Stripe answers for an invoice deleted from the dashboard.
+            raise _StripeError(f"No such invoice: '{invoice_id}'", http_status=404,
+                               code="resource_missing")
         invoice = dict(self.invoices[invoice_id])
+        if invoice["status"] == "draft":
+            # A draft's total follows its items as they are added, as Stripe's does.
+            invoice["total"] = sum(item["amount"] for item in self.items[invoice_id])
         intent = invoice["payment_intent"]
         invoice["payment_intent"] = (
             dict(intent) if expand and "payment_intent" in expand else intent["id"]

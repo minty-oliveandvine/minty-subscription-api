@@ -1054,6 +1054,33 @@ def test_an_unpaid_raised_invoice_is_left_alone(db_session, monkeypatch):
     assert calls["flips"] == []
 
 
+def test_a_handover_charge_left_a_draft_is_reported_loudly(db_session, monkeypatch, caplog):
+    """"The customer can still settle it" is false of a DRAFT: never finalized, it is in no
+    list anybody pays from, and nothing retries it. Waiting quietly for ever was the old
+    answer; it still waits - forcing it either way would bill twice or give the company
+    away - but says so at ERROR, naming the draft, every pass."""
+    from billing.services import billing_gateway, renewals, store
+
+    transfers, calls = _wire(monkeypatch, db_session)
+    monkeypatch.setattr(renewals, "_already_invoiced", lambda cid, key, **kw: "draft")
+
+    class _Row:
+        external_id = "in_handover_draft"
+
+    monkeypatch.setattr(store, "invoice_for_key", lambda key: _Row())
+    offer = _offer(db_session, transfers, status="charging", attempt=1,
+                   key=f"transfer-{OFFER}-1")
+
+    result = transfers.repair_stranded(NOW)
+
+    assert result["waiting"] == [offer.id]
+    stranded = [r.getMessage() for r in caplog.records
+                if r.levelname == "ERROR" and "STRANDED DRAFT in_handover_draft" in r.getMessage()]
+    assert len(stranded) == 1
+    assert billing_gateway.NOT_RETRIED in stranded[0]
+    assert f"transfer-{OFFER}-1" in stranded[0]
+
+
 # --- expiry, decline, cancel ---------------------------------------------------------
 
 

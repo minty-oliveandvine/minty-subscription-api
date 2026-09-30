@@ -37,6 +37,17 @@ from billing.services import _context
 # it (see ``set_customer_default_payment_method``).
 _G_DEFAULT_PM_KEY = "_stripe_default_payment_methods"
 
+#: The Stripe API version every request is made at. PINNED rather than inherited: left
+#: alone, ``stripe.api_version`` is whatever the installed stripe-python defaults to, so a
+#: ``requirements.txt`` bump would change the API underneath the code. The one that bites is
+#: ``2025-03-31.basil`` (stripe-python 12's default), which REMOVED Invoice ``charge`` and
+#: ``payment_intent`` - what ``billing_gateway`` reads to record the card that paid and to
+#: spot a payment Stripe has cancelled for good. Both would fail quietly. Moving off this
+#: version means migrating those readers to ``invoice.payments`` first
+#: (docs.stripe.com/changelog/basil/2025-03-31); ``billing/tests/test_stripe_api_version.py``
+#: fails the build until then.
+STRIPE_API_VERSION = "2024-12-18.acacia"
+
 
 def _default_pm_cache() -> dict | None:
     """The request's memo, or None outside a scope (command, worker, import time)."""
@@ -72,14 +83,27 @@ def _config_value(key: str) -> str | None:
 
 
 def get_stripe():
-    """Return the ``stripe`` module with ``api_key`` set, or raise if unconfigured."""
+    """Return the ``stripe`` module with ``api_key`` and the pinned ``api_version`` set, or
+    raise if unconfigured."""
     api_key = _config_value("STRIPE_SECRET_KEY")
     if not api_key:
         raise RuntimeError(
             "STRIPE_SECRET_KEY is not configured; cannot make Stripe API calls."
         )
     stripe.api_key = api_key
+    stripe.api_version = STRIPE_API_VERSION
     return stripe
+
+
+def lacks_field(obj, field: str) -> bool:
+    """Whether a REAL Stripe response has no ``field`` at all - not null, ABSENT.
+
+    At the pinned ``STRIPE_API_VERSION`` every field the billing layer reads is always sent,
+    null when empty, so an absent one means the API underneath has changed (see the pin).
+    Only a genuine ``StripeObject`` is judged: a plain dict is a hand-built stand-in, whose
+    missing keys say nothing about the API.
+    """
+    return isinstance(obj, stripe.StripeObject) and field not in obj
 
 
 # --- Trusted-clock capture ---------------------------------------------------

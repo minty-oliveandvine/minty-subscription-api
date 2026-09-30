@@ -376,7 +376,7 @@ def _log_renewal_backlog(now: datetime, result: dict) -> list[str]:
     """Warn about payers who are STILL due after being billed — i.e. more than a period
     behind — and return their ids.
 
-    ``run_renewals`` bills exactly ONE period per payer per run: ``next_period`` is derived
+    ``run_renewals`` bills exactly ONE period per card per run: ``next_period`` is derived
     from the anchor and whatever ``paid_through`` currently says. That is the right
     behaviour, but it means an account whose ``paid_through`` is three months stale is
     caught up over three consecutive daily passes, each one a real charge to a real card.
@@ -384,17 +384,22 @@ def _log_renewal_backlog(now: datetime, result: dict) -> list[str]:
     three times in three days" is not a question to answer from first principles at the
     time it is asked.
 
-    Payers whose charge FAILED are excluded: they are still due for the obvious reason,
-    they are already reported as failures, and they are dunning's problem now.
+    Only CARDS BILLED THIS PASS count. A card whose charge failed - now, or on an earlier
+    pass and so skipped as "already invoiced" - is still due for the obvious reason, is
+    reported as a failure, and is dunning's problem; warning about it every pass would bury
+    the catch-up this exists to announce.
     """
     from billing.services.renewals import due_renewals
 
-    failed = {str(item["user_id"]) for item in result.get("failed", [])}
-    behind = [
+    billed = {str(item["billing_group_id"]) for item in result.get("issued", [])}
+    # One entry per CARD since cards bill their own periods: (account, group, paid_through).
+    # Unpacking two names here raised on the very case this exists to report - any card still
+    # due - and took the rest of the pass (dunning, the sweep) down with it.
+    behind = sorted({
         str(account.user_id)
-        for account, _paid_through in due_renewals(now)
-        if str(account.user_id) not in failed
-    ]
+        for account, group, _paid_through in due_renewals(now)
+        if str(group.id) in billed
+    })
     if behind:
         logger.warning(
             "subscriptions: {} payer(s) are still due after this pass and will be billed "
@@ -473,7 +478,13 @@ def run_daily(
         summaries[name] = summary
         logger.info("subscriptions: {} {}", name, _counts(summary))
         if name == RUN_RENEWALS and issue:
-            backlog = _log_renewal_backlog(now, summary)
+            # A report, not a job: it must never cost the pass the steps after it. It sits
+            # outside the step's try, so a failure here used to escape ``run_daily`` and skip
+            # dunning and the sweep for every payer.
+            try:
+                backlog = _log_renewal_backlog(now, summary)
+            except Exception:
+                logger.exception("subscriptions: could not report the renewal backlog")
 
     ok = not failed_jobs
     log = logger.info if ok else logger.error

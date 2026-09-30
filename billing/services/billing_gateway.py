@@ -34,7 +34,7 @@ from datetime import UTC, datetime
 
 from billing.services._log import logger
 from billing.services.billing import Invoice
-from billing.services.stripe_client import get_stripe
+from billing.services.stripe_client import STRIPE_API_VERSION, get_stripe, lacks_field
 
 
 class BillingError(Exception):
@@ -209,6 +209,25 @@ def _record_of(result: dict) -> dict:
     }
 
 
+def _api_changed(invoice, field: str) -> bool:
+    """Log an ERROR, and answer True, when a real invoice lacks a field this layer reads.
+
+    The readers below branch on these fields, and each branch has a harmless-looking
+    default - "no card to record", "the payment is not dead" - so an API that stopped sending
+    them would be taken for an ordinary answer and fail quietly. ``STRIPE_API_VERSION`` pins
+    the fields in place; this is what makes a drift from it loud rather than silent.
+    """
+    if not lacks_field(invoice, field):
+        return False
+    logger.error(
+        "billing: Stripe invoice {} has no '{}' field - the Stripe API no longer matches "
+        "STRIPE_API_VERSION {}; move the readers to invoice.payments before changing it "
+        "(docs.stripe.com/changelog/basil/2025-03-31)",
+        invoice.get("id"), field, STRIPE_API_VERSION,
+    )
+    return True
+
+
 def _capture_payment_method(record, invoice_id: str) -> None:
     """Record WHICH card paid this invoice, for the history. Never raises.
 
@@ -228,6 +247,8 @@ def _capture_payment_method(record, invoice_id: str) -> None:
         from billing.services.stripe_client import payment_method_display
 
         invoice = get_stripe().Invoice.retrieve(invoice_id, expand=["charge"])
+        if _api_changed(invoice, "charge"):
+            return
         charge = invoice.get("charge")
         if not isinstance(charge, dict):
             return
@@ -272,6 +293,58 @@ def _item_period(line, period) -> dict:
         )
         start, end = period.start, period.end
     return {"start": int(start.timestamp()), "end": int(end.timestamp())}
+
+
+def _item_kwargs(customer_id: str, invoice_id: str, currency: str, line, period) -> dict:
+    """What ONE invoice item is sent with - by ``issue_invoice`` and by ``resume_invoice``
+    alike, so an item a resume adds is exactly the one the first attempt would have sent."""
+    return {
+        "customer": customer_id,
+        "invoice": invoice_id,
+        "currency": currency,
+        "amount": line.amount,
+        "description": line.description,
+        # The entity travels ON the line. Stripe stamps a subscription's metadata onto every
+        # line it owns, which names one entity for all of them; this is written per item and
+        # stays correct.
+        "metadata": {"entity_id": line.entity_id},
+        # The days THIS line pays for, not the invoice's (``_item_period``).
+        "period": _item_period(line, period),
+    }
+
+
+def _finalize(stripe, record, invoice_id: str) -> dict:
+    """Finalize a draft - which does not charge: every invoice raised here is
+    ``auto_advance=False`` - and record what it became."""
+    finalized = stripe.Invoice.finalize_invoice(invoice_id)
+    # Recorded BEFORE the payment attempt, because a decline raises: without this the local
+    # row would still say "draft" for an invoice that is really open and owed, and dunning
+    # chases what is open.
+    _settle(record, **_record_of(finalized))
+    return finalized
+
+
+def _collect(stripe, record, invoice_id: str, invoice: dict,
+             payment_method: str | None = None) -> dict:
+    """Charge ``invoice`` now if it is open, and record the outcome. A decline RAISES.
+
+    ``payment_method`` is passed to ``pay`` only when given: the first charge relies on the
+    card ``issue_invoice`` pinned onto the document, while a resume names the account's
+    CURRENT card, which may have been replaced since the draft was made.
+    """
+    if invoice.get("status") == "open":
+        # A finalized invoice with charge_automatically is normally collected by Stripe, but
+        # not synchronously - pay() makes the outcome available now, so a decline surfaces
+        # to the caller instead of arriving by webhook later.
+        invoice = stripe.Invoice.pay(
+            invoice_id, **({"payment_method": payment_method} if payment_method else {})
+        )
+        _settle(record, **_record_of(invoice))
+    # After the money has moved and been recorded, never before: this is history for the
+    # invoice list and must not be able to affect the charge. See ``_capture_payment_method``.
+    if invoice.get("status") == "paid":
+        _capture_payment_method(record, invoice_id)
+    return invoice
 
 
 def issue_invoice(customer_id: str, invoice: Invoice, *, memo: str | None = None,
@@ -330,8 +403,10 @@ def issue_invoice(customer_id: str, invoice: Invoice, *, memo: str | None = None
 
     stripe = get_stripe()
     # Bound before the try so the failure path can name the document it left behind: a
-    # decline raises from ``Invoice.pay`` with the invoice already finalized and open.
+    # decline raises from ``Invoice.pay`` with the invoice already finalized and open, while
+    # a failure BEFORE finalizing leaves a draft that Stripe will never finalize on its own.
     draft = None
+    finalized = None
     try:
         options = {"idempotency_key": idempotency_key} if idempotency_key else {}
         # Omitted rather than passed as None: an explicit null would CLEAR the field, and
@@ -360,49 +435,248 @@ def issue_invoice(customer_id: str, invoice: Invoice, *, memo: str | None = None
         # it ever changes is that lines read in the other order again.
         for line in reversed(lines):
             stripe.InvoiceItem.create(
-                customer=customer_id,
-                invoice=draft["id"],
-                currency=invoice.currency,
-                amount=line.amount,
-                description=line.description,
-                # The entity travels ON the line. Stripe stamps a subscription's metadata
-                # onto every line it owns, which names one entity for all of them; this
-                # is written per item and stays correct.
-                metadata={"entity_id": line.entity_id},
-                # The days THIS line pays for, not the invoice's (``_item_period``).
-                period=_item_period(line, invoice.period),
+                **_item_kwargs(customer_id, draft["id"], invoice.currency, line,
+                               invoice.period)
             )
         if not collect:
             held = stripe.Invoice.retrieve(draft["id"])
             _settle(record, **_record_of(held))
             return held
 
-        finalized = stripe.Invoice.finalize_invoice(draft["id"])
-        # Recorded BEFORE the payment attempt, because a decline raises: without this the
-        # local row would still say "draft" for an invoice that is really open and owed,
-        # and dunning chases what is open.
-        _settle(record, **_record_of(finalized))
-        # A finalized invoice with charge_automatically is normally collected by Stripe,
-        # but not synchronously — pay() makes the outcome available now, so a decline
-        # surfaces to the caller instead of arriving by webhook later.
-        if finalized.get("status") == "open":
-            finalized = stripe.Invoice.pay(draft["id"])
-            _settle(record, **_record_of(finalized))
-        # After the money has moved and been recorded, never before: this is history for
-        # the invoice list and must not be able to affect the charge. See the function.
-        if finalized.get("status") == "paid":
-            _capture_payment_method(record, draft["id"])
-        return finalized
+        finalized = _finalize(stripe, record, draft["id"])
+        return _collect(stripe, record, draft["id"], finalized)
     except Exception as exc:
-        logger.exception(
-            "billing: could not issue invoice for customer {} ({} line(s), total {})",
-            customer_id, len(lines), invoice.total,
-        )
+        if draft is not None and finalized is None:
+            # Named, because nothing else will: Stripe never finalizes it by itself
+            # (``auto_advance=False``) and dunning only sees OPEN invoices. What happens to
+            # it next is the caller's to say - a renewal resumes it, a purchase withdraws it.
+            logger.exception(
+                "billing: could not issue invoice for customer {} ({} line(s), total {}); "
+                "Stripe invoice {} ({}) was left a DRAFT",
+                customer_id, len(lines), invoice.total, draft.get("id"), idempotency_key,
+            )
+        else:
+            logger.exception(
+                "billing: could not issue invoice for customer {} ({} line(s), total {})",
+                customer_id, len(lines), invoice.total,
+            )
         raise BillingError(
             f"could not issue invoice for {customer_id}",
             user_message=getattr(exc, "user_message", None),
             invoice_id=(draft or {}).get("id"),
         ) from exc
+
+
+# --- after the fact: an invoice found at the processor, and a draft nothing finished ----------
+
+#: What becomes of a stranded draft, said on its STRANDED DRAFT line so that the line never
+#: claims something untrue about it.
+RESUMED = "The next renewal pass finishes it."
+NOT_RETRIED = "Nothing will retry it: finalize or delete it in Stripe."
+MISMATCHED = "It does not match what was reserved: fix it in Stripe by hand."
+GONE = ("It no longer exists at Stripe: the period stays unbilled until its local row is "
+        "discarded and the next pass re-issues it.")
+WITHDRAWN = "The change it was raised for is refused and the draft withdrawn."
+
+
+def stranded_draft(invoice_id, key, where: str, next_step: str) -> None:
+    """Say at ERROR, in one line to grep for, that a processor invoice was created and never
+    finalized.
+
+    Nothing collects a draft. Stripe will not finalize one raised here by itself
+    (``auto_advance=False``), dunning chases only OPEN invoices, and Pay now reads the same
+    list - so a draft left behind by a crash or an error is a period, a purchase or a handover
+    that is simply not billed unless somebody is told. ``next_step`` is what happens to it
+    now (``RESUMED`` and the rest), because the answer differs by caller.
+    """
+    logger.error(
+        "billing: STRANDED DRAFT {} ({}, {}): created at Stripe but never finalized, so it "
+        "is not billed. {}",
+        invoice_id, key, where, next_step,
+    )
+
+
+def record_found_invoice(record, found) -> str | None:
+    """Make the local ``record`` say what the processor's invoice ``found`` says, and return
+    that status.
+
+    The ONE way an invoice learned about after the fact becomes our record: a reservation
+    we never heard back from, a row a crash left behind, a change raised on an earlier
+    attempt. The whole of it - status, total, the times, the link - and the card when it was
+    paid, exactly what ``issue_invoice`` writes on the normal path. Settling only the id and
+    the status left such an invoice's paid date and link at "—" for good.
+
+    Never raises (``_settle`` and ``_capture_payment_method`` log instead): every caller is
+    deciding whether to charge, and a failed write must not change that answer.
+    """
+    if not found:
+        return None
+    if record is not None:
+        _settle(record, external_id=found.get("id"), **_record_of(found))
+        if found.get("status") == "paid":
+            _capture_payment_method(record, found["id"])
+    return found.get("status")
+
+
+def refresh_record(record) -> str | None:
+    """Ask the processor what ``record``'s invoice is NOW, record it, and return the status.
+
+    For a row whose stored status can still move - a draft, or an open invoice somebody may
+    have paid since - read by a caller about to act on it. There is no webhook, so without
+    this a row keeps whatever it said when the process that wrote it stopped: a renewal
+    paid just before a crash read "open" for ever, was never adopted, and showed as failed
+    with Retry payment on it.
+
+    Never raises: when the processor cannot be reached the STORED status is answered and the
+    failure logged, so the caller decides exactly what it would have decided before.
+    """
+    if record is None:
+        return None
+    if not record.external_id:
+        return record.status
+    try:
+        found = get_stripe().Invoice.retrieve(record.external_id)
+    except Exception:
+        logger.exception(
+            "billing: could not re-read invoice {}; going by its stored status {}",
+            record.external_id, record.status,
+        )
+        return record.status
+    return record_found_invoice(record, found)
+
+
+def _gone(exc) -> bool:
+    """Whether a processor error says the object does not exist - a draft deleted by hand."""
+    return (getattr(exc, "http_status", None) == 404
+            or getattr(exc, "code", None) == "resource_missing")
+
+
+def _line_of(row):
+    """A recorded ``subscription_invoice_line`` as the ``billing.Line`` it was sent as."""
+    from billing.services.billing import Line
+
+    return Line(
+        entity_id=str(row.entity_id), entity_name=row.entity_name,
+        product_name=row.product_name, amount=int(row.amount), kind=row.kind,
+        at=row.at, period_start=row.period_start, period_end=row.period_end,
+        unit_amount=row.unit_amount,
+    )
+
+
+def _same_charge(item) -> tuple:
+    """What makes an item on a draft the same charge as one ``_item_kwargs`` would send.
+
+    The amount, the company and the days - NOT the description. A resume rebuilds the
+    wording from the recorded names, which ``store`` cuts to 255 characters, and the wording
+    itself may have changed in a deploy since the draft was made; matching on it would take
+    an item already there for a missing one and add it twice.
+    """
+    period = item.get("period") or {}
+    return (int(item.get("amount") or 0), str((item.get("metadata") or {}).get("entity_id")),
+            period.get("start"), period.get("end"))
+
+
+def resume_invoice(record, payment_method: str | None = None) -> dict | None:
+    """Finish an invoice ``issue_invoice`` started and never saw finalized. Renewals only.
+
+    ONLY for a row that still says "draft". ``issue_invoice`` records the finalize (open)
+    BEFORE it asks for payment, so a row still saying "draft" is proof it never charged;
+    and with ``auto_advance=False`` Stripe cannot have charged it either. So whatever state
+    the processor holds, finishing the job cannot take the money twice:
+
+    * a DRAFT gets the items it is missing, and only those, then is finalized and charged -
+      but only if what is on it is exactly what was reserved (``store.invoice_lines``, the
+      lines sent, and ``record.total``, their sum). Anything else is refused and logged as a
+      STRANDED DRAFT to fix by hand: an item nobody reserved, or a total that disagrees,
+      means someone else has been at it;
+    * OPEN (the finalize answered after the process had given up on it) is charged;
+    * PAID (settled some other way) is recorded and returned, for the caller to adopt;
+    * VOID or UNCOLLECTIBLE is somebody's deliberate act - recorded, not billed.
+
+    Charged on ``payment_method``, the account's CURRENT card: the one pinned on a draft
+    made days ago may have been replaced since.
+
+    No idempotency keys, unlike ``refresh_invoice``, and on purpose. Stripe keeps a keyed
+    request's ERROR for 24 hours too, so a fixed key would replay one transient failure at
+    every hourly pass for a day. A resume runs only inside the scheduler's pass, which
+    holds the advisory lock (so do ``tick`` and ``run-daily``), and the checks above refuse
+    to finalize anything that is not exactly the reserved invoice.
+
+    Returns what ``issue_invoice`` returns - the invoice, paid or open - or None when it was
+    not finished (logged). Raises ``BillingError`` like ``issue_invoice`` when the processor
+    fails or the card declines.
+    """
+    from collections import Counter
+
+    from billing.services import store
+    from billing.services.billing import Period
+
+    stripe = get_stripe()
+    invoice_id, key = record.external_id, record.idempotency_key
+
+    def failed(exc) -> BillingError:
+        logger.exception("billing: could not finish invoice {} ({})", invoice_id, key)
+        return BillingError(
+            f"could not finish invoice {invoice_id}",
+            user_message=getattr(exc, "user_message", None),
+            invoice_id=invoice_id,
+        )
+
+    try:
+        found = stripe.Invoice.retrieve(invoice_id)
+    except Exception as exc:
+        # Only THIS read may mean "deleted": a missing card on ``pay`` is also a
+        # resource_missing, and is a failed charge, not a vanished invoice.
+        if _gone(exc):
+            stranded_draft(invoice_id, key, "renewal", GONE)
+            return None
+        raise failed(exc) from exc
+    try:
+        status = found.get("status")
+        if status in ("void", "uncollectible"):
+            record_found_invoice(record, found)
+            logger.warning(
+                "billing: invoice {} ({}) was left a draft, then made {} at Stripe by hand; "
+                "not billing it", invoice_id, key, status,
+            )
+            return None
+        if status == "paid":
+            record_found_invoice(record, found)
+            return found
+        if status == "draft":
+            period = Period(record.period_start, record.period_end)
+            customer = found.get("customer") or record.stripe_customer_id
+            sent = [
+                _item_kwargs(customer, invoice_id, found.get("currency"), _line_of(row), period)
+                for row in store.invoice_lines(record.id)
+            ]
+            wanted = Counter(_same_charge(item) for item in sent)
+            on_it = Counter(_same_charge(item) for item in _items_of(stripe, invoice_id))
+            if not sent or on_it - wanted:
+                stranded_draft(invoice_id, key, "renewal", MISMATCHED)
+                return None
+            missing = wanted - on_it
+            # In reverse, as ``issue_invoice`` creates them (Stripe lists newest first).
+            for item in reversed(sent):
+                if missing[_same_charge(item)]:
+                    missing[_same_charge(item)] -= 1
+                    stripe.InvoiceItem.create(**item)
+            now_on_it = _items_of(stripe, invoice_id)
+            total = int(stripe.Invoice.retrieve(invoice_id).get("total") or 0)
+            if len(now_on_it) != len(sent) or total != int(record.total or 0):
+                stranded_draft(invoice_id, key, "renewal", MISMATCHED)
+                return None
+            found = _finalize(stripe, record, invoice_id)
+        else:
+            record_found_invoice(record, found)
+        result = _collect(stripe, record, invoice_id, found, payment_method)
+    except Exception as exc:
+        raise failed(exc) from exc
+    logger.info(
+        "billing: finished invoice {} ({}), left a draft by an earlier attempt: now {}",
+        invoice_id, key, result.get("status"),
+    )
+    return result
 
 
 #: What ``retry_invoice`` reports for an invoice the processor will no longer collect: a
@@ -424,6 +698,8 @@ def _payment_is_dead(invoice) -> bool:
     has to be EXPANDED for this to see it.
     """
     if (invoice.get("status") or "") != "open":
+        return False
+    if _api_changed(invoice, "payment_intent"):
         return False
     intent = invoice.get("payment_intent")
     return isinstance(intent, dict) and intent.get("status") == "canceled"
@@ -592,7 +868,7 @@ def refresh_invoice(invoice_id: str, payment_method: str | None = None) -> dict 
     from collections import Counter
 
     from billing.services import store
-    from billing.services.billing import Line, Period
+    from billing.services.billing import Period
 
     stripe = get_stripe()
     claim = store.refresh_key(invoice_id)
@@ -632,15 +908,7 @@ def refresh_invoice(invoice_id: str, payment_method: str | None = None) -> dict 
             stripe_customer_id=record.stripe_customer_id,
             period=Period(record.period_start, record.period_end),
             currency=record.currency,
-            lines=[
-                Line(
-                    entity_id=str(line.entity_id), entity_name=line.entity_name,
-                    product_name=line.product_name, amount=int(line.amount), kind=line.kind,
-                    at=line.at, period_start=line.period_start, period_end=line.period_end,
-                    unit_amount=line.unit_amount,
-                )
-                for line in lines
-            ],
+            lines=[_line_of(line) for line in lines],
             memo=record.memo,
             idempotency_key=claim,
             billing_group_id=record.billing_group_id,

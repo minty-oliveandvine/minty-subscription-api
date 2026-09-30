@@ -72,6 +72,10 @@ def _wire(app, monkeypatch, *, account, invoices=None, paid=True, reason="ok",
         store, "billing_group_for_entity", lambda eid, uid=None: group
     )
     monkeypatch.setattr(store, "billing_group", lambda gid: group)
+    # No local invoice rows behind these fakes: nothing to re-read when nothing is open,
+    # and no stranded draft for the period (``dunning._nothing_open_but_owed``).
+    monkeypatch.setattr(store, "open_invoices_for_group", lambda gid: [])
+    monkeypatch.setattr(store, "invoice_for_key", lambda key: None)
     # Patched BY DOTTED PATH: retry_now imports it inside the function, so a reference
     # captured here would not be the one it ends up calling.
     monkeypatch.setattr(
@@ -223,6 +227,34 @@ def test_nothing_owed_closes_dunning_rather_than_charging(app, monkeypatch):
     assert calls["retried"] == []
     assert calls["ended"] == [("u1", "active")]
     assert calls["settled"] == [None]
+
+
+def test_nothing_open_while_the_periods_invoice_is_a_stranded_draft_keeps_the_episode(
+    app, monkeypatch
+):
+    """The same trap as the scheduled path: a draft nobody finalized is not in the open
+    list. The press answers as before, but the episode is NOT closed as settled - the
+    renewal pass finishes the draft and dunning goes on until it has."""
+    from billing.services import billing_gateway, store
+
+    dunning, calls = _wire(app, monkeypatch, account=_Account(), invoices=[])
+
+    class _Row:
+        id, external_id, status = "row_d", "in_draft", "draft"
+        idempotency_key = "renewal-u1-20270208-g1"
+
+    # Only the period this card is behind on counts - asked by its exact key.
+    monkeypatch.setattr(store, "invoice_for_key",
+                        lambda key: _Row() if key == _Row.idempotency_key else None)
+    monkeypatch.setattr(billing_gateway, "refresh_record", lambda record: "draft")
+
+    with app.app_context():
+        result = dunning.retry_now("u1")
+
+    assert result["status"] == "nothing_owed"
+    assert calls["retried"] == []
+    assert calls["ended"] == []
+    assert calls["settled"] == []
 
 
 def test_an_unpaid_invoice_is_collected_even_with_no_dunning_stamp(app, monkeypatch):

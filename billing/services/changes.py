@@ -174,6 +174,16 @@ def issue_change(customer_id: str, entity_id, entity_name: str, before_codes,
             key,
             existing.get("id"),
         )
+        # The attempt that raised it died before recording it, so its reservation still
+        # says whatever it said then: bring it up to date, or the list shows that invoice
+        # with no paid date or link for good.
+        billing_gateway.record_found_invoice(store.invoice_for_key(key), existing)
+        if existing.get("status") == "draft":
+            # Never finalized, so never charged. Every caller refuses anything unpaid and
+            # withdraws it, but that it happened at all has to be said.
+            billing_gateway.stranded_draft(
+                existing.get("id"), key, "change", billing_gateway.WITHDRAWN
+            )
         return existing
 
     metadata = {"change_key": key, "entity_id": str(entity_id)}

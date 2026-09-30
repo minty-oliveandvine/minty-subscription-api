@@ -1204,15 +1204,18 @@ def _patch_change_keys(run: dict) -> None:
 def _patch_notify(run: dict) -> None:
     """Send THIS run's mail to somewhere other than the payer's own address.
 
-    A payer's notices go wherever ``notify.recipient_for`` says, which is the ``email``
-    column on their user row — the same field they sign in with. So a run whose payer is
-    one person and whose mail should reach another cannot be expressed by the data alone;
-    rewriting the column to the reader's address would take the login with it, and the
-    address may already belong to a different payer.
+    A payer's notices go wherever ``notify.address_for`` says: the ``email`` column on their
+    user row — the same field they sign in with — or, for a money email, their billing
+    account's billing email. So a run whose payer is one person and whose mail should reach
+    another cannot be expressed by the data alone; rewriting the column to the reader's
+    address would take the login with it, and the address may already belong to a
+    different payer.
 
-    Redirecting the lookup instead keeps the payer intact and touches no product code.
-    Scoped to this run's payer BY ID: the daily jobs are global, and a blanket redirect
-    would divert a real payer's mail if one ever came due mid-replay.
+    Redirecting the lookups instead keeps the payer intact and touches no product code.
+    BOTH are redirected: ``recipient_for`` alone would let a receipt slip out to whatever
+    billing email the account carries. Scoped to this run's payer BY ID: the daily jobs are
+    global, and a blanket redirect would divert a real payer's mail if one ever came due
+    mid-replay.
     """
     redirect = run.get("notify_to")
     if not redirect:
@@ -1220,6 +1223,7 @@ def _patch_notify(run: dict) -> None:
     from billing.services import notify
 
     original = notify.recipient_for
+    original_for = notify.address_for
 
     def _redirected(user_id):
         address, first_name = original(user_id)
@@ -1227,7 +1231,14 @@ def _patch_notify(run: dict) -> None:
             return redirect, first_name
         return address, first_name
 
+    def _redirected_for(user_id, event, context):
+        address, greeting = original_for(user_id, event, context)
+        if str(user_id) == str(run["user_id"]):
+            return redirect, greeting
+        return address, greeting
+
     notify.recipient_for = _redirected
+    notify.address_for = _redirected_for
     print(f"mail for {run['email']} -> {redirect}")
 
 
