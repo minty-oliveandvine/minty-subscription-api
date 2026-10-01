@@ -164,6 +164,8 @@ def _wire(monkeypatch, *, rows, paid_through=None, now=None):
     monkeypatch.setattr(f"{_CATALOG}.bundle_plan", lambda: _bundle())
 
     monkeypatch.setattr(checkout, "customer_default_payment_method", lambda cid: "pm_1")
+    # A purchase is decided on the card nominated for the company, not the default.
+    monkeypatch.setattr(store, "card_for_entity", lambda eid, uid=None: "pm_1")
     monkeypatch.setattr(
         changes, "issue_change",
         lambda cid, eid, nm, before, after, period, at: calls["charged"].append(
@@ -956,9 +958,7 @@ def test_rebuying_a_module_inside_its_cancellation_window_is_refused(monkeypatch
     checkout, calls = _wire(monkeypatch, rows=[row])
 
     with pytest.raises(checkout.CheckoutError) as exc:
-        checkout.start_modules_checkout(
-            _FakeEntity(), _FakeUser(), "s", "c", ["PETTY_CASH"]
-        )
+        checkout.start_modules_checkout(_FakeEntity(), _FakeUser(), ["PETTY_CASH"])
 
     assert exc.value.status == 409
     assert "Renew" in exc.value.message
@@ -971,7 +971,7 @@ def test_rebuying_is_allowed_once_the_cancellation_window_has_passed(monkeypatch
                app_access_until=datetime.now(UTC) - timedelta(days=1))  # expired
     checkout, calls = _wire(monkeypatch, rows=[row])
 
-    checkout.start_modules_checkout(_FakeEntity(), _FakeUser(), "s", "c", ["PETTY_CASH"])
+    checkout.start_modules_checkout(_FakeEntity(), _FakeUser(), ["PETTY_CASH"])
 
     assert calls["created"] == [["PETTY_CASH"]]
 

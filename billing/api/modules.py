@@ -1,4 +1,4 @@
-"""The module settings page: one page model and nineteen actions per company.
+"""The module settings page: one page model and ten actions per company.
 
 Company-scoped (``EntityBearerAuth``): the caller must hold a role on the entity, resolved
 from the token's ``entity_id`` or the ``X-Entity-Id`` header (the page reached from the
@@ -6,10 +6,14 @@ portal carries an unscoped token and sends the header), and the company in the P
 that same company. Reading the page needs ``MODULE_VIEW`` (cashier and up); every action
 needs ``MODULE_MANAGE`` (admin and up) AND ``store.may_manage_subscription`` - the
 ``@require_subscription_payer`` port: only the payer, or any admin of a company that has no
-payer yet, may act, because every one of these buttons spends ONE person's money. The single
-exception is ``checkout-complete``, Stripe's return leg: refusing it would strand a payment
-that has already happened, so it carries the permission and not the payer rule (Flask's
-``test_subscription_payer_permission`` pinned exactly that).
+payer yet, may act, because every one of these buttons spends ONE person's money. There is
+no exception any more.
+
+NO ACTION HANDS THE BROWSER TO STRIPE. Flask's ``checkout``, ``confirm-billing``,
+``checkout-complete``, ``payment-method`` and ``manage-billing`` (setup-mode Checkout and the
+Billing Portal) and the four ``payment-methods*`` card routes were DELETED on 2026-10-01: a
+card is only ever added through a billing account, in-app (``/api/me/billing/...``), and a
+company is put on one of its cards before it is charged.
 
 Flask served this page from Jinja (``templates/entity/partials/module_*.html``) with the
 actions as ``POST /entity/settings/module/<org_id>/<action>`` in ``entity/routes/settings.py``
@@ -17,17 +21,14 @@ actions as ``POST /entity/settings/module/<org_id>/<action>`` in ``entity/routes
 (Flask's card dicts, ``cards.get_module_cards``), the summary and the panel (opaque to the
 client until the screens that read them are built), the next payment, ``can_manage_modules``,
 the payer when it is somebody else, the viewer, and the consent-takeover prompt. The action
-bodies and answers are Flask's, with three deliberate differences, each written where it
-happens: the Stripe return URLs point at minty-web's page rather than Flask's;
-``checkout-complete`` answers JSON where Flask redirected with ``?checkout_error=``; and
-dates render ISO 8601 (``IsoJSONEncoder``) because the client computes on them.
+bodies and answers are Flask's, except that dates render ISO 8601 (``IsoJSONEncoder``)
+because the client computes on them, and ``restart-billing`` never answers ``{url}``.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
 
-from django.conf import settings
 from ninja import Router
 
 from billing.api._json import IsoJSONEncoder, body, error, respond
@@ -40,34 +41,22 @@ from shared_models.models import Entity, User
 
 modules_router = Router(auth=EntityBearerAuth())
 
-#: The nineteen action names, Flask's spelling. ``POST /api/entities/{id}/modules/{action}``
-#: with any other word is a 404. ``payment-methods`` and ``restart-quote`` also answer GET, as
-#: Flask served them (``?codes=A,B`` on the quote).
+#: The ten action names, Flask's spelling. ``POST /api/entities/{id}/modules/{action}`` with
+#: any other word is a 404. ``restart-quote`` also answers GET, as Flask served it
+#: (``?codes=A,B``).
 ACTIONS = (
-    "checkout",
     "authorize-billing",
-    "payment-methods",
-    "payment-methods/setup-intent",
-    "payment-methods/confirm",
-    "payment-methods/default",
     "restart-quote",
     "restart-billing",
-    "confirm-billing",
-    "checkout-complete",
     "start-trial",
     "resume-preview",
     "subscribe-preview",
     "cancel-preview",
     "retry-payment",
     "cancel",
-    "payment-method",
     "renew",
-    "manage-billing",
 )
-
 #: Stripe's return leg: the one action without the payer rule (see the module docstring).
-NOT_PAYER_GUARDED = frozenset({"checkout-complete"})
-
 # Flask's guard sentences, kept: the page shows them.
 NO_VIEW = "You do not have permission to view module settings for this entity."
 NO_MANAGE = "You do not have permission to manage subscriptions for this entity."
@@ -111,25 +100,6 @@ def _gate(request, entity_id: str, *, permission: Permission, payer: bool):
         if not sub_store.may_manage_subscription(str(entity.id), str(user.id)):
             raise PermissionDeniedError(NOT_THE_PAYER)
     return entity, user
-
-
-# --- Where Stripe sends the browser back ----------------------------------------------------
-
-
-def module_page_url(entity_id) -> str:
-    """minty-web's module settings page - Flask's ``url_for("entity.entity_settings_module")``
-    now that the page is served there (Part 2 step 4a)."""
-    return f"{settings.MINTY_WEB_URL}/subscription/entities/{entity_id}/modules"
-
-
-def checkout_complete_url(entity_id, *, card_only: bool = False) -> str:
-    """The setup-mode Checkout returns to the page with ``?session_id=`` (Stripe substitutes
-    the real id for ``{CHECKOUT_SESSION_ID}``); the page posts it to ``checkout-complete``.
-    ``purpose=payment_method`` marks a card-only session, which correctly creates nothing."""
-    query = "session_id={CHECKOUT_SESSION_ID}"
-    if card_only:
-        query = "purpose=payment_method&" + query
-    return f"{module_page_url(entity_id)}?{query}"
 
 
 # --- The page model -------------------------------------------------------------------------
@@ -251,65 +221,14 @@ def _codes(payload: dict, key: str = "codes") -> list[str]:
     return [str(c).strip().upper() for c in (payload.get(key) or []) if str(c).strip()]
 
 
-def _nominate_if_given(entity, user, payload):
-    """Put this company on the card the dialog named, BEFORE anything is charged.
-
-    Body key ``payment_method``, optional. Absent leaves the company on whatever card it is
-    already on. Routed through ``set_for_entity``, which proves both halves: the method
-    belongs to this caller, and this caller is the company's payer - another payer's
-    ``pm_...`` answers "not found" rather than being nominated onto anything. Returns an
-    error response, or None to carry on. Charging first and nominating after would bill the
-    card the company was already on, on the one dialog that takes money as it closes."""
-    from billing.services import payment_methods
-
-    pm_id = str((payload or {}).get("payment_method") or "").strip()
-    if not pm_id:
-        return None
-    try:
-        payment_methods.set_for_entity(str(user.id), str(entity.id), pm_id)
-    except payment_methods.PaymentMethodError as exc:
-        return error(exc.message, exc.status)
-    return None
-
-
-def _checkout(request, entity, user, payload):
-    """Subscribe the entity to one or more modules - one paid subscription each.
-
-    Body: ``{"codes": [...], "payment_method"?}`` (no codes: the single unsubscribed module).
-    With a saved card and consent the subscriptions are created at once -> ``{"created"}``;
-    with a card and no consent -> ``{"needs_confirmation"}`` and nothing charged; with no
-    card -> ``{"url"}`` of a setup Checkout, completed on return by ``checkout-complete``."""
-    from billing.services.checkout import CheckoutError, start_modules_checkout
-
-    codes = payload.get("codes") or []
-    refused = _nominate_if_given(entity, user, payload)
-    if refused:
-        return refused
-    try:
-        result = start_modules_checkout(
-            entity, user,
-            success_url=checkout_complete_url(entity.id),
-            cancel_url=module_page_url(entity.id),
-            requested_codes=codes,
-        )
-    except CheckoutError as exc:
-        return error(exc.message, exc.status)
-    except Exception:
-        logger.exception("module checkout failed for {}", entity.id)
-        return error("Could not start checkout. Please try again.", 500)
-    if result.get("url"):
-        return _respond({"url": result["url"]})
-    if result.get("needs_confirmation"):
-        return _respond({"needs_confirmation": result["needs_confirmation"]})
-    return _respond({"created": result.get("created", [])})
-
-
 def _authorize_billing(request, entity, user, payload):
     """Authorise billing for this entity WITHOUT subscribing or charging - the trial banner's
     action, so the outcome is "convert at term end". Idempotent: consent is once per entity.
     Body: ``{"payment_method"?}``; when present it is nominated for THIS company BEFORE
     consent is recorded (authorising a charge while the company points at a different card
-    authorises one the payer was never shown)."""
+    authorises one the payer was never shown). A company on NO billing account, with none
+    named, answers 402 "Choose a billing account for this company." and records nothing - the
+    page opens the Billing Accounts picker on it."""
     from billing.services import payment_methods
     from billing.services.checkout import CheckoutError, authorize_entity_billing
 
@@ -327,48 +246,6 @@ def _authorize_billing(request, entity, user, payload):
         logger.exception("module billing authorization failed for {}", entity.id)
         return error("Could not confirm billing. Please try again.", 500)
     return _respond({"ok": True})
-
-
-def _payment_methods_call(user, handler):
-    """The third transport over ``payment_methods.run`` (the portal and the onboarding twins
-    are the others): 200 / 409 / 422 / 500 with the customer's sentence."""
-    from billing.services import payment_methods
-
-    payload, status = payment_methods.run(handler, str(user.id))
-    return _respond(payload, status)
-
-
-def _payment_methods(request, entity, user, payload):
-    """Every card on the payer's own account, plus ``nominated_id`` - which one bills THIS
-    company - so the pickers preselect it rather than the account default."""
-    from billing.services import payment_methods
-
-    return _payment_methods_call(user, lambda uid: payment_methods.for_entity(uid, str(entity.id)))
-
-
-def _payment_methods_setup_intent(request, entity, user, payload):
-    from billing.services import payment_methods
-
-    return _payment_methods_call(user, payment_methods.start_setup)
-
-
-def _payment_methods_confirm(request, entity, user, payload):
-    """Body: ``{setup_intent, make_default?}``; the intent is re-read from Stripe and refused
-    unless it carries this caller's own ``metadata.user_id`` stamp."""
-    from billing.services import payment_methods
-
-    setup_intent = str(payload.get("setup_intent") or "").strip()
-    make_default = bool(payload.get("make_default"))
-    return _payment_methods_call(
-        user, lambda uid: payment_methods.confirm_setup(uid, setup_intent, make_default=make_default)
-    )
-
-
-def _payment_methods_default(request, entity, user, payload):
-    from billing.services import payment_methods
-
-    pm_id = str(payload.get("payment_method") or "").strip()
-    return _payment_methods_call(user, lambda uid: payment_methods.set_default(uid, pm_id))
 
 
 def _restart_state_and_codes(entity, user, requested):
@@ -437,78 +314,13 @@ def _restart_billing(request, entity, user, payload):
     except payment_methods.PaymentMethodError as exc:
         return error(exc.message, exc.status)
     try:
-        result = confirm_modules_checkout(
-            entity, user,
-            success_url=checkout_complete_url(entity.id),
-            cancel_url=module_page_url(entity.id),
-            requested_codes=codes,
-        )
+        result = confirm_modules_checkout(entity, user, requested_codes=codes)
     except CheckoutError as exc:
         return error(exc.message, exc.status)
     except Exception:
         logger.exception("restart billing failed for {}", entity.id)
         return error("Could not restart billing. Please try again.", 500)
-    if result.get("url"):
-        # The saved card could not be used after all, so Stripe collects a new one.
-        return _respond({"url": result["url"]})
     return _respond({"ok": True, "restarted": result.get("created", codes)})
-
-
-def _confirm_billing(request, entity, user, payload):
-    """Record the payer's consent to bill THIS entity, then subscribe. Body: ``{codes,
-    payment_method?}`` - the codes the checkout call returned ``needs_confirmation`` for,
-    re-validated downstream, so this can still answer ``{"url"}`` if the card vanished."""
-    from billing.services.checkout import CheckoutError, confirm_modules_checkout
-
-    codes = payload.get("codes") or []
-    refused = _nominate_if_given(entity, user, payload)
-    if refused:
-        return refused
-    try:
-        result = confirm_modules_checkout(
-            entity, user,
-            success_url=checkout_complete_url(entity.id),
-            cancel_url=module_page_url(entity.id),
-            requested_codes=codes,
-        )
-    except CheckoutError as exc:
-        return error(exc.message, exc.status)
-    except Exception:
-        logger.exception("module billing confirmation failed for {}", entity.id)
-        return error("Could not complete the subscription. Please try again.", 500)
-    if result.get("url"):
-        return _respond({"url": result["url"]})
-    return _respond({"created": result.get("created", [])})
-
-
-def _checkout_complete(request, entity, user, payload):
-    """The return from the setup-mode Checkout: create the paid subscriptions from the saved
-    card. Body (or query): ``{session_id, purpose?}``. Flask redirected back to the page with
-    ``?checkout_error=``; this answers JSON and the page refetches - ``{"ok": true}`` or the
-    reason with a status the client can show (400 no session, 409 nothing created, the
-    service's own, 500 for a surprise). A card-only session (``purpose=payment_method``)
-    carries no modules and correctly creates NOTHING; reporting that as a failure would call
-    a success a failure."""
-    from billing.services.checkout import CheckoutError, complete_setup_checkout
-
-    session_id = str(payload.get("session_id") or request.GET.get("session_id") or "").strip()
-    card_only = (payload.get("purpose") or request.GET.get("purpose")) == "payment_method"
-    if not session_id:
-        return error("Checkout could not be completed (missing session).", 400)
-    try:
-        created = complete_setup_checkout(entity, user, session_id)
-    except CheckoutError as exc:
-        logger.exception("checkout-complete: failed to create subscriptions for {}", entity.id)
-        return error(exc.message, exc.status)
-    except Exception:
-        logger.exception("checkout-complete: unexpected failure for {}", entity.id)
-        return error("Something went wrong finishing your subscription.", 500)
-    if not created and not card_only:
-        return error(
-            "The subscription wasn't created. Please try again or check your payment method.",
-            409,
-        )
-    return _respond({"ok": True, "created": list(created or [])})
 
 
 def _start_trial(request, entity, user, payload):
@@ -658,32 +470,6 @@ def _cancel(request, entity, user, payload):
     })
 
 
-def _payment_method(request, entity, user, payload):
-    """Add or update the payer's card: ``{"url"}`` for the client to open. An existing
-    customer goes to the billing PORTAL's payment-method form; a payer with no Stripe
-    customer yet goes to a setup-mode CHECKOUT (Stripe mints the customer when the card is
-    saved) whose return leg is the same ``checkout-complete``, marked card-only."""
-    from billing.services.checkout import (
-        CheckoutError,
-        open_payment_method_update,
-        start_payment_method_setup,
-    )
-
-    return_url = module_page_url(entity.id)
-    try:
-        session = open_payment_method_update(entity, return_url)
-    except CheckoutError:
-        try:
-            session = start_payment_method_setup(
-                entity, user,
-                success_url=checkout_complete_url(entity.id, card_only=True),
-                cancel_url=return_url,
-            )
-        except CheckoutError as exc:
-            return error(exc.message, exc.status)
-    return _respond({"url": session.get("url")})
-
-
 def _renew(request, entity, user, payload):
     """Reactivate a module scheduled to cancel - in-app, no portal. Body: ``{code}``."""
     from billing.services.checkout import CheckoutError, reactivate_module
@@ -698,38 +484,17 @@ def _renew(request, entity, user, payload):
     return _respond({"ok": True})
 
 
-def _manage_billing(request, entity, user, payload):
-    """Open the Stripe portal for invoice history and card management, WITHOUT Stripe's own
-    cancellation (that is the in-app prorated flow). ``{"url"}``."""
-    from billing.services.checkout import CheckoutError, open_billing_management_portal
-
-    try:
-        session = open_billing_management_portal(entity, module_page_url(entity.id))
-    except CheckoutError as exc:
-        return error(exc.message, exc.status)
-    return _respond({"url": session.get("url")})
-
-
 HANDLERS = {
-    "checkout": _checkout,
     "authorize-billing": _authorize_billing,
-    "payment-methods": _payment_methods,
-    "payment-methods/setup-intent": _payment_methods_setup_intent,
-    "payment-methods/confirm": _payment_methods_confirm,
-    "payment-methods/default": _payment_methods_default,
     "restart-quote": _restart_quote,
     "restart-billing": _restart_billing,
-    "confirm-billing": _confirm_billing,
-    "checkout-complete": _checkout_complete,
     "start-trial": _start_trial,
     "resume-preview": _resume_preview,
     "subscribe-preview": _subscribe_preview,
     "cancel-preview": _cancel_preview,
     "retry-payment": _retry_payment,
     "cancel": _cancel,
-    "payment-method": _payment_method,
     "renew": _renew,
-    "manage-billing": _manage_billing,
 }
 assert set(HANDLERS) == set(ACTIONS)
 
@@ -738,24 +503,15 @@ def _run(request, entity_id: str, action: str):
     handler = HANDLERS.get(action)
     if handler is None:
         return error("Unknown action.", 404)
-    entity, user = _gate(
-        request, entity_id,
-        permission=Permission.MODULE_MANAGE,
-        payer=action not in NOT_PAYER_GUARDED,
-    )
+    entity, user = _gate(request, entity_id, permission=Permission.MODULE_MANAGE, payer=True)
     return handler(request, entity, user, body(request))
 
 
-# The two Flask served as GET keep answering GET. Declared BEFORE the catch-all, with both
+# The one Flask served as GET keeps answering GET. Declared BEFORE the catch-all, with both
 # methods on one path: Django resolves URL patterns in order, and a pattern that matched the
-# path but not the method answers 405 rather than trying the next.
-
-
-@modules_router.api_operation(
-    ["GET", "POST"], "/{entity_id}/modules/payment-methods", summary="The payer's cards"
-)
-def module_payment_methods(request, entity_id: str):
-    return _run(request, entity_id, "payment-methods")
+# path but not the method answers 405 rather than trying the next. The catch-all keeps
+# ``{path:action}`` so a slashed name (the deleted ``payment-methods/...``) still answers
+# the JSON 404 "Unknown action." rather than Django's own page.
 
 
 @modules_router.api_operation(

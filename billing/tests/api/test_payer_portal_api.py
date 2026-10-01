@@ -273,8 +273,9 @@ def test_accepting_passes_the_flag_through(client, user, monkeypatch):
 
     seen = {}
 
-    def _respond(user_id, transfer_id, *, accept, codes=None):
-        seen.update(user=user_id, transfer=transfer_id, accept=accept, codes=codes)
+    def _respond(user_id, transfer_id, *, accept, codes=None, billing_group_id=None):
+        seen.update(user=user_id, transfer=transfer_id, accept=accept, codes=codes,
+                    billing_group_id=billing_group_id)
         return True, "You're now the subscriber for this company.", {"id": transfer_id}
 
     monkeypatch.setattr(transfers, "respond_to_transfer", _respond)
@@ -284,7 +285,46 @@ def test_accepting_passes_the_flag_through(client, user, monkeypatch):
     assert response.status_code == 200
     # No ``codes`` in the body is None, NOT an empty list - the service reads None as "the
     # whole company", and an empty list would mean "take nothing".
-    assert seen == {"user": str(user.id), "transfer": "t1", "accept": True, "codes": None}
+    assert seen == {"user": str(user.id), "transfer": "t1", "accept": True, "codes": None,
+                    "billing_group_id": None}
+
+
+def test_the_chosen_billing_account_is_passed_through(client, user, monkeypatch):
+    """The account the incoming payer picked on the accept screen; what it means (theirs,
+    nominated) is the service's."""
+    from billing.services import transfers
+
+    seen = {}
+    monkeypatch.setattr(
+        transfers, "respond_to_transfer",
+        lambda u, t, *, accept, codes=None, billing_group_id=None: (
+            seen.update(billing_group_id=billing_group_id)
+            or (True, "You're now the subscriber.", {"id": t})
+        ),
+    )
+
+    response = _post(client, user, f"{PORTAL}/transfer/respond",
+                     {"transfer": "t1", "accept": True, "billing_group_id": "g1"})
+
+    assert response.status_code == 200
+    assert seen["billing_group_id"] == "g1"
+
+
+def test_a_refused_account_is_the_routes_422(client, user, monkeypatch):
+    from billing.services import transfers
+
+    monkeypatch.setattr(
+        transfers, "respond_to_transfer",
+        lambda u, t, *, accept, codes=None, billing_group_id=None: (
+            False, "That billing account couldn't be found.", None
+        ),
+    )
+
+    response = _post(client, user, f"{PORTAL}/transfer/respond",
+                     {"transfer": "t1", "accept": True, "billing_group_id": "g_theirs"})
+
+    assert response.status_code == 422
+    assert response.json() == {"error": "That billing account couldn't be found."}
 
 
 def test_the_chosen_modules_are_passed_through(client, user, monkeypatch):
@@ -294,8 +334,9 @@ def test_the_chosen_modules_are_passed_through(client, user, monkeypatch):
     seen = {}
     monkeypatch.setattr(
         transfers, "respond_to_transfer",
-        lambda u, t, *, accept, codes=None: (seen.update(codes=codes) or
-                                             (True, "You're now the subscriber.", {"id": t})),
+        lambda u, t, *, accept, codes=None, billing_group_id=None: (
+            seen.update(codes=codes) or (True, "You're now the subscriber.", {"id": t})
+        ),
     )
 
     response = _post(client, user, f"{PORTAL}/transfer/respond",
@@ -311,8 +352,9 @@ def test_declining_is_the_same_route_with_the_flag_off(client, user, monkeypatch
     seen = {}
     monkeypatch.setattr(
         transfers, "respond_to_transfer",
-        lambda u, t, *, accept, codes=None: (seen.update(accept=accept) or
-                                             (True, "You've declined the handover.", None)),
+        lambda u, t, *, accept, codes=None, billing_group_id=None: (
+            seen.update(accept=accept) or (True, "You've declined the handover.", None)
+        ),
     )
 
     response = _post(client, user, f"{PORTAL}/transfer/respond", {"transfer": "t1", "accept": False})

@@ -40,8 +40,8 @@ verbatim copy of onboarding-backend's port of Minty's `services/permission_polic
 every action — **and** the subscription's own rule, `store.may_manage_subscription` (the
 `@require_subscription_payer` port, step 2): only the payer, or a member with billing consent
 on a company that has no payer yet, may act. A role is not enough to touch somebody else's
-card. The one action without the payer rule is `checkout-complete`, Stripe's return leg:
-refusing it would strand a payment that has already happened.
+card. Every action carries the payer rule; the one exception, Stripe's return leg
+`checkout-complete`, was deleted with the other hosted-Stripe actions on 2026-10-01.
 
 ## Refresh
 

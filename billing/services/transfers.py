@@ -568,7 +568,7 @@ def _decline(offer, user_id) -> tuple[bool, str, dict | None]:
 
 
 def respond_to_transfer(
-    user_id, transfer_id, *, accept: bool, codes=None
+    user_id, transfer_id, *, accept: bool, codes=None, billing_group_id=None
 ) -> tuple[bool, str, dict | None]:
     """Accept or decline an offer. Returns ``(ok, message, result)``.
 
@@ -585,6 +585,13 @@ def respond_to_transfer(
     request: the modules are cancelled, the payer flips, and what remains is read back off
     the rows from then on. A column recording it would be a second copy of something the
     rows already say, and the deferred collection re-reads them anyway.
+
+    ``billing_group_id`` is the INCOMING payer's billing account the company is to be billed
+    by (one of their own — anyone else's is refused as not found). On accept its charged
+    card is nominated for the company. Omitted, the recipient must already have a
+    nomination for this company, or the accept is refused: there is no fallback to the
+    Stripe customer's default card (the user's rule, 2026-10-01 — a card is only ever
+    chosen through a billing account).
     """
     offer = store._by_pk(SubscriptionTransfer, transfer_id)
     if offer is None or offer.status not in OPEN_STATUSES:
@@ -618,7 +625,7 @@ def respond_to_transfer(
                     outcome=OUTCOME_ABORTED, note=reasons[0][:500])
         return False, reasons[0], None
 
-    return _accept(offer, user_id, now, codes=codes)
+    return _accept(offer, user_id, now, codes=codes, billing_group_id=billing_group_id)
 
 
 def _decline_modules(entity_id, keep, at, actor_user_id) -> list[str]:
@@ -710,10 +717,22 @@ class _UserRef:
         self.id = user_id
 
 
-def _accept(offer, user_id, now, *, codes=None) -> tuple[bool, str, dict | None]:
-    from billing.services import checkout
+def _accept(
+    offer, user_id, now, *, codes=None, billing_group_id=None
+) -> tuple[bool, str, dict | None]:
+    from billing.services import checkout, payment_methods
 
     entity_id = offer.entity_id
+
+    # THE ACCOUNT THEY CHOSE, checked before anything moves. It came from the browser, so
+    # it must be the INCOMING payer's own - another payer's account answers exactly like
+    # one that does not exist (``payment_methods.account_of``).
+    group = None
+    if str(billing_group_id or "").strip():
+        try:
+            group = payment_methods.account_of(offer.to_user_id, billing_group_id)
+        except payment_methods.PaymentMethodError as exc:
+            return False, exc.message, None
 
     # WHAT THEY ARE TAKING ON. ``codes`` is the recipient's choice from 07-D; omitted means
     # the whole company, which is every caller that predates the screen offering one.
@@ -760,6 +779,11 @@ def _accept(offer, user_id, now, *, codes=None) -> tuple[bool, str, dict | None]
     # the pointer, and here no money moves. The blockers have already refused the
     # genuinely empty entity, so reaching this with no codes means a live trial.
     if not codes:
+        # Nothing is charged, but a chosen account is still recorded: the trial converts
+        # on it at term end, and dropping the choice silently would leave the company on
+        # no card.
+        if group is not None:
+            store.nominate_group_for_entity(entity_id, offer.to_user_id, group.id, "transfer")
         return _finish()
 
     # A CARD IS REQUIRED HERE AND NOWHERE EARLIER. The offer is allowed to reach someone
@@ -769,30 +793,25 @@ def _accept(offer, user_id, now, *, codes=None) -> tuple[bool, str, dict | None]
     # is told, rather than a restatement of something the offering screen already refused.
     customer_id = store.customer_id_for_user(offer.to_user_id)
     if not customer_id:
-        return False, "Add a payment method before taking over the billing.", None
+        return False, "Choose a billing account before taking over the billing.", None
 
-    # THE INCOMING PAYER'S CARD, nominated here if they have not chosen one.
+    # THE INCOMING PAYER'S BILLING ACCOUNT, chosen on the accept screen.
     #
     # They cannot have chosen one BEFORE this point: the nomination is per (company,
     # payer), and until they accept, the company is not theirs — ``payment_methods``
     # refuses to let a non-payer point a card at somebody else's company. So the accept is
-    # the first moment the choice can exist, and it is made from their account default —
-    # the card the quote they are accepting was priced and shown against, saved either
-    # before the offer arrived or on the accept screen itself.
+    # the first moment the choice can exist, and it arrives WITH the accept: the account
+    # named in ``billing_group_id``, nominated onto that exact account (not onto whichever
+    # account happens to hold its card - ``nominate_group_for_entity``), recorded with its
+    # own source so it can be told apart later, and movable afterwards.
     #
-    # This is not the silent fallback the rest of the engine refuses. It is written, once,
-    # as a consequence of an explicit "yes, bill me for this company" — recorded with its
-    # own source so it can be told apart later — and they can move it afterwards. The
-    # alternative is refusing an accept for want of a choice there was no way to make.
-    if store.billing_group_for_entity(entity_id, offer.to_user_id) is None:
-        from billing.services import stripe_client
-
-        default_card = stripe_client.customer_default_payment_method(customer_id)
-        if not default_card:
-            return False, "Add a payment method before taking over the billing.", None
-        store.nominate_card_for_entity(
-            entity_id, offer.to_user_id, default_card, "transfer"
-        )
+    # No account named and no nomination already in place is refused. The old fallback -
+    # the Stripe customer's default card - is gone (the user's rule, 2026-10-01: a card is
+    # only ever chosen through a billing account).
+    if group is not None:
+        store.nominate_group_for_entity(entity_id, offer.to_user_id, group.id, "transfer")
+    elif store.billing_group_for_entity(entity_id, offer.to_user_id) is None:
+        return False, "Choose a billing account before taking over the billing.", None
 
     # NOTHING IS CHARGED FOR DAYS THAT HAVE NOT STARTED YET.
     #

@@ -18,15 +18,30 @@ page and this one disagree, this one is right.
   operations): Flask's fifteen, plus `transfer/seen`, the four `billing/accounts` routes and an
   invoice's `breakdown`, `retry` and `pdf`.
 - **A company's module settings page** (`minty-web`, `/subscription/entities/{id}/modules`):
-  the two module cards (Petty Cash, Payment Request) with their state, and the nineteen actions —
-  start a trial, buy, restart, cancel, retry a payment, change the card, manage billing. One page
-  model plus one action endpoint.
+  the two module cards (Petty Cash, Payment Request) with their state, and the ten actions —
+  start a trial, authorise billing, restart, cancel, renew, retry a payment, and the previews. One
+  page model plus one action endpoint. No action hands the browser to a Stripe-hosted page
+  (2026-10-01): cards are added only through a billing account, on `/api/me/billing/*`.
 - **The notice** a dashboard shows for a company (past due, or a paid module winding down; no
   trial notices since 2026-10-01): one route, read by billing-frontend's landing page and by
   Flask's dashboard server-side.
-- **The wizard's money steps** (onboarding step 8/9): capturing a card, choosing a billing
-  account, authorising billing, and — on All Set — starting the trial. Nine routes proxied here
-  by onboarding-backend plus `POST /api/onboarding/trials/start`.
+- **The wizard's money steps** (onboarding step 8/9): adding a card INTO a billing account,
+  authorising billing, and — on All Set — starting the trial. Seven of Flask's nine routes proxied
+  here by onboarding-backend (its two setup-mode Checkout routes were deleted 2026-10-01) plus
+  `POST /api/onboarding/trials/start`.
+
+**THE CARD RULE (the user's, 2026-10-01).** A payment method is only ever added through a
+BILLING ACCOUNT (`payer_billing_group`, cards on `billing_account_payment_method`), via the
+in-app Stripe Elements SetupIntent flow (`billing/payment-methods/setup-intent` + `confirm`).
+No route hands the browser to a Stripe-hosted page (setup-mode Checkout or the Billing Portal -
+both deleted, with `stripe_client`'s session/portal helpers), no confirm saves a card unattached
+to an account (422 "Choose a billing account for this card."), a purchase decides on the card
+NOMINATED for the company (never the customer default), and a handover's accept nominates the
+account the recipient names. Authorising billing (`authorize-billing`, `billing/authorize`) for
+a company on NO billing account, with no `payment_method`, is refused 402 "Choose a billing
+account for this company." and records no consent - the screen opens the Billing Accounts
+picker on it. The old backstop `checkout._ensure_nominated`, which put such a company on the
+Stripe customer's DEFAULT card, is deleted (2026-10-01).
 - **The daily pass**: trials close, renewals are raised, failed payments retried, access swept,
   trial-ending notices sent. Nobody calls it; the in-process scheduler does.
 
@@ -55,7 +70,7 @@ anything is written or attached). Stored rows are not rewritten.
 | GET | `/subscriptions/subscriber-options` | `my_subscriber_options_api` | who a company's bill could move to (admins), each with a quote and inherited trials; blockers; the pending transfer; and `paid_through`, what the COMPANY is paid up until (the screen's footer needs it whether or not there is a candidate to quote) |
 | POST | `/subscriptions/invite-admin` | `my_invite_admin_api` | **forwarded to Flask** `POST /api/onboarding/invite` (the invitation is Flask's), once the address passes the email rule above (422 otherwise) |
 | POST | `/subscriptions/transfer` | `my_transfer_initiate_api` | offer a company's billing to another admin — **any** admin, with a saved card or without: being asked is not being charged, so the card is required at the accept, not here (the offer-time refusal was dropped 2026-09-24) |
-| POST | `/subscriptions/transfer/respond` | `my_transfer_respond_api` | accept or decline. Body `{transfer, accept, codes?}` — `codes` is the modules being taken on (07-D "Choose Modules"); anything the company holds that it does not name is **cancelled** as part of accepting, ending at the outgoing payer's `paid_through` so no extension is owed by anybody (the ordinary `cancel_module` cannot be used: its access end is `max(paid_through, now + paid_cancel_access_days)`, which books a real extension and trips the handover's own blocker). Omitted means the whole company; naming none is refused. **Accepting takes no money** when the window being bought has not started yet (the usual case — the outgoing payer has bought days nobody has used): the charge is parked on `subscription_transfer.collect_at` and taken by `collect-transfers` on that day, and **no `billed_through` claim is written** until it is collected. A window that has already lapsed is charged inline as before. Either way a card is required — refuses with "Add a payment method before taking over the billing." when there is none to nominate, leaving the offer pending |
+| POST | `/subscriptions/transfer/respond` | `my_transfer_respond_api` | accept or decline. Body `{transfer, accept, codes?, billing_group_id?}` — **`billing_group_id`** (2026-10-01) is the caller's OWN billing account the company will be billed by: checked first (someone else's or an unknown id is 422 "That billing account couldn't be found.", nothing moves) and, on accept, the company is nominated onto THAT account (`store.nominate_group_for_entity`, source `transfer` — not "the oldest account holding its card"), a trial-only handover included. Omitted with no nomination already in place, an accept with anything to charge is refused 422 "Choose a billing account before taking over the billing." — the Stripe customer's default card is no longer a fallback. `codes` is the modules being taken on (07-D "Choose Modules"); anything the company holds that it does not name is **cancelled** as part of accepting, ending at the outgoing payer's `paid_through` so no extension is owed by anybody (the ordinary `cancel_module` cannot be used: its access end is `max(paid_through, now + paid_cancel_access_days)`, which books a real extension and trips the handover's own blocker). Omitted means the whole company; naming none is refused. **Accepting takes no money** when the window being bought has not started yet (the usual case — the outgoing payer has bought days nobody has used): the charge is parked on `subscription_transfer.collect_at` and taken by `collect-transfers` on that day, and **no `billed_through` claim is written** until it is collected. A window that has already lapsed is charged inline as before. Either way an account is required (see `billing_group_id` above), and a refusal leaves the offer pending |
 | POST | `/subscriptions/transfer/seen` | — (**new; Flask had none**) | mark how one of MY offers ended as seen, `{transfer}`. The payer pressing Done on 07-I / A-07 / A-08. Stamps `subscription_transfer.outcome_seen_at` — from the click, not from the read that drew the modal and not from the email, which records that a message was SENT. Idempotent; the same answer for a transfer that does not exist and one that is not mine |
 | POST | `/subscriptions/transfer/cancel` | `my_transfer_cancel_api` | withdraw an offer |
 | GET | `/subscriptions/transfers` | `my_transfers_api` | offers made TO me |
@@ -65,7 +80,7 @@ anything is written or attached). Stored rows are not rewritten.
 | GET | `/invoices` | `my_invoices_api` | my invoices, newest first; `entity`, `page`, `per_page`, and **`account`** (added 2026-09-25) — ONE billing account's invoices for 08-B; a pre-accounts invoice (no `billing_group_id`) belongs to the payer's OLDEST account, the attribution dunning already collects by; someone else's account matches nothing. Echoes `account_id`. Each row carries **`retryable`** (2026-09-28): whether *Retry payment* would charge it now - per card, the ONE open invoice `dunning.retry_now` picks (`portal.retryable_invoice_ids`, calling `dunning._manual_target` over our own rows: the current period's renewal, else an open mid-period charge, never an abandoned give-up bill), and nothing on a card past its give-up deadline or whose access has run out - with or without a dunning stamp, since giving up leaves `paid_through` where it stopped. Judged over ALL the payer's failed invoices, before the `account` / `entity` narrowing (narrowed first, a company's own charge could be offered while the engine would collect the renewal), from the rows the list already read; a list with nothing failed reads nothing more. No Stripe call, no writes. And **`has_pdf`** (2026-09-29): whether `/invoices/{id}/pdf` has a document to serve - sent to the processor and paid, open or uncollectible (`portal.has_document`, the same rule the route's 409 asks, so the button never refuses). `hosted_invoice_url` is still answered, but minty-web no longer links it |
 | GET | `/billing/payment-methods` | `my_payment_methods_api` | my saved cards and the default |
 | POST | `/billing/payment-methods/setup-intent` | `my_payment_method_setup_intent_api` | a Stripe SetupIntent + the publishable key |
-| POST | `/billing/payment-methods/confirm` | `my_payment_method_confirm_api` | save the confirmed card, optionally as default. **Plus the onboarding twin's account fields** (2026-09-25): `billing_group_id` puts the card on one of my accounts (08-B "Add payment method"); `billing_company` + `billing_email` OPEN one ("New billing account") and both are then required. Both checked in the ROUTE, before the card is attached — the service only reaches them after Stripe holds it. A retry after a lost answer re-answers the account it opened rather than opening a second on the same card |
+| POST | `/billing/payment-methods/confirm` | `my_payment_method_confirm_api` | save the confirmed card INTO A BILLING ACCOUNT, optionally as default. Body `{setup_intent, make_default?, billing_group_id?, billing_email?, billing_company?}`: `billing_group_id` puts the card on one of my accounts (08-B "Add payment method"; someone else's is 404 "That billing account couldn't be found."); `billing_company` + `billing_email` OPEN one ("New billing account") and both are then required (one alone is 422 in the form's own words). **Naming neither is 422 "Choose a billing account for this card."** (2026-10-01; the old "save the card and nothing else" path is gone). Every check runs before anything is attached or created at Stripe (`payment_methods.confirm_into_account`, shared with the onboarding twin; `confirm_setup` itself refuses an account-less confirm first thing too). Answers the wallet plus `account`. A retry after a lost answer re-answers the account it opened rather than opening a second on the same card |
 | POST | `/billing/payment-methods/default` | `my_payment_method_default_api` | change the default |
 | GET / POST | `/billing/entity-payment-method` | `my_entity_payment_method_api` | which card a company is billed to; nominate one |
 | POST | `/billing/payment-methods/update` | `my_payment_method_update_api` | expiry, name, address |
@@ -97,13 +112,22 @@ bearer, Flask's non-2xx sentence back as the 422, Flask unreachable as the route
 | Method | Path | Flask origin | Answers |
 |---|---|---|---|
 | GET | `/{entity_id}/modules` | the Jinja page (`templates/entity/partials/module_*.html`) | the page model: cards with state, summary, panel, next payment, `can_manage_modules`, payer, consent-takeover prompt |
-| POST | `/{entity_id}/modules/{action}` | `POST /entity/settings/module/<org_id>/<action>` (`entity/routes/settings.py` 1419–2431) | one of the nineteen actions below, JSON body per action |
+| POST | `/{entity_id}/modules/{action}` | `POST /entity/settings/module/<org_id>/<action>` (`entity/routes/settings.py` 1419–2431) | one of the ten actions below, JSON body per action |
 
-Actions (`billing/api/modules.py::ACTIONS`): `checkout`, `authorize-billing`, `payment-methods`,
-`payment-methods/setup-intent`, `payment-methods/confirm`, `payment-methods/default`,
-`restart-quote`, `restart-billing`, `confirm-billing`, `checkout-complete`, `start-trial`,
-`resume-preview`, `subscribe-preview`, `cancel-preview`, `retry-payment`, `cancel`,
-`payment-method`, `renew`, `manage-billing`. Reading needs `MODULE_VIEW`, acting needs
+Actions (`billing/api/modules.py::ACTIONS`): `authorize-billing`, `restart-quote`,
+`restart-billing`, `start-trial`, `resume-preview`, `subscribe-preview`, `cancel-preview`,
+`retry-payment`, `cancel`, `renew`. Any other word is 404 "Unknown action." — including Flask's
+other nine, **deleted 2026-10-01** under the card rule (§1): `checkout`, `confirm-billing`,
+`checkout-complete`, `payment-method`, `manage-billing` (setup-mode Checkout and the Billing
+Portal) and `payment-methods`, `payment-methods/setup-intent`, `payment-methods/confirm`,
+`payment-methods/default` (the module page's copies of the card routes; `/api/me/billing/*` are
+the card routes). `restart-billing` (`{codes, payment_method?}`) nominates the card it was given,
+answers **402 "Choose a card before restarting billing."** when the company has no card
+nominated, and otherwise charges through `checkout.confirm_modules_checkout(entity, user,
+requested_codes=…)` — it never answers `{url}`; success is `{ok: true, restarted: [...]}`. The
+engine decides on the card nominated for the company (`store.card_for_entity`), never the
+customer default, and refuses with 402 "Choose a card before subscribing." if none is (the card
+can vanish between the route's check and the charge). Reading needs `MODULE_VIEW`, acting needs
 `MODULE_MANAGE` **and** the payer rule (`store.may_manage_subscription`). `retry-payment`
 answers in `api/_retry.py`'s words, `unavailable` included. `renew` - undoing a cancellation
 whose extension was already invoiced charges the rest of the period - is 402 only for a real
@@ -114,14 +138,13 @@ was charged - please try again shortly." when the processor failed (both 2026-09
 **Live since step 3 slice B (2026-09-21)** — `billing/api/modules.py`. The gate is one function
 every request runs through (`_gate`): the path's company must be the one the token was checked
 against (`X-Entity-Id`, else the claim; a mismatch is 403 "That token is for a different
-company."), then the permission (403 with Flask's sentence), then for every action but
-`checkout-complete` the payer rule (403 "Only the person who pays for this company can change
-its subscription."). `checkout-complete` is Stripe's return leg and carries the permission
-only — refusing it would strand a payment that has already happened. Flask pinned these rules
-by reading the decorator stack with regexes (`test_subscription_payer_permission`,
+company."), then the permission (403 with Flask's sentence), then for every action the payer
+rule (403 "Only the person who pays for this company can change its subscription."; the one
+exception, Stripe's return leg `checkout-complete`, went with it on 2026-10-01). Flask pinned
+these rules by reading the decorator stack with regexes (`test_subscription_payer_permission`,
 `test_restart_billing_guard`); here every action is called as the wrong person
-(`billing/tests/api/test_module_settings_api.py`). `payment-methods` and `restart-quote` also
-answer GET, as Flask served them.
+(`billing/tests/api/test_module_settings_api.py`). `restart-quote` also answers GET, as Flask
+served it.
 
 The page model (`GET /{entity_id}/modules`): `entity_id`, `entity_name`, `cards` (Flask's card
 dicts key for key — minty-web's `ModuleCard` type — with `period_end` ISO and `access_end_date`
@@ -129,13 +152,9 @@ re-shaped to `YYYY-MM-DD` because the client counts days from them; `IsoJSONEnco
 router, since Flask never served this page as JSON), `summary` and `panel` (opaque to the client
 until its screens read them), `next_payment_date` (read off the panel), `can_manage_modules`
 (admin AND payer, or no payer yet), `payer` (`{user_id, name, email}` when it is somebody
-else, else null), `viewer` (`{name, initials}`), `consent_takeover`. Three deliberate
-differences from Flask, each written where it happens: the Stripe return URLs point at
-minty-web's page (`{MINTY_WEB_URL}/subscription/entities/{id}/modules`, `?session_id=
-{CHECKOUT_SESSION_ID}` on the return, `&purpose=payment_method` for a card-only session);
-`checkout-complete` takes `{session_id, purpose?}` and answers JSON (`{"ok": true, "created"}`;
-400 no session, 409 nothing created, the service's own status, 500) where Flask redirected with
-`?checkout_error=`; dates render ISO.
+else, else null), `viewer` (`{name, initials}`), `consent_takeover`. Dates render ISO, the one
+deliberate difference from Flask left (the Stripe return URLs and `checkout-complete`'s JSON
+answer went with the hosted routes on 2026-10-01).
 
 ### `notice` (`/api/entities`, `NoticeBearerAuth`)
 
@@ -170,11 +189,9 @@ page down. Stateless: the "show once per session" claim stays Flask's.
 | Method | Path | Flask origin (`entity/routes/create.py`) |
 |---|---|---|
 | GET | `/payment-method` | `onboarding_payment_method_status` |
-| POST | `/payment-method/setup` | `onboarding_payment_method_setup` |
-| POST | `/payment-method/complete` | `onboarding_payment_method_complete` |
 | GET | `/billing/payment-methods` | `onboarding_billing_payment_methods` |
 | POST | `/billing/payment-methods/setup-intent` | `onboarding_billing_setup_intent` |
-| POST | `/billing/payment-methods/confirm` | `onboarding_billing_confirm` |
+| POST | `/billing/payment-methods/confirm` | `onboarding_billing_confirm` — the `me` twin's body and rules exactly (a billing account is required: 422 "Choose a billing account for this card." when none is named; all checks before Stripe, `payment_methods.confirm_into_account`) |
 | POST | `/billing/payment-methods/default` | `onboarding_billing_set_default` |
 | GET / POST | `/billing/accounts` | `onboarding_billing_accounts` |
 | POST | `/billing/authorize` | `onboarding_billing_authorize` |
@@ -194,10 +211,12 @@ rule and sentences); the four billing-sheet card routes act on the payer and che
 `checkout.start_trials_for_enabled_modules` (idempotent: modules already holding a trial or a
 subscription are skipped) and reads `trial_end` BACK from the rows (the earliest); a
 `CheckoutError` answers with its status, anything else 502 "The trial could not be started.
-Please try again." — never swallowed, as Flask's finalize did. The setup Checkout returns the
-browser to `ONBOARDING_WEB_URL` (`/?pm_session_id=…`, `/?pm_cancelled=1`). Flask's
+Please try again." — never swallowed, as Flask's finalize did. Flask's
 `/api/onboarding/plans` is NOT here: onboarding-backend serves the catalogue natively
-(`onboarding/api_reference.py`).
+(`onboarding/api_reference.py`). Neither are Flask's `POST /payment-method/setup` and
+`/payment-method/complete` (a Stripe-hosted setup-mode Checkout returning to the wizard with
+`?pm_session_id=`): deleted 2026-10-01 under the card rule (§1), with the `ONBOARDING_WEB_URL`
+setting that only they read.
 
 ### Everything else
 
@@ -314,8 +333,10 @@ Stripe: only this service holds `STRIPE_SECRET_KEY` / `STRIPE_PUBLISHABLE_KEY` (
 rule 9); `billing/services/stripe_client.py` is the one `import stripe` (settings only, never
 the process environment — `settings_test` blanks the key so an unstubbed test call raises),
 `billing_gateway.py` the one charger (Invoices, idempotency keys claimed before the charge).
-`test_models_guard.py` allows the import in that one module only. The setup-Checkout
-`success_url` and the billing-portal `return_url` become minty-web pages.
+`test_models_guard.py` allows the import in that one module only. Stripe is used for Customer,
+PaymentMethod, SetupIntent and Invoice / InvoiceItem only: no Stripe-hosted page is ever opened
+(setup-mode Checkout and the Billing Portal, with their return URLs, were deleted 2026-10-01 —
+the card rule, §1).
 
 **Transactions — the rule step 3 inherits.** The engine runs on Django's autocommit, which is
 what Flask's per-helper commits were. `transaction.atomic()` appears in exactly four kinds of
@@ -698,11 +719,9 @@ as `recipient_for`, so a replay never mails a real billing address. Pinned in
 `FLASK_APP_URL` (the forwarded call); `MINTY_PUBLIC_URL` (the address a PERSON reaches Minty
 at — every link in an email; defaults to `FLASK_APP_URL`, which in the docker stack is the
 internal service name, so set it there); `MINTY_WEB_URL` / `PAYMENTS_WEB_URL` /
-`CORS_ALLOWED_ORIGINS` (the two browser origins; `x-entity-id` is allowed); `ONBOARDING_WEB_URL`
-(the wizard — where a setup Checkout opened from it returns the browser; not a CORS origin,
-onboarding-backend proxies server-side; Flask's `ONBOARDING_APP_URL` under Part 3's name). In
-the docker stack it is the `billing-api` service on 8004. `MINTY_WEB_URL` also builds the
-Stripe return URLs of the module page's actions.
+`CORS_ALLOWED_ORIGINS` (the two browser origins; `x-entity-id` is allowed). `ONBOARDING_WEB_URL`
+is gone (2026-10-01): its only reader was the deleted onboarding setup Checkout. In the docker
+stack it is the `billing-api` service on 8004.
 
 ## 8. Where it is tested
 

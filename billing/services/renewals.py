@@ -123,8 +123,8 @@ def entities_covered_past(user_id, period: Period) -> set[str]:
 def _trial_converts(entity_id, payer_user_id) -> bool:
     """Whether this company's trial will become a paid subscription when it ends.
 
-    ``checkout._trial_will_convert``'s conjunction - the payer's customer, a card for THIS
-    company, and its consent - read from the DATABASE ALONE. That one falls back to a
+    The conjunction the trial-end job enforces - the payer's customer, a card for THIS
+    company, and its consent - read from the DATABASE ALONE. The job itself falls back to a
     Stripe search (and a write) when the customer mapping is missing, which a forecast on
     a page read must never do; a lost mapping only makes the forecast leave the trial out,
     and the trial-end job still recovers it. Any failure answers False, and is logged.

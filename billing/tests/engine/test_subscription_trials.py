@@ -182,7 +182,6 @@ def test_trial_start_bills_nothing_and_writes_the_row(monkeypatch):
         raise AssertionError("an app-level trial must not bill anything")
 
     monkeypatch.setattr(changes, "issue_change", _boom)
-    monkeypatch.setattr(checkout, "create_setup_checkout_session", _boom)
 
     result = checkout.start_module_trials(_FakeEntity(), _FakeUser(), ["PAYMENT_REQUEST"])
 

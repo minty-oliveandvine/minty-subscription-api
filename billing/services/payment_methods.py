@@ -73,6 +73,10 @@ from billing.services.stripe_client import (
 # saved before that renewal, not after it declines.
 EXPIRING_SOON_MONTHS = 2
 
+#: The refusal for a card confirmed into NO billing account (the user's rule, 2026-10-01:
+#: a card is only ever added through a billing account). The web matches on it.
+ACCOUNT_REQUIRED = "Choose a billing account for this card."
+
 
 class PaymentMethodError(Exception):
     """Raised with a message the page can show verbatim, and the status to answer with."""
@@ -498,11 +502,10 @@ def start_setup(user_id) -> dict:
     the publishable key is safe to publish by definition. Neither is a credential for this
     application.
 
-    Works for a payer with NO customer, which is the point: the hosted-portal route this
-    replaces answered 409 there and told them to go and subscribe an entity first, because
-    a billing portal session needs a customer to exist. A SetupIntent does not, so the
-    first card can be saved from the billing page — and the customer is created in
-    ``confirm_setup`` once Stripe says the card is real.
+    Works for a payer with NO customer, which is the point: a SetupIntent needs none, so
+    the first card can be saved from the billing page — and the customer is created in
+    ``confirm_setup`` once Stripe says the card is real. This is the ONLY way a card is
+    added (the Stripe-hosted Checkout and Billing Portal routes were deleted 2026-10-01).
 
     Adding a card AUTHORISES NOTHING. Billing an entity needs that entity's own consent
     (``store.has_billing_consent``), which is granted on its settings page and is exactly
@@ -532,8 +535,7 @@ def _payer_customer_for_confirm(user_id, intent_customer: str | None) -> tuple[s
 
     * the payer already has a customer — it WINS, even if the intent named another. Two
       customers for one payer make ``find_customer_by_user`` ambiguous, which is worse
-      than the duplicate itself (the same reasoning as
-      ``checkout._adopt_session_customer``).
+      than the duplicate itself.
     * the intent carried one and the payer has none — adopt it.
     * neither — create one now. This is the first moment the card is a fact, which is the
       only moment a customer may be made.
@@ -598,15 +600,17 @@ def confirm_setup(
     (Stripe accepts it), re-sets the same default, and returns the same list — a
     double-click or a retried request cannot produce two cards or two customers.
 
-    THE BILLING ACCOUNT IS OPTIONAL, AND IS NEVER CREATED BY ACCIDENT.
+    THE BILLING ACCOUNT IS REQUIRED, AND IS NEVER CREATED BY ACCIDENT.
 
     * ``billing_group_id`` — put the card on an account that already exists. The account
       is checked to be the caller's first; a group id from the browser naming someone
       else's account would otherwise move a card onto it.
-    * ``billing_email`` / ``billing_company`` with no group — OPEN a new account on this
-      card, named. This is the onboarding dialog's path.
-    * neither — save the card and nothing else, exactly as before this existed. That is
-      the payer-portal path, where an account is opened later by the nomination.
+    * ``billing_email`` AND ``billing_company`` with no group — OPEN a new account on this
+      card, named ("New billing account").
+    * neither — REFUSED, 422 ``ACCOUNT_REQUIRED``, before Stripe is asked anything. A card
+      is only ever added through a billing account (the user's rule, 2026-10-01); the old
+      "save the card and nothing else" path is gone. Routes should come in through
+      ``confirm_into_account``, which also validates the account fields first.
 
     A RETRY DOES NOT OPEN A SECOND ACCOUNT. Two accounts on one card are legal, but never
     on a card this call has only just confirmed: a SetupIntent always makes a fresh
@@ -614,6 +618,10 @@ def confirm_setup(
     earlier attempt at this same request opened — whose answer was lost on the way back.
     That account is renamed with what this attempt carried and answered again.
     """
+    # FIRST, before any Stripe call: refusing after the attach below would leave a card
+    # saved against no account, which is exactly what this rule forbids.
+    _require_account(billing_group_id, billing_email, billing_company)
+
     intent = retrieve_setup_intent(setup_intent_id)
     if not intent:
         raise PaymentMethodError("That card setup couldn't be found.", status=404)
@@ -666,21 +674,69 @@ def confirm_setup(
     )
 
     payload = list_for_user(user_id)
-    if account is not None:
-        # Additive: every existing caller reads ``methods`` and is untouched.
-        payload["account"] = {
-            "id": account.id,
-            "billing_email": account.billing_email,
-            "billing_company": account.billing_company,
-            "default_id": account.stripe_payment_method_id,
-        }
+    # Additive: every existing caller reads ``methods`` and is untouched.
+    payload["account"] = {
+        "id": account.id,
+        "billing_email": account.billing_email,
+        "billing_company": account.billing_company,
+        "default_id": account.stripe_payment_method_id,
+    }
     return payload
+
+
+def _require_account(billing_group_id, billing_email, billing_company) -> None:
+    """Refuse a confirm that names no billing account: neither an existing account id nor
+    BOTH the fields that open a new one. 422 ``ACCOUNT_REQUIRED``."""
+    if str(billing_group_id or "").strip():
+        return
+    if str(billing_email or "").strip() and str(billing_company or "").strip():
+        return
+    raise PaymentMethodError(ACCOUNT_REQUIRED, status=422)
+
+
+def confirm_into_account(
+    user_id,
+    setup_intent_id: str,
+    *,
+    make_default: bool = False,
+    billing_group_id=None,
+    billing_email=None,
+    billing_company=None,
+) -> dict:
+    """The two confirm routes' shared front half (the payer portal's and the onboarding
+    twin's), then ``confirm_setup``.
+
+    Every check that can refuse runs HERE, before the service attaches anything at Stripe —
+    a refusal after the attach would leave a card saved against no account:
+
+    * a ``billing_group_id`` must be the caller's own account (``account_of``, 404); an
+      email sent with it renames the account and is held to the email rule;
+    * otherwise a company or an email means "open a new account", and BOTH are required
+      (``validate_identity``, 422 in the form's own words);
+    * otherwise nothing names an account: 422 ``ACCOUNT_REQUIRED``.
+    """
+    from billing.services.billing_accounts import validate_identity
+
+    group_id = str(billing_group_id or "").strip() or None
+    email, company = billing_email, billing_company
+    if group_id:
+        account_of(user_id, group_id)
+        email, _ = validate_identity(email, None, require_both=False)
+    elif email is not None or company is not None:
+        email, company = validate_identity(email, company, require_both=True)
+    else:
+        raise PaymentMethodError(ACCOUNT_REQUIRED, status=422)
+    return confirm_setup(
+        user_id, setup_intent_id, make_default=make_default,
+        billing_group_id=group_id, billing_email=email, billing_company=company,
+    )
 
 
 def _account_for_confirm(
     user_id, payment_method, billing_group_id, billing_email, billing_company
 ):
-    """The billing account this confirmed card belongs to, or None if it names none.
+    """The billing account this confirmed card belongs to — never None: ``confirm_setup``
+    has already refused a confirm naming no account (``_require_account``).
 
     Split out because it is the only part of ``confirm_setup`` that touches local state,
     and it must run AFTER Stripe has confirmed the card exists — an account opened for a
@@ -697,29 +753,26 @@ def _account_for_confirm(
             account.id, billing_email=billing_email, billing_company=billing_company
         )
 
-    if billing_email or billing_company:
-        retried = next(
-            (
-                group
-                for group in sub_store.billing_groups_for_payer(user_id)
-                if group.stripe_payment_method_id == payment_method
-            ),
-            None,
+    retried = next(
+        (
+            group
+            for group in sub_store.billing_groups_for_payer(user_id)
+            if group.stripe_payment_method_id == payment_method
+        ),
+        None,
+    )
+    if retried is not None:
+        logger.info(
+            "payment methods: payer {} re-confirmed {}; answering account {} again",
+            user_id, payment_method, retried.id,
         )
-        if retried is not None:
-            logger.info(
-                "payment methods: payer {} re-confirmed {}; answering account {} again",
-                user_id, payment_method, retried.id,
-            )
-            return sub_store.set_account_identity(
-                retried.id, billing_email=billing_email, billing_company=billing_company
-            )
-        return sub_store.create_billing_account(
-            user_id, payment_method,
-            billing_email=billing_email, billing_company=billing_company,
+        return sub_store.set_account_identity(
+            retried.id, billing_email=billing_email, billing_company=billing_company
         )
-
-    return None
+    return sub_store.create_billing_account(
+        user_id, payment_method,
+        billing_email=billing_email, billing_company=billing_company,
+    )
 
 
 def account_of(user_id, account_id):

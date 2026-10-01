@@ -149,6 +149,15 @@ def _wire(monkeypatch, db, *, rows=None, payer=OLD, dunning=(), admin=True,
     _user(User, OLD, "old@test.com", True).save(force_insert=True)
     if admin:
         UserEntity.objects.create(user_id=NEW, entity_id=ENTITY, role="admin", approved=True)
+    if card:
+        # The incoming payer has already put this company on one of their billing accounts.
+        # The accept no longer falls back to the Stripe customer's default card (2026-10-01:
+        # a card is only ever chosen through a billing account), so a test about what the
+        # accept DOES needs a nomination in place; the ones about choosing an account pass
+        # ``card=False`` and a ``billing_group_id``.
+        group = store.create_billing_account(NEW, "pm_1")
+        store.nominate_group_for_entity(ENTITY, NEW, group.id, "chosen")
+        calls["group"] = group.id
     return transfers, calls
 
 
@@ -252,22 +261,120 @@ def test_a_card_less_recipient_can_be_sent_an_offer(db_session, monkeypatch):
     assert calls["charges"] == []
 
 
-def test_accepting_without_a_card_is_refused_and_charges_nothing(db_session, monkeypatch):
-    """The requirement did not go away, it moved to the moment it is actually true. The
-    nomination is made from the recipient's account default, and there is none to make it
-    from — so the accept refuses BEFORE the journal write, leaving the offer pending for
-    them to retry once they have saved one."""
+def test_accepting_without_a_billing_account_is_refused_and_charges_nothing(
+    db_session, monkeypatch
+):
+    """The requirement did not go away, it moved to the moment it is actually true. No
+    account named and none nominated — and the Stripe customer's default card is NOT a
+    fallback any more, even though the recipient has one (``_wire`` stubs it as pm_1). The
+    accept refuses BEFORE the journal write, leaving the offer pending for them to retry
+    once they have chosen an account."""
     transfers, calls = _wire(monkeypatch, db_session, card=False)
     offer = _offer(db_session, transfers)
 
     ok, msg, _ = transfers.respond_to_transfer(NEW, offer.id, accept=True)
 
     assert ok is False
-    assert "Add a payment method" in msg
+    assert msg == "Choose a billing account before taking over the billing."
     assert calls["charges"] == []
     assert calls["flips"] == []
     offer.refresh_from_db()
     assert offer.status == "pending"
+
+
+def test_accepting_with_someone_elses_account_is_refused(db_session, monkeypatch):
+    """The account id comes from the browser. One belonging to anyone but the INCOMING
+    payer - here the outgoing payer's own - answers exactly like one that does not exist,
+    and nothing moves."""
+    from billing.services import store
+    from shared_models.models import EntityBillingGroup
+
+    transfers, calls = _wire(monkeypatch, db_session, card=False)
+    theirs = store.create_billing_account(OLD, "pm_old")
+    offer = _offer(db_session, transfers)
+
+    ok, msg, _ = transfers.respond_to_transfer(
+        NEW, offer.id, accept=True, billing_group_id=theirs.id
+    )
+
+    assert ok is False
+    assert msg == "That billing account couldn't be found."
+    assert calls["charges"] == [] and calls["flips"] == []
+    assert not EntityBillingGroup.objects.filter(entity_id=ENTITY, payer_user_id=NEW).exists()
+    offer.refresh_from_db()
+    assert offer.status == "pending"
+
+
+def test_accepting_with_an_unknown_account_is_refused(db_session, monkeypatch):
+    transfers, calls = _wire(monkeypatch, db_session, card=False)
+    offer = _offer(db_session, transfers)
+
+    ok, msg, _ = transfers.respond_to_transfer(
+        NEW, offer.id, accept=True, billing_group_id="7a17ffe4-0000-4000-8000-0000000000ff"
+    )
+
+    assert ok is False and msg == "That billing account couldn't be found."
+    assert calls["flips"] == []
+
+
+def test_accepting_with_your_own_account_nominates_that_exact_account(db_session, monkeypatch):
+    """The chosen ACCOUNT, not "an account holding its card": the recipient has two
+    accounts charging the same card, and the newer one - the one they picked - is what the
+    company lands on (a card-keyed nomination would take the oldest)."""
+    from billing.services import store
+    from shared_models.models import EntityBillingGroup
+
+    transfers, calls = _wire(monkeypatch, db_session, card=False)
+    store.create_billing_account(NEW, "pm_shared")  # older, same card
+    chosen = store.create_billing_account(NEW, "pm_shared")
+    offer = _offer(db_session, transfers)
+
+    ok, _msg, _ = transfers.respond_to_transfer(
+        NEW, offer.id, accept=True, billing_group_id=chosen.id
+    )
+
+    assert ok is True
+    link = EntityBillingGroup.objects.get(entity_id=ENTITY, payer_user_id=NEW)
+    assert str(link.billing_group_id) == str(chosen.id)
+    assert link.source == "transfer"
+    assert calls["flips"], "the handover completed"
+
+
+def test_a_chosen_account_replaces_an_existing_nomination(db_session, monkeypatch):
+    from billing.services import store
+    from shared_models.models import EntityBillingGroup
+
+    transfers, calls = _wire(monkeypatch, db_session)  # already nominated onto calls["group"]
+    other = store.create_billing_account(NEW, "pm_2")
+    offer = _offer(db_session, transfers)
+
+    ok, _msg, _ = transfers.respond_to_transfer(
+        NEW, offer.id, accept=True, billing_group_id=other.id
+    )
+
+    assert ok is True
+    link = EntityBillingGroup.objects.get(entity_id=ENTITY, payer_user_id=NEW)
+    assert str(link.billing_group_id) == str(other.id)
+
+
+def test_a_trial_only_handover_still_records_the_chosen_account(db_session, monkeypatch):
+    """Nothing is charged for a trial, but the trial converts on the chosen account at term
+    end - dropping the choice would leave the company on no card."""
+    from billing.services import store
+    from shared_models.models import EntityBillingGroup
+
+    transfers, calls = _wire(monkeypatch, db_session, card=False, rows=[_trial_row()])
+    chosen = store.create_billing_account(NEW, "pm_trial")
+    offer = _offer(db_session, transfers)
+
+    ok, _msg, _ = transfers.respond_to_transfer(
+        NEW, offer.id, accept=True, billing_group_id=chosen.id
+    )
+
+    assert ok is True
+    assert calls["charges"] == []
+    link = EntityBillingGroup.objects.get(entity_id=ENTITY, payer_user_id=NEW)
+    assert str(link.billing_group_id) == str(chosen.id)
 
 
 def test_a_clean_handover_has_no_blockers(db_session, monkeypatch):

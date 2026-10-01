@@ -4,7 +4,7 @@ Minty's subscription engine and payer-portal API — Django 5.2 + django-ninja o
 port **8004**. Part 2 of `Minty/docs/modernisation/modernisation_plan.md` moves the whole
 subscription domain out of the Flask app into this service: the `/api/me/*` portal routes
 (Flask's fifteen paths, plus `transfer/seen` and the four `billing/accounts` routes this service
-added), the module settings page's model and its nineteen actions, the dashboard notice, the
+added), the module settings page's model and its ten actions, the dashboard notice, the
 wizard's card and billing-account routes, the daily pass, the notification emails and the
 Stripe writer. Flask keeps identity and the company until Part 3 and reads five subscription
 facts through a read-only module; onboarding-backend proxies its money routes here.
@@ -13,9 +13,10 @@ facts through a read-only module; onboarding-backend proxies its money routes he
 Step 2 (2026-09-21) put the whole engine in `billing/services/`; step 3 filled the four routers
 from Flask's views: `me` (the fifteen `/api/me/*` portal routes, Flask's shell and status codes
 kept, `billing/api/_json.py` standing in for `jsonify`), `modules` (the page model minty-web
-renders and the nineteen actions behind one gate), `notice` (with Flask's claimless-token
-fallback) and `onboarding` (the nine wizard routes and the new `trials/start`, which fails
-loudly). `docs/openapi.json` is the committed contract, held current by `test_contract.py`
+renders and its actions behind one gate - ten since 2026-10-01, when the nine that opened a
+Stripe-hosted page or duplicated the card routes were deleted), `notice` (with Flask's
+claimless-token fallback) and `onboarding` (the wizard routes - seven of Flask's nine since the
+setup Checkout pair went the same day - and the new `trials/start`, which fails loudly). `docs/openapi.json` is the committed contract, held current by `test_contract.py`
 (`manage.py export_openapi` regenerates it). Next: step 4 finishes minty-web's screens against
 the live API, step 5 cuts Flask's copies. The mirrors of all 21 tables are declared; the auth
 rules and the guard tests are in place. Subscriptions are always on: the dark switch

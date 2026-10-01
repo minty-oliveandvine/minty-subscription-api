@@ -30,8 +30,6 @@ NOT_MINE = "0a7d0e6e-0000-4000-8000-00000000e002"  # an entity the user is no me
 
 @pytest.mark.parametrize(("method", "path"), [
     ("get", "/api/onboarding/payment-method?entity_id=e1"),
-    ("post", "/api/onboarding/payment-method/setup"),
-    ("post", "/api/onboarding/payment-method/complete"),
     ("get", "/api/onboarding/billing/payment-methods"),
     ("post", "/api/onboarding/billing/payment-methods/setup-intent"),
     ("post", "/api/onboarding/billing/payment-methods/confirm"),
@@ -49,14 +47,12 @@ def test_every_onboarding_route_requires_a_token(client, method, path):
 
 
 @pytest.mark.parametrize("path", [
-    "/api/onboarding/payment-method/setup",
-    "/api/onboarding/payment-method/complete",
     "/api/onboarding/billing/authorize",
     "/api/onboarding/trials/start",
 ])
 def test_the_company_routes_require_membership(client, user, path):
     """A token for a user who isn't a member of the entity gets 403, not the answer."""
-    res = post_json(client, path, {"entity_id": NOT_MINE, "session_id": "cs_1"}, **bearer(user))
+    res = post_json(client, path, {"entity_id": NOT_MINE}, **bearer(user))
     assert res.status_code == 403
     assert res.json() == {"error": "You don't have access to this entity"}
 
@@ -127,18 +123,59 @@ def test_confirm_makes_the_new_card_the_default_when_asked(client, user, monkeyp
 
     monkeypatch.setattr(payment_methods, "confirm_setup", _confirm)
 
+    monkeypatch.setattr(payment_methods, "account_of", lambda uid, gid: None)
+
+    res = post_json(
+        client, "/api/onboarding/billing/payment-methods/confirm",
+        {"setup_intent": "seti_1", "make_default": True, "billing_group_id": "g1"}, **bearer(user),
+    )
+
+    assert res.status_code == 200
+    assert seen == {
+        "user_id": str(user.id), "setup_intent": "seti_1", "make_default": True,
+        "billing_group_id": "g1", "billing_email": None, "billing_company": None,
+    }
+
+
+def test_confirm_naming_no_account_is_refused_before_stripe(client, user, monkeypatch):
+    """THE RULE (2026-10-01): no card is saved unattached to a billing account. 422 in the
+    sentence the web matches, before anything is attached or created at Stripe."""
+    from billing.services import payment_methods
+
+    def _stripe(*_a, **_k):
+        raise AssertionError("a confirm naming no account must not reach Stripe")
+
+    monkeypatch.setattr(payment_methods, "retrieve_setup_intent", _stripe)
+    monkeypatch.setattr(payment_methods, "attach_payment_method", _stripe)
+    monkeypatch.setattr(payment_methods, "create_customer_for_user", _stripe)
+
     res = post_json(
         client, "/api/onboarding/billing/payment-methods/confirm",
         {"setup_intent": "seti_1", "make_default": True}, **bearer(user),
     )
 
-    assert res.status_code == 200
-    # The billing-account fields are pinned as ABSENT too: a body that names no account
-    # must not open one.
-    assert seen == {
-        "user_id": str(user.id), "setup_intent": "seti_1", "make_default": True,
-        "billing_group_id": None, "billing_email": None, "billing_company": None,
-    }
+    assert res.status_code == 422
+    assert res.json() == {"error": "Choose a billing account for this card."}
+
+
+def test_confirm_with_someone_elses_account_is_refused_before_stripe(client, user, other_user, monkeypatch):
+    """Checked HERE now, not after the attach: the onboarding twin used to reach the
+    ownership check only once the card was on the customer."""
+    from billing.services import payment_methods
+    from billing.services import store as sub_store
+
+    theirs = sub_store.create_billing_account(other_user.id, "pm_theirs")
+    monkeypatch.setattr(
+        payment_methods, "retrieve_setup_intent", lambda *_a: pytest.fail("reached Stripe")
+    )
+
+    res = post_json(
+        client, "/api/onboarding/billing/payment-methods/confirm",
+        {"setup_intent": "seti_1", "billing_group_id": theirs.id}, **bearer(user),
+    )
+
+    assert res.status_code == 404
+    assert res.json() == {"error": "That billing account couldn't be found."}
 
 
 NOT_ENGLISH = "Email can only contain English letters, numbers and symbols."
@@ -201,7 +238,16 @@ def test_opening_an_account_proves_ownership_first(client, user, monkeypatch):
 # --- Consent: /billing/authorize --------------------------------------------------------------
 
 
-def test_authorize_records_consent_for_this_entity_and_charges_nothing(client, user, other_user, entity, monkeypatch):
+@pytest.fixture
+def on_account(user, entity):
+    """The company already on one of the payer's billing accounts - what the sheet's card
+    choice leaves behind. Authorising billing for a company on none is refused."""
+    from billing.services import store
+
+    return store.nominate_card_for_entity(str(entity.id), str(user.id), "pm_on_file", "chosen")
+
+
+def test_authorize_records_consent_for_this_entity_and_charges_nothing(client, user, other_user, entity, on_account, monkeypatch):
     """Buy now's actual effect: a consent row, and no Stripe call of any kind (the autouse
     ``_no_stripe`` would fail one loudly)."""
     from billing.services import checkout, store
@@ -224,12 +270,13 @@ def test_authorize_nominates_the_card_it_was_given(client, user, entity, monkeyp
     """Sending the id says which card THIS company goes on and moves nothing else -
     ``establish_payer`` because during the wizard the company has no module rows, so no
     payer, and without the flag the real ``set_for_entity`` refuses."""
-    from billing.services import payment_methods
+    from billing.services import payment_methods, store
 
     seen = {}
 
     def _set_for_entity(user_id, ent, pm_id, *, source="chosen", establish_payer=False):
         seen.update(user_id=user_id, entity_id=str(ent), payment_method=pm_id, establish_payer=establish_payer)
+        store.nominate_card_for_entity(str(ent), user_id, pm_id, source)
         return {"methods": [], "nominated_id": pm_id}
 
     monkeypatch.setattr(payment_methods, "set_for_entity", _set_for_entity)
@@ -268,16 +315,23 @@ def test_authorize_nominates_before_it_records_consent(client, user, entity, mon
     assert store.has_billing_consent(str(entity.id), str(user.id)) is False
 
 
-def test_authorize_without_a_card_still_works(client, user, entity):
+def test_authorize_for_a_company_on_no_account_is_refused_and_records_nothing(client, user, entity):
+    """No fallback to the Stripe customer's default card (the user's rule, 2026-10-01): with
+    no billing account chosen the answer is 402, so the screen opens the account picker, and
+    no consent is written - an agreement to be billed to nothing would let the trial lapse
+    having been told it would convert."""
     from billing.services import store
+    from billing.services.checkout import NO_ACCOUNT_FOR_COMPANY
 
     res = post_json(client, "/api/onboarding/billing/authorize", {"entity_id": str(entity.id)}, **bearer(user))
 
-    assert res.status_code == 200
-    assert store.has_billing_consent(str(entity.id), str(user.id)) is True
+    assert res.status_code == 402
+    assert res.json() == {"error": NO_ACCOUNT_FOR_COMPANY}
+    assert store.has_billing_consent(str(entity.id), str(user.id)) is False
+    assert store.billing_group_for_entity(str(entity.id), str(user.id)) is None
 
 
-def test_authorize_is_idempotent(client, user, entity):
+def test_authorize_is_idempotent(client, user, entity, on_account):
     """A double-click, or a sheet re-opened before the status read caught up."""
     for _ in range(2):
         res = post_json(client, "/api/onboarding/billing/authorize", {"entity_id": str(entity.id)}, **bearer(user))
@@ -354,59 +408,17 @@ def test_status_describes_the_nominated_card_from_the_wallet(client, user, entit
     assert body["card"] == {"id": "pm_2", "label": "Visa •••• 1111"}
 
 
-# --- The hosted card capture ------------------------------------------------------------------
+# --- The hosted card capture is gone ----------------------------------------------------------
 
 
-def test_setup_returns_the_browser_to_the_wizard(client, user, entity, monkeypatch, settings):
-    from billing.services import checkout
-
-    seen = {}
-
-    def _setup(ent, usr, success_url, cancel_url):
-        seen.update(entity=str(ent.id), user=str(usr.id), success_url=success_url, cancel_url=cancel_url)
-        return {"url": "https://stripe.test/setup"}
-
-    monkeypatch.setattr(checkout, "start_payment_method_setup", _setup)
-
-    res = post_json(client, "/api/onboarding/payment-method/setup", {"entity_id": str(entity.id)}, **bearer(user))
-
-    assert res.status_code == 200 and res.json() == {"url": "https://stripe.test/setup"}
-    assert seen == {
-        "entity": str(entity.id), "user": str(user.id),
-        "success_url": f"{settings.ONBOARDING_WEB_URL}/?pm_session_id={{CHECKOUT_SESSION_ID}}",
-        "cancel_url": f"{settings.ONBOARDING_WEB_URL}/?pm_cancelled=1",
-    }
-
-
-def test_setup_reports_stripe_being_down_as_a_503(client, user, entity, monkeypatch):
-    from billing.services import checkout
-
-    def _down(*a, **k):
-        raise RuntimeError("stripe down")
-
-    monkeypatch.setattr(checkout, "start_payment_method_setup", _down)
-
-    res = post_json(client, "/api/onboarding/payment-method/setup", {"entity_id": str(entity.id)}, **bearer(user))
-
-    assert res.status_code == 503
-    assert res.json() == {"error": "Could not open the payment form. Please try again."}
-
-
-def test_complete_needs_a_session_and_saves_the_card(client, user, entity, monkeypatch):
-    from billing.services import checkout
-
-    seen = []
-    monkeypatch.setattr(checkout, "complete_payment_method_setup", lambda ent, sid: seen.append((str(ent.id), sid)) or True)
-
-    missing = post_json(client, "/api/onboarding/payment-method/complete", {"entity_id": str(entity.id)}, **bearer(user))
-    assert missing.status_code == 400 and missing.json() == {"error": "session_id is required"}
-
-    res = post_json(
-        client, "/api/onboarding/payment-method/complete",
-        {"entity_id": str(entity.id), "session_id": "cs_1"}, **bearer(user),
-    )
-    assert res.status_code == 200 and res.json() == {"has_payment_method": True}
-    assert seen == [(str(entity.id), "cs_1")]
+@pytest.mark.parametrize("path", [
+    "/api/onboarding/payment-method/setup",
+    "/api/onboarding/payment-method/complete",
+])
+def test_the_hosted_card_capture_routes_are_gone(client, user, entity, path):
+    """Deleted 2026-10-01: a card is only ever added through a billing account, in-app."""
+    res = post_json(client, path, {"entity_id": str(entity.id), "session_id": "cs_1"}, **bearer(user))
+    assert res.status_code in (404, 405)
 
 
 # --- Finalize's trial start ------------------------------------------------------------------

@@ -58,64 +58,6 @@
         ]
       }
     },
-    "/api/entities/{entity_id}/modules/payment-methods": {
-      "get": {
-        "operationId": "billing_api_modules_module_payment_methods",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "entity_id",
-            "required": true,
-            "schema": {
-              "title": "Entity Id",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK"
-          }
-        },
-        "security": [
-          {
-            "EntityBearerAuth": []
-          }
-        ],
-        "summary": "The payer's cards",
-        "tags": [
-          "Module settings"
-        ]
-      },
-      "post": {
-        "operationId": "billing_api_modules_module_payment_methods",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "entity_id",
-            "required": true,
-            "schema": {
-              "title": "Entity Id",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK"
-          }
-        },
-        "security": [
-          {
-            "EntityBearerAuth": []
-          }
-        ],
-        "summary": "The payer's cards",
-        "tags": [
-          "Module settings"
-        ]
-      }
-    },
     "/api/entities/{entity_id}/modules/restart-quote": {
       "get": {
         "operationId": "billing_api_modules_module_restart_quote",
@@ -390,7 +332,7 @@
     },
     "/api/me/billing/payment-methods/confirm": {
       "post": {
-        "description": "Body: ``{setup_intent, make_default?, billing_group_id?, billing_email?,\nbilling_company?}``. The intent is re-read from Stripe and refused unless it carries this\ncaller's own ``metadata.user_id`` stamp. Idempotent.\n\nThe account fields are the onboarding twin's: ``billing_group_id`` puts the card on one\nof the caller's accounts (08-B's \"Add payment method\"); a company and an email OPEN one\n(\"New billing account\"), and both are required to. Both are checked HERE, before the\nservice runs, because the service only reaches them after the card is attached at\nStripe - a refusal there would leave a card saved against no account.",
+        "description": "Body: ``{setup_intent, make_default?, billing_group_id?, billing_email?,\nbilling_company?}``. The intent is re-read from Stripe and refused unless it carries this\ncaller's own ``metadata.user_id`` stamp. Idempotent.\n\nA BILLING ACCOUNT IS REQUIRED: ``billing_group_id`` puts the card on one of the caller's\naccounts (08-B's \"Add payment method\"); a company AND an email open one (\"New billing\naccount\"). Naming neither is 422 \"Choose a billing account for this card.\" Every check\nruns before anything is attached at Stripe (``payment_methods.confirm_into_account``,\nshared with the onboarding twin).",
         "operationId": "billing_api_me_my_payment_method_confirm",
         "parameters": [],
         "responses": {
@@ -722,7 +664,7 @@
     },
     "/api/me/subscriptions/transfer/respond": {
       "post": {
-        "description": "Body: ``{transfer, accept, codes?}``. THE ONE ROUTE HERE THAT MOVES MONEY, and re-entrant:\ncalled twice it adopts the invoice already paid under the offer's key rather than raising a\nsecond one, so a double-click or a retry after a timeout costs nothing.\n\n``codes`` is the modules being taken on (07-D \"Choose Modules\"); anything the company has and\nthe list does not name is cancelled as part of accepting. OMITTED MEANS ALL OF THEM, which is\nwhat every caller written before the screen offered a choice sends — the field is additive\nand an older client keeps working unchanged.",
+        "description": "Body: ``{transfer, accept, codes?, billing_group_id?}``. THE ONE ROUTE HERE THAT MOVES\nMONEY, and re-entrant: called twice it adopts the invoice already paid under the offer's key\nrather than raising a second one, so a double-click or a retry after a timeout costs nothing.\n\n``codes`` is the modules being taken on (07-D \"Choose Modules\"); anything the company has and\nthe list does not name is cancelled as part of accepting. OMITTED MEANS ALL OF THEM, which is\nwhat every caller written before the screen offered a choice sends — the field is additive\nand an older client keeps working unchanged.\n\n``billing_group_id`` is the caller's own billing account the company will be billed by; its\ncard is nominated for the company on accept. Someone else's account is refused (422 \"That\nbilling account couldn't be found.\"). Omitted with no nomination already in place, an\naccept that has anything to charge is refused (422 \"Add a payment method before taking over\nthe billing.\") — the account default is never used.",
         "operationId": "billing_api_me_my_transfer_respond",
         "parameters": [],
         "responses": {
@@ -825,7 +767,7 @@
     },
     "/api/onboarding/billing/authorize": {
       "post": {
-        "description": "Body ``{entity_id, payment_method?}`` -> ``{\"has_billing_consent\": true}``. Charges\nnothing: the trial runs its term, and this is the difference between \"converts\" and\n\"expires\" at the end of it. ``payment_method`` is nominated BEFORE consent is recorded\n(``establish_payer=True`` - the one caller that does, because during the wizard no\ncompany has a payer yet and this request is what establishes one). Idempotent.",
+        "description": "Body ``{entity_id, payment_method?}`` -> ``{\"has_billing_consent\": true}``. Charges\nnothing: the trial runs its term, and this is the difference between \"converts\" and\n\"expires\" at the end of it. ``payment_method`` is nominated BEFORE consent is recorded\n(``establish_payer=True`` - the one caller that does, because during the wizard no\ncompany has a payer yet and this request is what establishes one). A company on no billing\naccount with no ``payment_method`` is refused 402 \"Choose a billing account for this\ncompany.\" and nothing is recorded - there is no fallback to the customer's default card.\nIdempotent.",
         "operationId": "billing_api_onboarding_billing_authorize",
         "parameters": [],
         "responses": {
@@ -866,7 +808,7 @@
     },
     "/api/onboarding/billing/payment-methods/confirm": {
       "post": {
-        "description": "Body ``{setup_intent, make_default?, billing_group_id?, billing_email?,\nbilling_company?}``. Saving a card AUTHORISES NOTHING - that is ``/billing/authorize``.\nThe three account fields are optional: a group id puts the card on an account the payer\nalready has (the service checks it is theirs), an email or company opens a new one.\nThe email is held to the API's rule (``billing_accounts.validate_identity``) BEFORE the\nservice runs: the service reaches it only after the card is attached at Stripe.",
+        "description": "Body ``{setup_intent, make_default?, billing_group_id?, billing_email?,\nbilling_company?}``. Saving a card AUTHORISES NOTHING - that is ``/billing/authorize``.\nA BILLING ACCOUNT IS REQUIRED: a group id puts the card on an account the payer already\nhas (checked to be theirs), a company AND an email open a new one; naming neither is 422\n\"Choose a billing account for this card.\" The payer portal's route and this one share\n``payment_methods.confirm_into_account``, which refuses before anything is attached at\nStripe.",
         "operationId": "billing_api_onboarding_billing_confirm",
         "parameters": [],
         "responses": {
@@ -943,48 +885,6 @@
           }
         ],
         "summary": "Whether this company can be billed",
-        "tags": [
-          "Onboarding"
-        ]
-      }
-    },
-    "/api/onboarding/payment-method/complete": {
-      "post": {
-        "description": "Body ``{entity_id, session_id}`` -> ``{\"has_payment_method\": true}``. Idempotent, so a\nrefresh of the return URL is harmless.",
-        "operationId": "billing_api_onboarding_payment_method_complete",
-        "parameters": [],
-        "responses": {
-          "200": {
-            "description": "OK"
-          }
-        },
-        "security": [
-          {
-            "BearerAuth": []
-          }
-        ],
-        "summary": "Save the card a setup Checkout captured",
-        "tags": [
-          "Onboarding"
-        ]
-      }
-    },
-    "/api/onboarding/payment-method/setup": {
-      "post": {
-        "description": "Body ``{entity_id}`` -> ``{\"url\"}``. No charge, no subscription: onboarding starts the\ntrials at finalize. Stripe returns to the wizard with ``?pm_session_id=``, which it hands\nto ``/payment-method/complete``.",
-        "operationId": "billing_api_onboarding_payment_method_setup",
-        "parameters": [],
-        "responses": {
-          "200": {
-            "description": "OK"
-          }
-        },
-        "security": [
-          {
-            "BearerAuth": []
-          }
-        ],
-        "summary": "Open a setup-mode Checkout to save a card",
         "tags": [
           "Onboarding"
         ]

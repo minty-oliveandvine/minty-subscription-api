@@ -38,7 +38,7 @@ from core.auth import SelfBearerAuth
 
 me_router = Router(auth=SelfBearerAuth())
 
-#: (method, path) - the contract, also walked by billing/tests/test_dark.py and e2e/.
+#: (method, path) - the contract, pinned by billing/tests/test_contract.py and walked by e2e/.
 ROUTES = (
     ("GET", "/subscriptions"),
     ("GET", "/subscriptions/subscriber-options"),
@@ -213,14 +213,20 @@ def my_transfer_initiate(request):
 
 @me_router.post("/subscriptions/transfer/respond", summary="Accept or decline a handover offered to you")
 def my_transfer_respond(request):
-    """Body: ``{transfer, accept, codes?}``. THE ONE ROUTE HERE THAT MOVES MONEY, and re-entrant:
-    called twice it adopts the invoice already paid under the offer's key rather than raising a
-    second one, so a double-click or a retry after a timeout costs nothing.
+    """Body: ``{transfer, accept, codes?, billing_group_id?}``. THE ONE ROUTE HERE THAT MOVES
+    MONEY, and re-entrant: called twice it adopts the invoice already paid under the offer's key
+    rather than raising a second one, so a double-click or a retry after a timeout costs nothing.
 
     ``codes`` is the modules being taken on (07-D "Choose Modules"); anything the company has and
     the list does not name is cancelled as part of accepting. OMITTED MEANS ALL OF THEM, which is
     what every caller written before the screen offered a choice sends — the field is additive
-    and an older client keeps working unchanged."""
+    and an older client keeps working unchanged.
+
+    ``billing_group_id`` is the caller's own billing account the company will be billed by; its
+    card is nominated for the company on accept. Someone else's account is refused (422 "That
+    billing account couldn't be found."). Omitted with no nomination already in place, an
+    accept that has anything to charge is refused (422 "Add a payment method before taking over
+    the billing.") — the account default is never used."""
     from billing.services import transfers
 
     return _transfer_call(
@@ -230,6 +236,7 @@ def my_transfer_respond(request):
             _required(payload, "transfer"),
             accept=bool(payload.get("accept")),
             codes=payload.get("codes"),
+            billing_group_id=payload.get("billing_group_id"),
         ),
         description="transfer respond",
     )
@@ -454,37 +461,25 @@ def my_payment_method_confirm(request):
     billing_company?}``. The intent is re-read from Stripe and refused unless it carries this
     caller's own ``metadata.user_id`` stamp. Idempotent.
 
-    The account fields are the onboarding twin's: ``billing_group_id`` puts the card on one
-    of the caller's accounts (08-B's "Add payment method"); a company and an email OPEN one
-    ("New billing account"), and both are required to. Both are checked HERE, before the
-    service runs, because the service only reaches them after the card is attached at
-    Stripe - a refusal there would leave a card saved against no account."""
-    from billing.services import billing_accounts, payment_methods
+    A BILLING ACCOUNT IS REQUIRED: ``billing_group_id`` puts the card on one of the caller's
+    accounts (08-B's "Add payment method"); a company AND an email open one ("New billing
+    account"). Naming neither is 422 "Choose a billing account for this card." Every check
+    runs before anything is attached at Stripe (``payment_methods.confirm_into_account``,
+    shared with the onboarding twin)."""
+    from billing.services import payment_methods
 
     payload = body(request)
-    setup_intent = str(payload.get("setup_intent") or "").strip()
-    make_default = bool(payload.get("make_default"))
-    billing_group_id = str(payload.get("billing_group_id") or "").strip() or None
-    billing_email = payload.get("billing_email")
-    billing_company = payload.get("billing_company")
-
-    def _confirm(uid):
-        email, company = billing_email, billing_company
-        if billing_group_id:
-            payment_methods.account_of(uid, billing_group_id)
-            # An email sent with an existing account renames it: the same email rule.
-            email, _ = billing_accounts.validate_identity(email, None, require_both=False)
-        elif email is not None or company is not None:
-            email, company = billing_accounts.validate_identity(
-                email, company, require_both=True
-            )
-        return payment_methods.confirm_setup(
-            uid, setup_intent, make_default=make_default,
-            billing_group_id=billing_group_id,
-            billing_email=email, billing_company=company,
-        )
-
-    return _payment_methods_call(request, _confirm)
+    return _payment_methods_call(
+        request,
+        lambda uid: payment_methods.confirm_into_account(
+            uid,
+            str(payload.get("setup_intent") or "").strip(),
+            make_default=bool(payload.get("make_default")),
+            billing_group_id=payload.get("billing_group_id"),
+            billing_email=payload.get("billing_email"),
+            billing_company=payload.get("billing_company"),
+        ),
+    )
 
 
 @me_router.post("/billing/payment-methods/default", summary="Make one saved method the account's main card")

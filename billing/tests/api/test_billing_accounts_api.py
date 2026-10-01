@@ -233,6 +233,26 @@ def test_a_non_english_email_is_refused_before_stripe(client, user, confirm_spy,
     assert confirm_spy == []
 
 
+def test_a_card_naming_no_account_is_refused_before_stripe(client, user, monkeypatch):
+    """THE RULE (2026-10-01): a card is only ever added through a billing account. The old
+    "save the card and nothing else" confirm is a 422 now, and nothing reaches Stripe."""
+    from billing.services import payment_methods
+
+    def _stripe(*_a, **_k):
+        raise AssertionError("a confirm naming no account must not reach Stripe")
+
+    monkeypatch.setattr(payment_methods, "retrieve_setup_intent", _stripe)
+    monkeypatch.setattr(payment_methods, "attach_payment_method", _stripe)
+    monkeypatch.setattr(payment_methods, "create_customer_for_user", _stripe)
+
+    response = post_json(
+        client, CONFIRM, {"setup_intent": "seti_1", "make_default": True}, **bearer(user)
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {"error": "Choose a billing account for this card."}
+
+
 def test_a_card_for_someone_elses_account_is_refused_before_stripe(
     client, user, other_user, confirm_spy
 ):

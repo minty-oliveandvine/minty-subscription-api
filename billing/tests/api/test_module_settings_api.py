@@ -1,4 +1,4 @@
-"""The module settings page's routes: the page model and the nineteen actions.
+"""The module settings page's routes: the page model and the ten actions.
 
 Flask checked these routes STRUCTURALLY - ``tests/test_subscription_payer_permission.py`` and
 ``tests/test_restart_billing_guard.py`` read the decorator stack and the executable body of
@@ -13,17 +13,15 @@ pinned BEHAVIOURALLY, by calling every action as the wrong person:
   makes the payer.
 * **Being the payer is necessary, not sufficient.** A cashier who happens to hold the card is
   still refused: the permission is checked too.
-* **The Stripe return leg is not payer-guarded.** ``checkout-complete`` is the one action a
-  co-admin may reach: refusing it would strand a payment that has ALREADY happened.
 * **The restart route's refusals, in order** (from ``test_restart_billing_guard``): a genuine
   lapse (409), codes that lapsed (422, refused whole), a card nominated for THIS company
-  before the charge (402), then the subscribe priced from the resolved codes.
-* **The purchase routes nominate before they charge** (from ``test_purchase_card_choice``),
-  through the ownership proof, and leave the company where it is when no card was named.
+  before the charge (402), then the subscribe priced from the resolved codes - and it never
+  answers ``{url}``.
+* **No action hands the browser to Stripe.** The nine actions behind setup-mode Checkout,
+  the Billing Portal and the old card routes were deleted on 2026-10-01 and answer 404.
 
 And what is new to the API: the page model's wire shape (Flask's card dict with ISO dates, the
-payer when it is somebody else, the viewer), the Stripe return URLs pointing at minty-web's
-page, and ``checkout-complete`` answering JSON where Flask redirected.
+payer when it is somebody else, the viewer).
 """
 
 from __future__ import annotations
@@ -33,34 +31,38 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
-from django.conf import settings
 
 from billing.tests.api.conftest import ORIGIN, bearer, post_json
 from shared_models.models import UserEntity
 
 pytestmark = pytest.mark.django_db
 
-# Every action that spends or commits money, or opens the portal that can - all of them but
-# Stripe's return leg. Flask's MONEY_ROUTES plus the two previews, which carried the same guard.
+# Every action - each spends or commits money, or prices what would. Flask's MONEY_ROUTES plus
+# the two previews, which carried the same guard. There is no unguarded action any more.
 MONEY_ACTIONS = (
-    "checkout",
     "authorize-billing",
-    "payment-methods",
-    "payment-methods/setup-intent",
-    "payment-methods/confirm",
-    "payment-methods/default",
     "restart-quote",
     "restart-billing",
-    "confirm-billing",
     "start-trial",
     "resume-preview",
     "subscribe-preview",
     "cancel-preview",
     "retry-payment",
     "cancel",
-    "payment-method",
     "renew",
+)
+
+# Deleted 2026-10-01 (a card is only ever added through a billing account, in-app).
+REMOVED_ACTIONS = (
+    "checkout",
+    "confirm-billing",
+    "checkout-complete",
+    "payment-method",
     "manage-billing",
+    "payment-methods",
+    "payment-methods/setup-intent",
+    "payment-methods/confirm",
+    "payment-methods/default",
 )
 
 
@@ -125,23 +127,18 @@ def services(monkeypatch):
             "start_modules_checkout": {"created": ["PETTY_CASH"]},
             "confirm_modules_checkout": {"created": ["PETTY_CASH"]},
             "authorize_entity_billing": {"ok": True},
-            "complete_setup_checkout": ["PETTY_CASH"],
             "start_module_trials": ["PETTY_CASH"],
             "preview_subscribe_modules": {"total_formatted": "HK$68.00"},
             "preview_reinstate_modules": {"amount_formatted": "0.00"},
             "preview_cancel_module": {"kind": "trial"},
             "cancel_module": {"access_end": None},
             "reactivate_module": None,
-            "open_payment_method_update": {"url": "https://stripe.test/portal"},
-            "start_payment_method_setup": {"url": "https://stripe.test/setup"},
-            "open_billing_management_portal": {"url": "https://stripe.test/portal"},
         },
         payment_methods: {
             "set_for_entity": {"nominated_id": "pm_1"},
-            "for_entity": {"methods": [], "default_id": None, "nominated_id": None},
+            # No module action may reach these any more; recorded so a regression shows.
             "start_setup": {"client_secret": "seti_secret"},
             "confirm_setup": {"methods": []},
-            "set_default": {"methods": []},
         },
         consent: {
             "lapsed_trial_for_entity": {"mode": None, "lapsed": []},
@@ -186,7 +183,7 @@ def test_every_money_action_requires_the_payer(client, user, entity, co_admin, p
     assert response["Access-Control-Allow-Origin"] == ORIGIN
 
 
-@pytest.mark.parametrize("action", MONEY_ACTIONS + ("checkout-complete",))
+@pytest.mark.parametrize("action", MONEY_ACTIONS)
 def test_every_action_requires_the_permission_even_for_the_payer(
     client, entity, cashier, payer_is, services, action
 ):
@@ -201,18 +198,6 @@ def test_every_action_requires_the_permission_even_for_the_payer(
         "error": "You do not have permission to manage subscriptions for this entity."
     }
     assert services["calls"] == [], action
-
-
-def test_the_stripe_return_leg_is_not_payer_guarded(client, user, entity, co_admin, payer_is, services):
-    """checkout-complete is where Stripe sends the browser back. Refusing it would strand a
-    payment that has ALREADY happened, leaving the customer charged and unentitled."""
-    payer_is(user.id)
-
-    response = _act(client, co_admin, entity, "checkout-complete", {"session_id": "cs_test_1"})
-
-    assert response.status_code == 200
-    assert response.json() == {"ok": True, "created": ["PETTY_CASH"]}
-    assert _names(services) == ["complete_setup_checkout"]
 
 
 def test_an_entity_with_no_payer_is_open_to_any_admin(client, entity, co_admin, payer_is, services):
@@ -255,6 +240,27 @@ def test_an_unknown_action_is_a_404(client, user, entity, payer_is):
     response = _act(client, user, entity, "delete-everything", {})
     assert response.status_code == 404
     assert response.json() == {"error": "Unknown action."}
+
+
+@pytest.mark.parametrize("action", REMOVED_ACTIONS)
+def test_the_hosted_stripe_actions_are_gone(client, user, entity, payer_is, services, action):
+    """Setup-mode Checkout, the Billing Portal and the old card routes: each is now just an
+    unknown word - 404, and nothing behind any of them runs."""
+    payer_is(user.id)
+
+    response = _act(client, user, entity, action, {"codes": ["PETTY_CASH"], "session_id": "cs_1"})
+
+    assert response.status_code == 404, action
+    assert response.json() == {"error": "Unknown action."}
+    assert services["calls"] == [], action
+
+
+def test_the_card_list_no_longer_answers_get(client, user, entity, payer_is, services):
+    """Flask served ``payment-methods`` on GET too; the GET route went with it."""
+    payer_is(user.id)
+    response = client.get(f"{_page(entity)}/payment-methods", **_scoped(user, entity))
+    assert response.status_code in (404, 405)
+    assert services["calls"] == []
 
 
 def test_a_company_that_does_not_exist_is_a_404(client, user):
@@ -370,27 +376,10 @@ def test_the_page_over_an_empty_database_is_still_a_page(client, user, entity):
     assert page["can_manage_modules"] is True  # admin, and no payer yet
 
 
-# --- The purchase routes nominate before they charge ---------------------------------------
+# --- The money routes nominate through the ownership proof -----------------------------------
 
 
-@pytest.mark.parametrize(("action", "charge"), [
-    ("checkout", "start_modules_checkout"),
-    ("confirm-billing", "confirm_modules_checkout"),
-])
-def test_the_purchase_routes_nominate_before_they_charge(client, user, entity, payer_is, services, action, charge):
-    """Charging first and nominating after would bill the card the company was already on -
-    on the one dialog that takes money as it closes."""
-    payer_is(user.id)
-
-    response = _act(client, user, entity, action, {"codes": ["PETTY_CASH"], "payment_method": "pm_9"})
-
-    assert response.status_code == 200
-    assert _names(services) == ["set_for_entity", charge]
-    name, args, _kwargs = services["calls"][0]
-    assert args == (str(user.id), str(entity.id), "pm_9")
-
-
-@pytest.mark.parametrize("action", ["checkout", "confirm-billing", "authorize-billing", "restart-billing"])
+@pytest.mark.parametrize("action", ["authorize-billing", "restart-billing"])
 def test_nominating_goes_through_the_ownership_proof(client, user, entity, payer_is, services, action):
     """Another payer's ``pm_...`` answers "not found" rather than being nominated onto
     anything - and nothing is charged after the refusal."""
@@ -407,62 +396,6 @@ def test_nominating_goes_through_the_ownership_proof(client, user, entity, payer
     assert response.status_code == 404
     assert response.json() == {"error": "That payment method was not found."}
     assert not {"start_modules_checkout", "confirm_modules_checkout", "authorize_entity_billing"} & set(_names(services))
-
-
-def test_an_absent_card_leaves_the_company_where_it_is(client, user, entity, payer_is, services):
-    payer_is(user.id)
-
-    response = _act(client, user, entity, "checkout", {"codes": ["PETTY_CASH"]})
-
-    assert response.status_code == 200
-    assert _names(services) == ["start_modules_checkout"]
-
-
-def test_the_stripe_return_urls_point_at_minty_webs_page(client, user, entity, payer_is, services):
-    """Flask returned the browser to its own Jinja page; the page is minty-web's now, and
-    ``checkout-complete`` is posted from there with the ``session_id`` Stripe appends."""
-    payer_is(user.id)
-
-    _act(client, user, entity, "checkout", {"codes": ["PETTY_CASH"]})
-
-    _name, _args, kwargs = services["calls"][0]
-    page = f"{settings.MINTY_WEB_URL}/subscription/entities/{entity.id}/modules"
-    assert kwargs["cancel_url"] == page
-    assert kwargs["success_url"] == f"{page}?session_id={{CHECKOUT_SESSION_ID}}"
-    assert kwargs["requested_codes"] == ["PETTY_CASH"]
-
-
-def test_checkouts_three_answers(client, user, entity, payer_is, services):
-    payer_is(user.id)
-    for answer, expected in (
-        ({"url": "https://stripe.test/c"}, {"url": "https://stripe.test/c"}),
-        ({"needs_confirmation": {"amount": "68.00"}}, {"needs_confirmation": {"amount": "68.00"}}),
-        ({"created": ["PETTY_CASH"]}, {"created": ["PETTY_CASH"]}),
-    ):
-        services["answers"]["start_modules_checkout"] = answer
-        assert _act(client, user, entity, "checkout", {}).json() == expected
-
-
-def test_a_checkout_error_keeps_its_status_and_sentence(client, user, entity, payer_is, services):
-    from billing.services.checkout import CheckoutError
-
-    payer_is(user.id)
-    services["answers"]["start_modules_checkout"] = CheckoutError("Your card was declined.", 402)
-
-    response = _act(client, user, entity, "checkout", {"codes": ["PETTY_CASH"]})
-
-    assert response.status_code == 402
-    assert response.json() == {"error": "Your card was declined."}
-
-
-def test_a_surprise_in_checkout_is_the_routes_500(client, user, entity, payer_is, services):
-    payer_is(user.id)
-    services["answers"]["start_modules_checkout"] = RuntimeError("stripe exploded")
-
-    response = _act(client, user, entity, "checkout", {"codes": ["PETTY_CASH"]})
-
-    assert response.status_code == 500
-    assert response.json() == {"error": "Could not start checkout. Please try again."}
 
 
 # --- The restart route: four refusals, in order ----------------------------------------------
@@ -561,14 +494,48 @@ def test_a_payer_with_no_card_is_refused_before_the_charge(client, user, entity,
     assert "confirm_modules_checkout" not in _names(services)
 
 
-def test_a_restart_whose_card_failed_hands_back_a_checkout_url(client, user, entity, payer_is, services):
+def test_a_restart_is_charged_with_no_return_urls(client, user, entity, payer_is, services):
+    """The engine takes the company and the codes - nothing that could send the browser to a
+    Stripe page."""
+    payer_is(user.id)
+    services["answers"]["lapsed_trial_for_entity"] = _lapsed()
+
+    _act(client, user, entity, "restart-billing", {"codes": ["PETTY_CASH"]})
+
+    name, _args, kwargs = services["calls"][-1]
+    assert name == "confirm_modules_checkout"
+    assert kwargs == {"requested_codes": ["PETTY_CASH"]}
+
+
+def test_a_restart_never_answers_a_url(client, user, entity, payer_is, services):
+    """Even a service answer carrying ``url`` is not handed to the browser: the answer is
+    always ``{ok, restarted}`` or an error."""
     payer_is(user.id)
     services["answers"]["lapsed_trial_for_entity"] = _lapsed()
     services["answers"]["confirm_modules_checkout"] = {"url": "https://stripe.test/setup"}
 
     response = _act(client, user, entity, "restart-billing", {"codes": ["PETTY_CASH"]})
 
-    assert response.json() == {"url": "https://stripe.test/setup"}
+    assert response.status_code == 200
+    assert "url" not in response.json()
+    assert response.json() == {"ok": True, "restarted": ["PETTY_CASH"]}
+
+
+def test_a_restart_the_engine_finds_cardless_is_its_402(client, user, entity, payer_is, services):
+    """The card can vanish between the route's check and the charge: the engine's own 402
+    comes back as it is, never as a hosted fallback."""
+    from billing.services.checkout import CheckoutError
+
+    payer_is(user.id)
+    services["answers"]["lapsed_trial_for_entity"] = _lapsed()
+    services["answers"]["confirm_modules_checkout"] = CheckoutError(
+        "Choose a card before subscribing.", 402
+    )
+
+    response = _act(client, user, entity, "restart-billing", {"codes": ["PETTY_CASH"]})
+
+    assert response.status_code == 402
+    assert response.json() == {"error": "Choose a card before subscribing."}
 
 
 def test_the_quote_route_resolves_codes_the_same_way(client, user, entity, payer_is, services):
@@ -590,32 +557,6 @@ def test_the_quote_route_resolves_codes_the_same_way(client, user, entity, payer
 
 
 # --- The other actions, answer for answer -----------------------------------------------------
-
-
-def test_checkout_complete_answers_json_not_a_redirect(client, user, entity, payer_is, services):
-    """Flask redirected with ``?checkout_error=``; the page posts the session and reads JSON."""
-    payer_is(user.id)
-
-    ok = _act(client, user, entity, "checkout-complete", {"session_id": "cs_1"})
-    assert ok.status_code == 200 and ok.json() == {"ok": True, "created": ["PETTY_CASH"]}
-
-    missing = _act(client, user, entity, "checkout-complete", {})
-    assert missing.status_code == 400
-    assert missing.json() == {"error": "Checkout could not be completed (missing session)."}
-
-    services["answers"]["complete_setup_checkout"] = []
-    nothing = _act(client, user, entity, "checkout-complete", {"session_id": "cs_2"})
-    assert nothing.status_code == 409
-    assert "wasn't created" in nothing.json()["error"]
-
-    # A card-only session carries no modules and correctly creates NOTHING.
-    card_only = _act(client, user, entity, "checkout-complete", {"session_id": "cs_3", "purpose": "payment_method"})
-    assert card_only.status_code == 200 and card_only.json() == {"ok": True, "created": []}
-
-    services["answers"]["complete_setup_checkout"] = RuntimeError("boom")
-    surprise = _act(client, user, entity, "checkout-complete", {"session_id": "cs_4"})
-    assert surprise.status_code == 500
-    assert surprise.json() == {"error": "Something went wrong finishing your subscription."}
 
 
 def test_start_trial_grants_access_through_the_map_writer(client, user, entity, payer_is, services):
@@ -647,27 +588,6 @@ def test_authorize_billing_nominates_then_consents(client, user, entity, payer_i
     services["calls"].clear()
     assert _act(client, user, entity, "authorize-billing", {}).status_code == 200
     assert _names(services) == ["authorize_entity_billing"]
-
-
-def test_the_card_routes_answer_through_the_shared_shell(client, user, entity, payer_is, services):
-    from billing.services.payment_methods import PaymentMethodError
-
-    payer_is(user.id)
-
-    listed = client.get(f"{_page(entity)}/payment-methods", **_scoped(user, entity))
-    assert listed.status_code == 200
-    assert listed.json() == {"methods": [], "default_id": None, "nominated_id": None}
-    assert _act(client, user, entity, "payment-methods", {}).status_code == 200
-
-    assert _act(client, user, entity, "payment-methods/setup-intent", {}).json() == {"client_secret": "seti_secret"}
-
-    _act(client, user, entity, "payment-methods/confirm", {"setup_intent": "seti_1", "make_default": True})
-    _name, args, kwargs = services["calls"][-1]
-    assert args == (str(user.id), "seti_1") and kwargs == {"make_default": True}
-
-    services["answers"]["set_default"] = PaymentMethodError("That payment method was not found.", 404)
-    refused = _act(client, user, entity, "payment-methods/default", {"payment_method": "pm_theirs"})
-    assert refused.status_code == 404
 
 
 def test_the_previews_need_their_codes(client, user, entity, payer_is, services):
@@ -760,27 +680,9 @@ def test_retry_payment_without_a_billing_account_is_a_409(client, entity, co_adm
     assert response.json() == {"error": "This entity has no billing account."}
 
 
-def test_payment_method_falls_back_to_a_setup_checkout_for_a_first_card(client, user, entity, payer_is, services):
-    """Stripe's portal cannot serve the first card: a payer with no customer yet gets a
-    setup-mode Checkout whose return leg is checkout-complete, marked card-only."""
-    from billing.services.checkout import CheckoutError
-
-    payer_is(user.id)
-    services["answers"]["open_payment_method_update"] = CheckoutError("This entity has no billing account yet.", 409)
-
-    response = _act(client, user, entity, "payment-method", {})
-
-    assert response.status_code == 200
-    assert response.json() == {"url": "https://stripe.test/setup"}
-    _name, _args, kwargs = services["calls"][-1]
-    page = f"{settings.MINTY_WEB_URL}/subscription/entities/{entity.id}/modules"
-    assert kwargs["success_url"] == f"{page}?purpose=payment_method&session_id={{CHECKOUT_SESSION_ID}}"
-    assert kwargs["cancel_url"] == page
-
-
-def test_renew_and_manage_billing(client, user, entity, payer_is, services):
+def test_renew(client, user, entity, payer_is, services):
     payer_is(user.id)
     assert _act(client, user, entity, "renew", {"code": "PETTY_CASH"}).json() == {"ok": True}
-    assert _act(client, user, entity, "manage-billing", {}).json() == {"url": "https://stripe.test/portal"}
-    _name, args, _kwargs = services["calls"][-1]
-    assert args[1] == f"{settings.MINTY_WEB_URL}/subscription/entities/{entity.id}/modules"
+    assert _names(services) == ["reactivate_module"]
+
+

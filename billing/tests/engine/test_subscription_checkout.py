@@ -1,9 +1,10 @@
 """Unit tests for paid checkout — ONE billing cycle per payer.
 
-Activation sends the user to a hosted setup-mode Stripe Checkout to capture a card;
-the modules are then billed server-side on return (``complete_setup_checkout``). Stripe
-is the payment RAIL only: the charge is an invoice Minty raises itself, there is no
-Stripe subscription behind it.
+A purchase is decided on the card NOMINATED for the company (``store.card_for_entity``);
+with none it is refused 402 — there is no hosted setup-mode Checkout any more (deleted
+2026-10-01: a card is only ever added through a billing account, in-app). Stripe is the
+payment RAIL only: the charge is an invoice Minty raises itself, there is no Stripe
+subscription behind it.
 
 The pricing model has no coupon: an entity is priced by the modules it bills for — one
 module at its own price, both at the bundle price. So adding a second module bills the
@@ -119,7 +120,7 @@ class _ModuleRow:
         self.trial_end = trial_end or (_PAID_THROUGH if phase == "trial" else None)
 
 
-def _wire(monkeypatch, *, default_pm=None, module_rows=None, billed_codes=(),
+def _wire(monkeypatch, *, card=None, module_rows=None, billed_codes=(),
           paid=True, now=_NOW, anchor=_ANCHOR, paid_through=_PAID_THROUGH):
     """Wire the catalog, store and in-house biller; return (checkout, calls)."""
     from billing.services import changes, checkout, policy, store
@@ -162,11 +163,12 @@ def _wire(monkeypatch, *, default_pm=None, module_rows=None, billed_codes=(),
         store, "nominate_card_for_entity", lambda eid, uid, pm, source="chosen": None
     )
 
-    calls = {"charged": [], "default_pm": [], "setup": [], "stamped": [],
-             "mapped": [], "attached": [], "rows": [], "granted": [],
-             "paid_through": []}
+    calls = {"charged": [], "rows": [], "granted": [], "paid_through": []}
 
-    monkeypatch.setattr(checkout, "customer_default_payment_method", lambda cid: default_pm)
+    # THE card that decides: the one nominated for this company. The account default is
+    # wired to a DIFFERENT card so a regression back to reading it shows up.
+    monkeypatch.setattr(store, "card_for_entity", lambda eid, uid=None: card)
+    monkeypatch.setattr(checkout, "customer_default_payment_method", lambda cid: "pm_default")
     monkeypatch.setattr(
         store, "billing_cycle_for_user", lambda uid: (anchor, "HKD")
     )
@@ -203,83 +205,79 @@ def _wire(monkeypatch, *, default_pm=None, module_rows=None, billed_codes=(),
         lambda eid, code, enabled: calls["granted"].append((eid, code, enabled)),
     )
 
-    monkeypatch.setattr(
-        checkout, "set_customer_default_payment_method",
-        lambda cid, pm: calls["default_pm"].append((cid, pm)),
-    )
-    # Adopting the customer a setup session produced. The payer already resolves to
-    # cus_1 here, so these are the no-duplicate path.
-    monkeypatch.setattr(
-        checkout, "set_customer_identity",
-        lambda cid, **kw: calls["stamped"].append((cid, kw)),
-    )
-    monkeypatch.setattr(checkout, "_payer_identity", lambda uid: {})
-    monkeypatch.setattr(
-        checkout, "_seed_user_customer_mapping",
-        lambda uid, cid: calls["mapped"].append((uid, cid)),
-    )
-    monkeypatch.setattr(
-        checkout, "attach_payment_method",
-        lambda pm, cid: calls["attached"].append((pm, cid)),
-    )
-
-    def fake_setup(customer_id, success_url, cancel_url, currency, metadata=None):
-        calls["setup"].append({"customer_id": customer_id, "currency": currency,
-                               "metadata": metadata})
-        return {"url": "https://setup.example/session"}
-
-    monkeypatch.setattr(checkout, "create_setup_checkout_session", fake_setup)
     return checkout, calls
 
 
-# --- capturing a card ---------------------------------------------------------
+def _no_stripe(monkeypatch):
+    """Any direct Stripe traffic fails the test: a refusal must not reach the SDK."""
+    from billing.services import stripe_client
+
+    def _boom():
+        raise AssertionError("this path must not call Stripe")
+
+    monkeypatch.setattr(stripe_client, "get_stripe", _boom)
 
 
-def test_checkout_without_card_redirects_to_setup(monkeypatch):
-    checkout, calls = _wire(monkeypatch, default_pm=None)
+# --- the card that decides ----------------------------------------------------
 
-    result = checkout.start_modules_checkout(
-        _FakeEntity(), _FakeUser(), "s", "c", ["PAYMENT_REQUEST", "PETTY_CASH"]
-    )
 
-    # No saved card → hosted setup-checkout redirect; nothing billed until return.
-    assert result["url"] == "https://setup.example/session"
+def test_no_nominated_card_is_refused_and_charges_nothing(monkeypatch):
+    """No hosted fallback: a company with no card nominated is refused 402, and nothing
+    is billed and nothing reaches Stripe — not even with a card on the account default."""
+    checkout, calls = _wire(monkeypatch, card=None)
+    _no_stripe(monkeypatch)
+
+    with pytest.raises(checkout.CheckoutError) as exc:
+        checkout.start_modules_checkout(
+            _FakeEntity(), _FakeUser(), ["PAYMENT_REQUEST", "PETTY_CASH"]
+        )
+
+    assert exc.value.status == 402
+    assert exc.value.message == "Choose a card before subscribing."
     assert calls["charged"] == []
-    # Modules' currency + codes ride on the session metadata for the completion step.
-    assert calls["setup"][0]["currency"] == "HKD"
-    assert calls["setup"][0]["metadata"]["modules_to_subscribe"] == "PAYMENT_REQUEST,PETTY_CASH"
+    assert calls["rows"] == []
 
 
-def test_module_checkout_creates_no_customer_for_a_new_payer(monkeypatch):
-    """THE INVARIANT: a Stripe customer exists only once a card has been saved.
+def test_confirming_without_a_nominated_card_is_refused_too(monkeypatch):
+    """The confirm half records consent, but still cannot charge a company on no card."""
+    checkout, calls = _wire(monkeypatch, card=None)
+    _no_stripe(monkeypatch)
 
-    A first-time payer clicking Subscribe must reach the setup checkout without any
-    Customer being created — abandoning there has to leave nothing behind. Stripe makes
-    the customer at session confirmation instead (customer_creation="always"), which is
-    why customer_id goes out as None.
-    """
-    from billing.services import store, stripe_client
+    with pytest.raises(checkout.CheckoutError) as exc:
+        checkout.confirm_modules_checkout(_FakeEntity(), _FakeUser(), ["PAYMENT_REQUEST"])
 
-    checkout, calls = _wire(monkeypatch, default_pm=None)
+    assert exc.value.status == 402
+    assert calls["charged"] == []
 
-    # Brand-new payer: nothing resolves to a customer anywhere.
+
+def test_a_nominated_card_with_no_customer_is_refused_loudly(monkeypatch):
+    """A nomination is a card on the payer's customer, so no customer is OUR inconsistency.
+    Refused with the same 402 rather than charging anything."""
+    checkout, calls = _wire(monkeypatch, card="pm_nominated")
     monkeypatch.setattr(checkout, "_customer_id_for_entity", lambda eid: None)
-    monkeypatch.setattr(store, "customer_id_for_user", lambda uid: None)
+    monkeypatch.setattr(checkout, "_resolve_customer_id", lambda uid: None)
 
-    # No direct Stripe traffic on this path — the session builder is faked, so anything
-    # else reaching the SDK is an unintended write (a re-added customer create above all).
-    def _no_stripe():
-        raise AssertionError("starting checkout must not call Stripe directly")
+    with pytest.raises(checkout.CheckoutError) as exc:
+        checkout.start_modules_checkout(_FakeEntity(), _FakeUser(), ["PAYMENT_REQUEST"])
 
-    monkeypatch.setattr(stripe_client, "get_stripe", _no_stripe)
+    assert exc.value.status == 402
+    assert calls["charged"] == []
 
-    result = checkout.start_modules_checkout(
-        _FakeEntity(), _FakeUser(), "s", "c", ["PAYMENT_REQUEST"]
+
+def test_the_confirmation_shows_the_nominated_card_not_the_default(monkeypatch):
+    """The dialog names the card the company is billed on — never the account default."""
+    from billing.services import store
+
+    checkout, _calls = _wire(monkeypatch, card="pm_nominated")
+    monkeypatch.setattr(store, "has_billing_consent", lambda eid, user_id=None: False)
+    shown: list = []
+    monkeypatch.setattr(
+        checkout, "payment_method_display", lambda pm: shown.append(pm) or {"last4": "4242"}
     )
 
-    assert result["url"] == "https://setup.example/session"
-    assert calls["setup"][0]["customer_id"] is None
-    assert calls["setup"][0]["metadata"]["user_id"] == "u1"
+    checkout.start_modules_checkout(_FakeEntity(), _FakeUser(), ["PAYMENT_REQUEST"])
+
+    assert shown == ["pm_nominated"]
 
 
 # --- consent before a shared card is used -------------------------------------
@@ -291,7 +289,7 @@ def test_a_saved_card_alone_does_not_authorise_a_second_entity(monkeypatch):
     first, not just bill the card sitting on entity #1."""
     from billing.services import store
 
-    checkout, calls = _wire(monkeypatch, default_pm="pm_saved")
+    checkout, calls = _wire(monkeypatch, card="pm_saved")
     monkeypatch.setattr(store, "has_billing_consent", lambda eid, user_id=None: False)
     monkeypatch.setattr(
         checkout, "payment_method_display",
@@ -299,7 +297,7 @@ def test_a_saved_card_alone_does_not_authorise_a_second_entity(monkeypatch):
     )
 
     result = checkout.start_modules_checkout(
-        _FakeEntity(), _FakeUser(), "s", "c", ["PAYMENT_REQUEST"]
+        _FakeEntity(), _FakeUser(), ["PAYMENT_REQUEST"]
     )
 
     # NOTHING billed.
@@ -316,7 +314,7 @@ def test_confirming_records_consent_then_bills(monkeypatch):
     THIS entity and the charge goes through."""
     from billing.services import store
 
-    checkout, calls = _wire(monkeypatch, default_pm="pm_saved")
+    checkout, calls = _wire(monkeypatch, card="pm_saved")
     consents: list = []
     consented = {"value": False}
 
@@ -328,7 +326,7 @@ def test_confirming_records_consent_then_bills(monkeypatch):
     )
 
     created = checkout.confirm_modules_checkout(
-        _FakeEntity(), _FakeUser(), "s", "c", ["PAYMENT_REQUEST"]
+        _FakeEntity(), _FakeUser(), ["PAYMENT_REQUEST"]
     )
 
     assert consents == [("e1", "u1", "confirmed")]
@@ -341,12 +339,12 @@ def test_confirmation_amount_is_the_bundle_price_not_the_sum(monkeypatch):
     per-module plans would quote the payer more than they'd actually be charged."""
     from billing.services import store
 
-    checkout, calls = _wire(monkeypatch, default_pm="pm_saved")
+    checkout, calls = _wire(monkeypatch, card="pm_saved")
     monkeypatch.setattr(store, "has_billing_consent", lambda eid, user_id=None: False)
     monkeypatch.setattr(checkout, "payment_method_display", lambda pm: None)
 
     result = checkout.start_modules_checkout(
-        _FakeEntity(), _FakeUser(), "s", "c", ["PAYMENT_REQUEST", "PETTY_CASH"]
+        _FakeEntity(), _FakeUser(), ["PAYMENT_REQUEST", "PETTY_CASH"]
     )
 
     # 40000 (bundle), NOT 28000 + 28000.
@@ -364,10 +362,10 @@ def test_buying_is_collected_by_an_in_house_invoice(monkeypatch):
     Buying must GRANT the module, not just collect for it. Under Stripe the row was
     written afterwards by the subscription webhook; there is no webhook now, so this
     path has to do it or the customer pays and gets nothing."""
-    checkout, calls = _wire(monkeypatch, default_pm="pm_1")
+    checkout, calls = _wire(monkeypatch, card="pm_1")
 
     created = checkout.start_modules_checkout(
-        _FakeEntity(), _FakeUser(), "s", "c", ["PAYMENT_REQUEST"]
+        _FakeEntity(), _FakeUser(), ["PAYMENT_REQUEST"]
     )
 
     assert created == {"created": ["PAYMENT_REQUEST"]}
@@ -387,10 +385,10 @@ def test_buying_is_collected_by_an_in_house_invoice(monkeypatch):
 def test_adding_a_second_module_is_priced_as_an_upgrade(monkeypatch):
     """The entity already bills BILL. Adding PETTY_CASH must be priced from what it
     already bills to the bundle — the MARGINAL 120 — not at PETTY_CASH's own 280."""
-    checkout, calls = _wire(monkeypatch, default_pm="pm_saved", billed_codes={"PAYMENT_REQUEST"})
+    checkout, calls = _wire(monkeypatch, card="pm_saved", billed_codes={"PAYMENT_REQUEST"})
 
     result = checkout.start_modules_checkout(
-        _FakeEntity(), _FakeUser(), "s", "c", ["PETTY_CASH"]
+        _FakeEntity(), _FakeUser(), ["PETTY_CASH"]
     )
 
     assert result == {"created": ["PETTY_CASH"]}
@@ -402,10 +400,10 @@ def test_adding_a_second_module_is_priced_as_an_upgrade(monkeypatch):
 def test_an_uncollected_in_house_purchase_tells_the_user(monkeypatch):
     """Interactive path: the customer is waiting, so a failure must surface a message
     rather than leave them silently unsubscribed."""
-    checkout, calls = _wire(monkeypatch, default_pm="pm_1", paid=False)
+    checkout, calls = _wire(monkeypatch, card="pm_1", paid=False)
 
     with pytest.raises(checkout.CheckoutError) as exc:
-        checkout.start_modules_checkout(_FakeEntity(), _FakeUser(), "s", "c", ["PAYMENT_REQUEST"])
+        checkout.start_modules_checkout(_FakeEntity(), _FakeUser(), ["PAYMENT_REQUEST"])
 
     assert exc.value.status == 402
     assert "payment method" in str(exc.value.message)
@@ -422,9 +420,9 @@ def test_checkout_rejects_already_active_module(monkeypatch):
     )
 
     with pytest.raises(checkout.CheckoutError) as exc:
-        checkout.start_modules_checkout(_FakeEntity(), _FakeUser(), "s", "c", ["PAYMENT_REQUEST"])
+        checkout.start_modules_checkout(_FakeEntity(), _FakeUser(), ["PAYMENT_REQUEST"])
     assert exc.value.status == 409
-    assert calls["setup"] == []
+    assert calls["charged"] == []
 
 
 def test_checkout_refuses_a_past_due_module_that_stripe_called_inactive(monkeypatch):
@@ -438,7 +436,7 @@ def test_checkout_refuses_a_past_due_module_that_stripe_called_inactive(monkeypa
     )
 
     with pytest.raises(checkout.CheckoutError) as exc:
-        checkout.start_modules_checkout(_FakeEntity(), _FakeUser(), "s", "c", ["PAYMENT_REQUEST"])
+        checkout.start_modules_checkout(_FakeEntity(), _FakeUser(), ["PAYMENT_REQUEST"])
     assert exc.value.status == 409
 
 
@@ -454,67 +452,11 @@ def test_checkout_refuses_a_module_that_is_already_on_a_free_trial(monkeypatch):
     )
 
     with pytest.raises(checkout.CheckoutError) as exc:
-        checkout.start_modules_checkout(_FakeEntity(), _FakeUser(), "s", "c", ["PAYMENT_REQUEST"])
+        checkout.start_modules_checkout(_FakeEntity(), _FakeUser(), ["PAYMENT_REQUEST"])
 
     assert exc.value.status == 409
     # The message must not claim a paid subscription exists, and should make clear
     # nothing needs doing.
     assert "free trial" in str(exc.value.message)
     assert "automatically" in str(exc.value.message)
-    assert calls["setup"] == []
-
-
-# --- returning from the hosted card capture -----------------------------------
-
-
-def test_complete_setup_sets_the_default_card_then_bills(monkeypatch):
-    checkout, calls = _wire(monkeypatch)
-    session = {
-        "customer": "cus_1",
-        "setup_intent": {"payment_method": "pm_new"},
-        "metadata": {"modules_to_subscribe": "PAYMENT_REQUEST,PETTY_CASH",
-                     "entity_id": "e1", "user_id": "u1"},
-    }
-    monkeypatch.setattr(checkout, "retrieve_checkout_session", lambda sid: session)
-
-    created = checkout.complete_setup_checkout(_FakeEntity(), _FakeUser(), "cs_1")
-
-    assert created == ["PAYMENT_REQUEST", "PETTY_CASH"]
-    assert calls["default_pm"] == [("cus_1", "pm_new")]  # saved card set as default
-    # Both modules on ONE charge, at the bundle price rather than two standalone ones.
-    assert len(calls["charged"]) == 1
-    assert calls["charged"][0]["after"] == {"PAYMENT_REQUEST", "PETTY_CASH"}
-
-
-def test_complete_setup_surfaces_a_failure_to_collect(monkeypatch):
-    """The card was captured but the charge didn't clear — the user is waiting on the
-    return page, so this must say so rather than report success."""
-    checkout, calls = _wire(monkeypatch, paid=False)
-    session = {
-        "customer": "cus_1",
-        "setup_intent": {"payment_method": "pm_new"},
-        "metadata": {"modules_to_subscribe": "PAYMENT_REQUEST",
-                     "entity_id": "e1", "user_id": "u1"},
-    }
-    monkeypatch.setattr(checkout, "retrieve_checkout_session", lambda sid: session)
-
-    with pytest.raises(checkout.CheckoutError) as exc:
-        checkout.complete_setup_checkout(_FakeEntity(), _FakeUser(), "cs_1")
-
-    assert exc.value.status == 402
-    assert calls["granted"] == []
-
-
-def test_complete_setup_rejects_foreign_session(monkeypatch):
-    checkout, calls = _wire(monkeypatch)
-    monkeypatch.setattr(
-        checkout, "retrieve_checkout_session",
-        lambda sid: {"customer": "cus_OTHER", "setup_intent": {"payment_method": "pm_x"},
-                     "metadata": {}},
-    )
-
-    with pytest.raises(checkout.CheckoutError) as exc:
-        checkout.complete_setup_checkout(_FakeEntity(), _FakeUser(), "cs_1")
-
-    assert exc.value.status == 404
     assert calls["charged"] == []

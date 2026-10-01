@@ -125,8 +125,28 @@ def wallet(app, monkeypatch):
 
     monkeypatch.setattr(pm, "create_customer_for_user", _create_customer)
 
+    state["accounts"] = []
     state["module"] = pm
     return state
+
+
+@pytest.fixture
+def stubbed_accounts(wallet, monkeypatch):
+    """The billing-account step of a confirm (local rows; covered by the API tests and
+    ``test_portal_billing_accounts``), stubbed so the Stripe-facing half can be pinned on its
+    own. Records what it was asked in ``wallet["accounts"]``. NOT part of ``wallet``: other
+    modules import that fixture and need the real step."""
+    pm = wallet["module"]
+
+    def _account(user_id, payment_method, group_id, email, company):
+        wallet["accounts"].append((str(user_id), payment_method, group_id, email, company))
+        return SimpleNamespace(
+            id=group_id or "g_new", billing_email=email, billing_company=company,
+            stripe_payment_method_id=payment_method,
+        )
+
+    monkeypatch.setattr(pm, "_account_for_confirm", _account)
+    return wallet
 
 
 # --- Reading -----------------------------------------------------------------
@@ -530,7 +550,7 @@ def test_an_unconfigured_environment_says_so_rather_than_rendering_a_dead_form(
     assert excinfo.value.status == 503
 
 
-def test_a_setup_intent_stamped_for_someone_else_is_not_adopted(app, wallet, monkeypatch):
+def test_a_setup_intent_stamped_for_someone_else_is_not_adopted(app, wallet, stubbed_accounts, monkeypatch):
     """A customerless SetupIntent has nothing else tying it to anybody, which is exactly
     why the stamp is there."""
     from billing.services.payment_methods import PaymentMethodError
@@ -541,13 +561,13 @@ def test_a_setup_intent_stamped_for_someone_else_is_not_adopted(app, wallet, mon
     )
 
     with pytest.raises(PaymentMethodError) as excinfo:
-        pm.confirm_setup("u1", "seti_1")
+        pm.confirm_setup("u1", "seti_1", billing_group_id="g1")
 
     assert excinfo.value.status == 404
     assert wallet["attached"] == []
 
 
-def test_a_card_that_was_not_confirmed_creates_nothing(app, wallet, monkeypatch):
+def test_a_card_that_was_not_confirmed_creates_nothing(app, wallet, stubbed_accounts, monkeypatch):
     """Declined, abandoned, or still needing authentication — no customer, no attach."""
     from billing.services.payment_methods import PaymentMethodError
 
@@ -559,17 +579,16 @@ def test_a_card_that_was_not_confirmed_creates_nothing(app, wallet, monkeypatch)
     )
 
     with pytest.raises(PaymentMethodError) as excinfo:
-        pm.confirm_setup("u1", "seti_1")
+        pm.confirm_setup("u1", "seti_1", billing_group_id="g1")
 
     assert excinfo.value.status == 409
     assert wallet["created_customers"] == []
     assert wallet["attached"] == []
 
 
-def test_the_first_card_opens_the_billing_account(app, wallet, monkeypatch):
-    """The hosted-portal route this replaces answered 409 here and sent the payer off to
-    subscribe an entity first. A SetupIntent needs no customer, so the first card can be
-    saved from the billing page — and the customer is made only now, once Stripe has said
+def test_the_first_card_opens_the_billing_account(app, wallet, stubbed_accounts, monkeypatch):
+    """A SetupIntent needs no customer, so the first card can be saved from the billing
+    page (into a billing account) — and the customer is made only now, once Stripe has said
     the card is real."""
     pm = wallet["module"]
     wallet["customer_id"] = None
@@ -582,7 +601,7 @@ def test_the_first_card_opens_the_billing_account(app, wallet, monkeypatch):
     monkeypatch.setattr(checkout, "_payer_identity", lambda _u: {"name": "A Payer"})
     monkeypatch.setattr(checkout, "_seed_user_customer_mapping", lambda *_a: None)
 
-    pm.confirm_setup("u1", "seti_1")
+    pm.confirm_setup("u1", "seti_1", billing_group_id="g1")
 
     assert wallet["created_customers"] == [("u1", {"name": "A Payer"})]
     assert wallet["attached"] == [("pm_new", "cus_new")]
@@ -591,7 +610,7 @@ def test_the_first_card_opens_the_billing_account(app, wallet, monkeypatch):
     assert wallet["default"] == "pm_new"
 
 
-def test_an_existing_customer_wins_over_the_one_the_intent_named(app, wallet, monkeypatch):
+def test_an_existing_customer_wins_over_the_one_the_intent_named(app, wallet, stubbed_accounts, monkeypatch):
     """Two customers for one payer make ``find_customer_by_user`` ambiguous, which is
     worse than the duplicate itself."""
     pm = wallet["module"]
@@ -602,13 +621,13 @@ def test_an_existing_customer_wins_over_the_one_the_intent_named(app, wallet, mo
 
     monkeypatch.setattr(checkout, "_resolve_customer_id", lambda _u: "cus_1")
 
-    pm.confirm_setup("u1", "seti_1")
+    pm.confirm_setup("u1", "seti_1", billing_group_id="g1")
 
     assert wallet["attached"] == [("pm_new", "cus_1")]
     assert wallet["created_customers"] == []
 
 
-def test_a_further_card_does_not_steal_the_default_unless_asked(app, wallet, monkeypatch):
+def test_a_further_card_does_not_steal_the_default_unless_asked(app, wallet, stubbed_accounts, monkeypatch):
     pm = wallet["module"]
     wallet["default"] = "pm_1"
     wallet["methods"] = [_card("pm_1")]
@@ -617,11 +636,115 @@ def test_a_further_card_does_not_steal_the_default_unless_asked(app, wallet, mon
 
     monkeypatch.setattr(checkout, "_resolve_customer_id", lambda _u: "cus_1")
 
-    pm.confirm_setup("u1", "seti_1")
+    pm.confirm_setup("u1", "seti_1", billing_group_id="g1")
     assert wallet["default"] == "pm_1"
 
-    pm.confirm_setup("u1", "seti_1", make_default=True)
+    pm.confirm_setup("u1", "seti_1", make_default=True, billing_group_id="g1")
     assert wallet["default"] == "pm_new"
+
+
+# --- A card is only ever added through a billing account (2026-10-01) ---------
+
+
+def _no_stripe_reads(monkeypatch, pm):
+    def _boom(*_a, **_k):
+        raise AssertionError("a confirm naming no account must not reach Stripe")
+
+    monkeypatch.setattr(pm, "retrieve_setup_intent", _boom)
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {},
+        {"billing_email": "a@b.co"},
+        {"billing_company": "Acme"},
+        {"billing_email": "   ", "billing_company": "Acme"},
+        {"billing_group_id": "  "},
+    ],
+    ids=["nothing", "email only", "company only", "blank email", "blank group"],
+)
+def test_a_confirm_naming_no_account_is_refused_before_stripe(app, wallet, stubbed_accounts, monkeypatch, fields):
+    """THE RULE: no card saved unattached to a billing account. Refused 422 before the
+    SetupIntent is even read — so nothing is attached, no customer is created, no default
+    is set and no account is opened."""
+    from billing.services.payment_methods import ACCOUNT_REQUIRED, PaymentMethodError
+
+    pm = wallet["module"]
+    wallet["customer_id"] = None
+    _no_stripe_reads(monkeypatch, pm)
+
+    with pytest.raises(PaymentMethodError) as excinfo:
+        pm.confirm_setup("u1", "seti_1", **fields)
+
+    assert excinfo.value.status == 422
+    assert excinfo.value.message == ACCOUNT_REQUIRED == "Choose a billing account for this card."
+    assert wallet["attached"] == []
+    assert wallet["created_customers"] == []
+    assert wallet["default"] is None
+    assert wallet["accounts"] == []
+
+
+def test_the_routes_front_half_refuses_an_empty_confirm_the_same_way(app, wallet, stubbed_accounts, monkeypatch):
+    """``confirm_into_account`` (both routes) answers the same sentence, before Stripe."""
+    from billing.services.payment_methods import ACCOUNT_REQUIRED, PaymentMethodError
+
+    pm = wallet["module"]
+    _no_stripe_reads(monkeypatch, pm)
+
+    with pytest.raises(PaymentMethodError) as excinfo:
+        pm.confirm_into_account("u1", "seti_1")
+
+    assert (excinfo.value.status, excinfo.value.message) == (422, ACCOUNT_REQUIRED)
+    assert wallet["attached"] == [] and wallet["accounts"] == []
+
+
+def test_a_half_filled_new_account_is_refused_in_the_forms_words(app, wallet, stubbed_accounts, monkeypatch):
+    """An email with no company is an attempt at "New billing account": the form's own
+    field sentence, 422, still before Stripe."""
+    from billing.services.billing_accounts import COMPANY_REQUIRED
+    from billing.services.payment_methods import PaymentMethodError
+
+    pm = wallet["module"]
+    _no_stripe_reads(monkeypatch, pm)
+
+    with pytest.raises(PaymentMethodError) as excinfo:
+        pm.confirm_into_account("u1", "seti_1", billing_email="a@b.co")
+
+    assert (excinfo.value.status, excinfo.value.message) == (422, COMPANY_REQUIRED)
+    assert wallet["attached"] == []
+
+
+def test_someone_elses_account_is_refused_before_stripe(app, wallet, stubbed_accounts, monkeypatch):
+    from billing.services.payment_methods import PaymentMethodError
+
+    pm = wallet["module"]
+    _no_stripe_reads(monkeypatch, pm)
+    monkeypatch.setattr(
+        pm.sub_store, "billing_group",
+        lambda gid: SimpleNamespace(id=gid, payer_user_id="someone_else"),
+    )
+
+    with pytest.raises(PaymentMethodError) as excinfo:
+        pm.confirm_into_account("u1", "seti_1", billing_group_id="g_theirs")
+
+    assert excinfo.value.status == 404
+    assert wallet["attached"] == []
+
+
+def test_a_new_account_with_both_fields_opens_one(app, wallet, stubbed_accounts, monkeypatch):
+    pm = wallet["module"]
+    monkeypatch.setattr(pm, "retrieve_setup_intent", lambda _i: _intent(customer="cus_1"))
+    import billing.services.checkout as checkout
+
+    monkeypatch.setattr(checkout, "_resolve_customer_id", lambda _u: "cus_1")
+
+    result = pm.confirm_into_account(
+        "u1", "seti_1", billing_email=" pay@acme.co ", billing_company=" Acme "
+    )
+
+    assert wallet["accounts"] == [("u1", "pm_new", None, "pay@acme.co", "Acme")]
+    assert result["account"]["id"] == "g_new"
 
 
 # --- The endpoints -----------------------------------------------------------

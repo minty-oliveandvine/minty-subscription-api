@@ -110,12 +110,6 @@ FLASK_PROXY_TIMEOUT = int(os.environ.get("FLASK_PROXY_TIMEOUT", "20"))
 # ---------------------------------------------------------------------------
 MINTY_WEB_URL = os.environ.get("MINTY_WEB_URL", "http://localhost:3002").rstrip("/")
 PAYMENTS_WEB_URL = os.environ.get("PAYMENTS_WEB_URL", "http://localhost:3000").rstrip("/")
-# The onboarding wizard: NOT a CORS origin (onboarding-backend proxies the wizard's money routes
-# here server-side), but where Stripe's setup Checkout returns the browser to
-# (``/api/onboarding/payment-method/setup``). Flask's ``ONBOARDING_APP_URL``, under the name
-# Part 3's link module settles on.
-ONBOARDING_WEB_URL = os.environ.get("ONBOARDING_WEB_URL", "http://localhost:3001").rstrip("/")
-
 CORS_ALLOWED_ORIGINS = [
     origin.strip()
     for origin in os.environ.get(

@@ -1377,10 +1377,9 @@ def _set_card(run: dict, token: str) -> str:
     stopped happening. A card that should decline goes under a group (``recard``) or has
     a company moved onto it (``nominate``).
 
-    It still matters to a replay for exactly that reason — the consent paths with no
-    picker (``checkout._ensure_nominated``, and a transfer accept) nominate the default at
-    the moment they need a card, so this is what a company seeded by one of those ends up
-    on.
+    It still matters to a replay for exactly that reason — ``_pick_account``, which plays
+    the Billing Accounts picker for a scripted purchase or consent, picks the account
+    charging this card, so this is what a company seeded by one of those ends up on.
     """
     from billing.services import store
     from billing.services.stripe_client import get_stripe
@@ -1658,27 +1657,46 @@ def _werkzeug_pbkdf2(password: str, iterations: int = 600000) -> str:
 
 # --- the replay -------------------------------------------------------------
 
+def _pick_account(entity, run: dict) -> None:
+    """Play the Billing Accounts picker: put a company on no account onto the one charging the
+    payer's main card. A company already on an account stays there.
+
+    The app no longer does this for anybody - authorising billing or buying for a company on
+    no account is refused 402 so the screen can ask - so a script, which has no screen, says
+    the payer's answer itself. Raises when there is nothing to pick, rather than letting the
+    run go on to a purchase that is refused or a trial that silently expires.
+    """
+    from billing.services import store
+    from billing.services.stripe_client import customer_default_payment_method
+
+    if store.billing_group_for_entity(entity.id, run["user_id"]) is not None:
+        return
+    customer_id = store.customer_id_for_user(run["user_id"])
+    card = customer_default_payment_method(customer_id) if customer_id else None
+    if not card:
+        raise RuntimeError("payer has no card to bill this company on — run --setup")
+    store.nominate_card_for_entity(entity.id, run["user_id"], card, "chosen")
+
+
 def _buy(run: dict, entity, user, code: str) -> list[str]:
     """Subscribe a module the way the browser would, minus the browser.
 
-    `start_modules_checkout` resolves the card through `_customer_id_for_entity`, which is
-    entity -> PAYER -> customer. A brand-new entity has no module row, so no payer, so no
-    card — and it correctly returns a hosted setup-Checkout URL, because the real first
-    purchase on a new company goes through Stripe's page and that page is what links the
-    entity to the payer.
+    `start_modules_checkout` decides on the card NOMINATED for the company, and a brand-new
+    entity has none — in the app the browser nominates one (a billing account's card)
+    before the purchase, and the engine refuses with 402 until it has.
 
-    A script cannot click that page, so it does what `complete_setup_checkout` does on the
-    way back: hand the known customer and card to `_create_paid_subscriptions`. Nothing
-    guarding money is skipped — consent is recorded by the caller, the codes still go
-    through `_resolve_checkout_plans`, and the charge runs the identical path. What is
-    skipped is the card CAPTURE, and the card is already on file.
+    A script has no browser, so it hands the known customer and card to
+    `_create_paid_subscriptions` directly. Nothing guarding money is skipped — consent is
+    recorded by the caller, the codes still go through `_resolve_checkout_plans`, and the
+    charge runs the identical path. What is skipped is the card CAPTURE, and the card is
+    already on file.
 
     THE NOMINATION IS NOT SKIPPED EITHER, and it cannot be. Nothing charges a company
     with no card nominated for it, so a replay that records consent by hand — as this one
     does, to avoid the browser — must also do what the consent paths do and put the
-    company on a card. ``_ensure_nominated`` is that step in the app; calling it here is
-    the difference between a replay that bills and one where every purchase answers
-    "check your payment method".
+    company on a card. In the app that is the Billing Accounts picker; ``_pick_account``
+    plays it here, and is the difference between a replay that bills and one where every
+    purchase answers "Choose a card before subscribing."
     """
     from billing.services import checkout as ck
     from billing.services import store
@@ -1688,7 +1706,7 @@ def _buy(run: dict, entity, user, code: str) -> list[str]:
     payment_method = customer_default_payment_method(customer_id)
     if not payment_method:
         raise RuntimeError("payer has no default card — run --setup")
-    ck._ensure_nominated(entity.id, run["user_id"])
+    _pick_account(entity, run)
     plans = ck._resolve_checkout_plans(entity.id, [code])
     return ck._create_paid_subscriptions(
         entity, user, customer_id, plans, payment_method, uuid.uuid4().hex
@@ -1832,7 +1850,6 @@ def _daily_jobs(run: dict, today: datetime, log: list[str]) -> None:
 
 
 def replay(run: dict, dry: bool = False) -> None:
-    from billing.services import checkout as _checkout
     from billing.services import store
     from billing.services.checkout import cancel_module, reactivate_module, start_module_trials
     from billing.services.entity_modules import set_entity_module
@@ -1952,14 +1969,10 @@ def replay(run: dict, dry: bool = False) -> None:
                         # it will be billed to. A trial that converts with consent but no
                         # nomination expires instead — there is no account default to
                         # fall back on at the charge.
+                        # The account first, as the app asks for it: authorising billing
+                        # for a company on no account is refused.
+                        _pick_account(entity, run)
                         store.record_billing_consent(entity.id, run["user_id"], "confirmed")
-                        _checkout._ensure_nominated(entity.id, run["user_id"])
-                        # ``_ensure_nominated`` swallows its own failures, and the card
-                        # reads "confirmed" without a nomination (it judges by the
-                        # account's default card) — so a consent that nominated nothing
-                        # would look right and then EXPIRE at trial end instead of converting.
-                        if store.billing_group_for_entity(entity.id, run["user_id"]) is None:
-                            raise RuntimeError("billing consent recorded but no card nominated")
                         log.append(f"    consent billing authorised for {name[:32]}")
                     elif kind == "card":
                         pm = _set_card(run, code)

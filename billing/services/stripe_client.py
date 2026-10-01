@@ -5,9 +5,13 @@ importing ``stripe`` directly, so the API key is always applied from settings.
 THIS IS THE ONLY MODULE IN THE SERVICE THAT IMPORTS ``stripe`` (cross-cutting rule 9;
 ``billing/tests/test_models_guard.py`` pins it).
 
-This module also holds the thin Stripe helpers the billing layer builds on --
-customers, saved cards, setup intents and checkout sessions -- so all Stripe
-access goes through one place.
+This module also holds the thin Stripe helpers the billing layer builds on, so all
+Stripe access goes through one place. Stripe is used for exactly four things:
+Customer, PaymentMethod, SetupIntent (the in-app card form) and Invoice /
+InvoiceItem. Nothing here opens a Stripe-HOSTED page: the setup-mode Checkout and
+Billing Portal helpers were deleted on 2026-10-01 (the user's rule: a card is only
+ever added through a billing account, in-app), so no route can hand the browser to
+Stripe.
 
 The Stripe-SUBSCRIPTION helpers that used to sit here went with the move to
 in-house billing: ``list_products`` / ``list_active_recurring_prices`` (the
@@ -63,10 +67,10 @@ def _default_pm_cache() -> dict | None:
 def forget_default_payment_method(customer_id: str | None) -> None:
     """Drop the memoized answer for one customer, after their card on file changed.
 
-    Without this the memo is a correctness bug, not just a stale read: paid checkout
-    captures a card and then asks whether one is on file to decide if it may subscribe
-    directly (``checkout._has_payment_method``). Answering from a memo taken BEFORE the
-    capture would send the payer back to capture a card they just saved.
+    Without this the memo is a correctness bug, not just a stale read: the card form's
+    confirm sets a default and then reads it back (``payment_methods.confirm_setup``).
+    Answering from a memo taken BEFORE the write would report the card just saved as
+    missing.
     """
     cache = _default_pm_cache()
     if cache is not None and customer_id:
@@ -174,16 +178,13 @@ def _record_server_time(stripe_result) -> None:
 
 
 # NOTE: no customer is created on any path that MIGHT save a card, deliberately. A
-# customer must not exist until a card has actually been saved, so
-# ``create_setup_checkout_session`` hands Stripe ``customer_creation="always"`` and lets
-# it create one at session confirmation. ``checkout._adopt_session_customer`` then stamps
-# and maps it. Creating one up front reintroduces an orphan customer for every abandoned
-# checkout.
+# customer must not exist until a card has actually been saved — creating one up front
+# leaves an orphan behind every abandoned card form.
 #
-# ``create_customer_for_user`` below is the one direct create, and it does not weaken
-# that: it is called from the in-app card form's CONFIRM step, i.e. after Stripe has
-# already told us a payment method exists. Card first, customer second — the invariant is
-# about ordering, not about which API call makes the customer.
+# ``create_customer_for_user`` below is the one create, and it does not weaken that: it
+# is called from the in-app card form's CONFIRM step, i.e. after Stripe has already told
+# us a payment method exists. Card first, customer second — the invariant is about
+# ordering, not about which API call makes the customer.
 
 
 def find_customer_by_user(user_id: str):
@@ -216,110 +217,25 @@ def retrieve_customer(customer_id: str):
     return customer
 
 
-def create_setup_checkout_session(
-    customer_id: str | None,
-    success_url: str,
-    cancel_url: str,
-    currency: str,
-    metadata: dict[str, str] | None = None,
-):
-    """Create a Checkout Session in ``setup`` mode to save a card (no charge).
-
-    Used to capture a payment method before creating per-module paid subscriptions
-    server-side. Setup mode requires a ``currency`` (the modules' billing currency).
-    ``metadata`` (carrying the entity, payer and any module codes) rides on the session
-    so the completion handler knows what to create; the saved card is set as the
-    customer's default on completion.
-
-    ``customer_id`` is None for a payer who has no Stripe customer yet. The session is
-    then opened WITHOUT a customer and with ``customer_creation="always"``, so Stripe
-    creates the Customer during session CONFIRMATION — i.e. only once the card is
-    actually saved. Abandoning the session leaves no Customer behind. That is a
-    deliberate invariant: NO CUSTOMER IS EVER CREATED WITHOUT A CARD. Do not "fix" this
-    by resolving a customer up front — that reintroduces orphan customers for every
-    abandoned checkout.
-
-    It must be ``always``, not ``if_required``: with ``if_required`` the session can end
-    up saving neither the customer nor the payment method, which defeats setup mode.
-
-    The customer Stripe creates carries none of our bookkeeping (no ``metadata.user_id``,
-    and it bypasses the ``user-customer-{user_id}`` idempotency key). The completion
-    handler adopts it — see ``checkout._adopt_session_customer``.
-    """
-    payload: dict[str, object] = {
-        "mode": "setup",
-        "currency": (currency or "").lower(),
-        "success_url": success_url,
-        "cancel_url": cancel_url,
-        "metadata": metadata or {},
-    }
-    if customer_id:
-        payload["customer"] = customer_id
-    else:
-        payload["customer_creation"] = "always"
-    return get_stripe().checkout.Session.create(**payload)
-
-
-def retrieve_checkout_session(session_id: str):
-    """Retrieve a Checkout Session with its ``setup_intent`` expanded (so the saved
-    payment method is readable)."""
-    return get_stripe().checkout.Session.retrieve(
-        session_id, expand=["setup_intent"]
-    )
-
-
 def set_customer_default_payment_method(customer_id: str, payment_method_id: str):
     """Make ``payment_method_id`` the customer's default for invoices."""
     result = get_stripe().Customer.modify(
         customer_id,
         invoice_settings={"default_payment_method": payment_method_id},
     )
-    # The memo below now holds a stale "no card" for this customer, and the very next
-    # thing checkout does is ask whether one is on file.
+    # The memo below now holds a stale answer for this customer, and the caller usually
+    # reads it straight back.
     forget_default_payment_method(customer_id)
     return result
-
-
-def set_customer_identity(
-    customer_id: str,
-    *,
-    metadata: dict[str, str] | None = None,
-    name: str | None = None,
-    email: str | None = None,
-    description: str | None = None,
-):
-    """Write who a customer IS: the ``user_id`` stamp plus the payer's display fields.
-
-    One ``Customer.modify`` rather than several, so the identity of a customer Stripe
-    just created during a setup Checkout lands atomically. ``metadata`` is the important
-    half — it's what ``find_customer_by_user`` recovers from, and without it the customer
-    is invisible to every lookup we have. (Stripe MERGES metadata keys; it doesn't
-    replace the object.)
-
-    Only non-None fields are sent, so a caller can leave Stripe's Checkout-collected
-    value in place for anything it can't improve on (e.g. a payer whose local ``email``
-    is null).
-    """
-    payload: dict[str, object] = {}
-    if metadata:
-        payload["metadata"] = metadata
-    if name:
-        payload["name"] = name
-    if email:
-        payload["email"] = email
-    if description:
-        payload["description"] = description
-    if not payload:
-        return None
-    return get_stripe().Customer.modify(customer_id, **payload)
 
 
 def attach_payment_method(payment_method_id: str, customer_id: str):
     """Attach a PaymentMethod to a customer.
 
-    Only needed on the duplicate-customer reconciliation path: a card captured against
-    a Stripe-created customer has to be moved onto the payer's pre-existing customer
-    before it can be made the default there (see ``checkout._adopt_session_customer``).
+    Called from the in-app card form's confirm step (``payment_methods.confirm_setup``):
+    a SetupIntent opened before the payer had a customer cannot have attached the card to
+    the one made at confirm. Attaching an already-attached method to the same customer is
+    a no-op at Stripe.
     """
     return get_stripe().PaymentMethod.attach(payment_method_id, customer=customer_id)
 
@@ -327,8 +243,8 @@ def attach_payment_method(payment_method_id: str, customer_id: str):
 def customer_default_payment_method(customer_id: str | None) -> str | None:
     """The customer's default invoice payment method id, or None.
 
-    Used to decide whether paid checkout can create subscriptions directly (a card
-    is on file) or must first capture one via a setup-mode Checkout.
+    The account's MAIN card: what card pickers offer first. It is never what a company is
+    charged on — that is the card nominated for it (``store.card_for_entity``).
 
     MEMOIZED FOR THE REQUEST. The Stripe round trip behind this was on the render path of
     every module-settings page — and ``get_module_cards`` is not the only caller in a
@@ -595,91 +511,6 @@ def detach_payment_method(payment_method_id: str):
     a shelf full of cards and nothing nominated to charge.
     """
     return get_stripe().PaymentMethod.detach(payment_method_id)
-
-
-def create_billing_portal_session(
-    customer_id: str,
-    return_url: str,
-    configuration: str,
-    flow_data: dict | None = None,
-):
-    """Create a Stripe Customer Portal session.
-
-    ``configuration`` is REQUIRED, and deliberately not optional: a session without one
-    silently uses the account default, where Stripe's own cancel button is enabled — and
-    cancelling there bypasses everything the in-app flow guarantees (no extension queued,
-    no ``app_access_until``, no audit row), then the webhook revokes access on the spot,
-    stripping the 30 days the customer paid for. Cancelling is IN-APP ONLY.
-
-    Callers should resolve it via ``checkout._billing_portal_configuration``, which fails
-    closed rather than falling back to the default. A route that opened the default portal
-    existed and was deleted for exactly this reason.
-
-    Pass ``flow_data`` to deep-link into a specific flow with an ``after_completion``
-    redirect — but note the flow only decides where the session OPENS; ``configuration``
-    is what bounds where the customer can go from there.
-    """
-    if not configuration:
-        raise ValueError(
-            "create_billing_portal_session requires a configuration — without one "
-            "Stripe opens the default portal, which lets the customer cancel."
-        )
-    payload: dict[str, object] = {
-        "customer": customer_id,
-        "return_url": return_url,
-        "configuration": configuration,
-    }
-    if flow_data:
-        payload["flow_data"] = flow_data
-    return get_stripe().billing_portal.Session.create(**payload)
-
-
-# Tag for the portal configuration used to VIEW billing (invoices + payment method)
-# without exposing Stripe's own cancellation flow (cancellation must go through the
-# in-app prorated flow). Reused across sessions so we don't recreate it each time.
-BILLING_MANAGEMENT_CONFIG_ROLE = "minty_billing_management"
-_billing_management_config_id: str | None = None
-
-
-def get_or_create_billing_management_configuration() -> str | None:
-    """Return the id of the portal configuration that shows invoice history and lets
-    the customer update their payment method, but does NOT allow cancelling or
-    changing subscriptions. Finds the tagged config (by metadata) or creates it.
-    Returns None if it can't be created (caller then falls back to the default
-    portal). Memoized per process.
-    """
-    global _billing_management_config_id
-    if _billing_management_config_id:
-        return _billing_management_config_id
-
-    s = get_stripe()
-    try:
-        for cfg in s.billing_portal.Configuration.list(limit=100).auto_paging_iter():
-            meta = cfg.get("metadata") or {}
-            if meta.get("minty_role") == BILLING_MANAGEMENT_CONFIG_ROLE and cfg.get("active", True):
-                _billing_management_config_id = cfg["id"]
-                return _billing_management_config_id
-
-        cfg = s.billing_portal.Configuration.create(
-            features={
-                "invoice_history": {"enabled": True},
-                "payment_method_update": {"enabled": True},
-                "customer_update": {"enabled": False},
-                "subscription_cancel": {"enabled": False},
-                "subscription_update": {"enabled": False},
-            },
-            metadata={"minty_role": BILLING_MANAGEMENT_CONFIG_ROLE},
-        )
-        _billing_management_config_id = cfg["id"]
-        return _billing_management_config_id
-    except Exception:
-        from billing.services._log import logger
-
-        logger.exception(
-            "stripe: could not get/create billing-management portal configuration; "
-            "falling back to the default portal"
-        )
-        return None
 
 
 # NOTE: there are deliberately no invoice-annotation helpers here.

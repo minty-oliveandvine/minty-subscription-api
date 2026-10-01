@@ -1,6 +1,6 @@
 """The wizard's money routes, and the trial start.
 
-The nine ``/api/onboarding/{payment-method*,billing/*}`` routes of Flask's
+Seven of the nine ``/api/onboarding/{payment-method*,billing/*}`` routes of Flask's
 ``entity/routes/create.py`` (lines 757-1247), which onboarding-backend proxies here from
 Part 2 step 5 (``core/billing_client.py`` there, forwarding the caller's bearer). Plus one
 new route, ``POST /trials/start {entity_id} -> {trial_end}``: onboarding-backend's native
@@ -13,14 +13,16 @@ each route reads the company from the query or the body and checks the caller's 
 it (``_entity_for_member``: 400 without an id, 403 for a stranger, 404 for no such company) -
 Flask's rule, kept. The four billing-sheet card routes act on the PAYER, not on a company (a
 card belongs to the person), so they check nothing about an entity. Bodies, answers and
-status codes are Flask's; the one difference is where Stripe's setup Checkout returns the
-browser: the onboarding web app's URL is ``settings.ONBOARDING_WEB_URL`` here, Flask's
-``ONBOARDING_APP_URL`` (the name Part 3's link module settles on).
+status codes are Flask's.
+
+Flask's other two, ``POST /payment-method/setup`` and ``/payment-method/complete`` (a
+Stripe-hosted setup-mode Checkout), were DELETED on 2026-10-01: a card is only ever added
+through a billing account, in-app (``/billing/payment-methods/setup-intent`` + ``confirm``,
+which refuses a confirm naming no account).
 """
 
 from __future__ import annotations
 
-from django.conf import settings
 from ninja import Router
 
 from billing.api._json import body, error, respond, user_id
@@ -30,11 +32,9 @@ from shared_models.models import Entity, UserEntity
 
 onboarding_router = Router()
 
-#: (method, path) - the contract, also walked by billing/tests/test_dark.py.
+#: (method, path) - the contract, pinned by billing/tests/test_contract.py.
 ROUTES = (
     ("GET", "/payment-method"),
-    ("POST", "/payment-method/setup"),
-    ("POST", "/payment-method/complete"),
     ("GET", "/billing/payment-methods"),
     ("POST", "/billing/payment-methods/setup-intent"),
     ("POST", "/billing/payment-methods/confirm"),
@@ -44,11 +44,6 @@ ROUTES = (
     ("POST", "/billing/authorize"),
     ("POST", "/trials/start"),  # new in Part 2
 )
-
-
-def onboarding_web_url() -> str:
-    """Where the wizard lives - where a setup Checkout sends the browser back."""
-    return settings.ONBOARDING_WEB_URL.rstrip("/")
 
 
 class _Refused(Exception):
@@ -78,7 +73,7 @@ def _entity_for_member(request, entity_id: str) -> Entity:
     return entity
 
 
-# --- Step 2's card capture (hosted Checkout) -------------------------------------------------
+# --- Step 2's billing status -----------------------------------------------------------------
 
 
 @onboarding_router.get("/payment-method", summary="Whether this company can be billed")
@@ -126,59 +121,6 @@ def payment_method_status(request):
     )
 
 
-@onboarding_router.post("/payment-method/setup", summary="Open a setup-mode Checkout to save a card")
-def payment_method_setup(request):
-    """Body ``{entity_id}`` -> ``{"url"}``. No charge, no subscription: onboarding starts the
-    trials at finalize. Stripe returns to the wizard with ``?pm_session_id=``, which it hands
-    to ``/payment-method/complete``."""
-    from billing.services.checkout import CheckoutError, start_payment_method_setup
-
-    payload = body(request)
-    try:
-        entity = _entity_for_member(request, payload.get("entity_id"))
-    except _Refused as refused:
-        return refused.response
-
-    app_url = onboarding_web_url()
-    try:
-        result = start_payment_method_setup(
-            entity,
-            request.auth_user,
-            success_url=f"{app_url}/?pm_session_id={{CHECKOUT_SESSION_ID}}",
-            cancel_url=f"{app_url}/?pm_cancelled=1",
-        )
-    except CheckoutError as exc:
-        return error(exc.message, exc.status)
-    except Exception:
-        logger.exception("onboarding payment-method: could not open setup checkout for {}", entity.id)
-        return error("Could not open the payment form. Please try again.", 503)
-    return respond(result)
-
-
-@onboarding_router.post("/payment-method/complete", summary="Save the card a setup Checkout captured")
-def payment_method_complete(request):
-    """Body ``{entity_id, session_id}`` -> ``{"has_payment_method": true}``. Idempotent, so a
-    refresh of the return URL is harmless."""
-    from billing.services.checkout import CheckoutError, complete_payment_method_setup
-
-    payload = body(request)
-    try:
-        entity = _entity_for_member(request, payload.get("entity_id"))
-    except _Refused as refused:
-        return refused.response
-    session_id = str(payload.get("session_id") or "").strip()
-    if not session_id:
-        return error("session_id is required", 400)
-    try:
-        complete_payment_method_setup(entity, session_id)
-    except CheckoutError as exc:
-        return error(exc.message, exc.status)
-    except Exception:
-        logger.exception("onboarding payment-method: could not save card for {}", entity.id)
-        return error("Could not save your card. Please try again.", 503)
-    return respond({"has_payment_method": True})
-
-
 # --- The billing sheet: the payer's cards and accounts ---------------------------------------
 #
 # Deliberate MIRRORS of the payer portal's ``/api/me/billing/payment-methods*`` (same service
@@ -213,28 +155,25 @@ def billing_setup_intent(request):
 def billing_confirm(request):
     """Body ``{setup_intent, make_default?, billing_group_id?, billing_email?,
     billing_company?}``. Saving a card AUTHORISES NOTHING - that is ``/billing/authorize``.
-    The three account fields are optional: a group id puts the card on an account the payer
-    already has (the service checks it is theirs), an email or company opens a new one.
-    The email is held to the API's rule (``billing_accounts.validate_identity``) BEFORE the
-    service runs: the service reaches it only after the card is attached at Stripe."""
+    A BILLING ACCOUNT IS REQUIRED: a group id puts the card on an account the payer already
+    has (checked to be theirs), a company AND an email open a new one; naming neither is 422
+    "Choose a billing account for this card." The payer portal's route and this one share
+    ``payment_methods.confirm_into_account``, which refuses before anything is attached at
+    Stripe."""
     from billing.services import payment_methods
-    from billing.services.billing_accounts import validate_identity
 
     payload = body(request)
-    setup_intent = str(payload.get("setup_intent") or "").strip()
-    make_default = bool(payload.get("make_default"))
-    billing_group_id = str(payload.get("billing_group_id") or "").strip() or None
-
-    def _confirm(uid):
-        email, _ = validate_identity(payload.get("billing_email"), None, require_both=False)
-        return payment_methods.confirm_setup(
-            uid, setup_intent, make_default=make_default,
-            billing_group_id=billing_group_id,
-            billing_email=email,
+    return _billing_call(
+        request,
+        lambda uid: payment_methods.confirm_into_account(
+            uid,
+            str(payload.get("setup_intent") or "").strip(),
+            make_default=bool(payload.get("make_default")),
+            billing_group_id=payload.get("billing_group_id"),
+            billing_email=payload.get("billing_email"),
             billing_company=payload.get("billing_company"),
-        )
-
-    return _billing_call(request, _confirm)
+        ),
+    )
 
 
 @onboarding_router.post("/billing/payment-methods/default", summary="Make one card the account's main one")
@@ -291,7 +230,10 @@ def billing_authorize(request):
     nothing: the trial runs its term, and this is the difference between "converts" and
     "expires" at the end of it. ``payment_method`` is nominated BEFORE consent is recorded
     (``establish_payer=True`` - the one caller that does, because during the wizard no
-    company has a payer yet and this request is what establishes one). Idempotent."""
+    company has a payer yet and this request is what establishes one). A company on no billing
+    account with no ``payment_method`` is refused 402 "Choose a billing account for this
+    company." and nothing is recorded - there is no fallback to the customer's default card.
+    Idempotent."""
     from billing.services import payment_methods
     from billing.services.checkout import CheckoutError, authorize_entity_billing
 

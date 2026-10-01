@@ -35,21 +35,14 @@ from billing.services.constants import (
     PHASE_TRIAL,
 )
 
-# Stripe is the payment RAIL, not the biller: what survives here is card capture,
-# customer identity and the billing portal. Nothing that creates or edits a Stripe
-# SUBSCRIPTION is imported any more, and those functions no longer exist — they were
-# deleted from stripe_client once this module retired their last caller.
+# Stripe is the payment RAIL, not the biller. Nothing that creates or edits a Stripe
+# SUBSCRIPTION is imported any more, and nothing here opens a Stripe-hosted page: a card
+# is only ever added in-app, through a billing account (``payment_methods.confirm_setup``),
+# and the setup-mode Checkout and Billing Portal paths were deleted on 2026-10-01.
 from billing.services.stripe_client import (
-    attach_payment_method,
-    create_billing_portal_session,
-    create_setup_checkout_session,
     customer_default_payment_method,
     find_customer_by_user,
-    get_or_create_billing_management_configuration,
     payment_method_display,
-    retrieve_checkout_session,
-    set_customer_default_payment_method,
-    set_customer_identity,
 )
 
 # Post-cancellation access window for an active paid subscription, in days.
@@ -74,6 +67,10 @@ TRIAL_PERIOD_DAYS = 30
 # against the code. Named because a bare 200 in a billing path reads as a magic number.
 HTTP_OK = 200
 
+#: The refusal when billing is authorised for a company on no billing account. The web
+#: matches it to open the Billing Accounts picker.
+NO_ACCOUNT_FOR_COMPANY = "Choose a billing account for this company."
+
 
 class CheckoutError(Exception):
     """Raised with a user-safe message when checkout can't proceed."""
@@ -89,31 +86,6 @@ class ChargeDeferred(Exception):
     own key - rather than one the card refused. Nothing is known about whether the customer
     can pay, so the trial is not expired: it keeps running and the next pass tries again
     (the user's rule, 2026-09-30), for as long as the past-due grace would have lasted."""
-
-
-def _session_currency(plans: list[PlanView]) -> str:
-    """The billing currency for a setup-mode Checkout session. Raises if there is none.
-
-    Was ``next((p.currency_code for p in plans if p.currency_code), "usd")``. That
-    fallback could only ever fire on a catalog fault — every ``billing_plan`` row has a
-    NOT NULL currency FK — and when it did, it opened a USD session for a business that
-    prices in HKD. Silently guessing a currency is the one thing a payment path must not
-    do: the customer is shown a card form denominated in money nobody sells in.
-
-    Failing here costs nothing that is not already lost. A catalog with no priced plan
-    has nothing to sell, so there is no card worth capturing.
-    """
-    currency = next((p.currency_code for p in plans if p.currency_code), None)
-    if not currency:
-        logger.error(
-            "checkout: no plan carries a currency ({} plans considered); refusing to "
-            "guess one for a Checkout session", len(plans),
-        )
-        raise CheckoutError(
-            "Subscriptions are temporarily unavailable. Please try again shortly.",
-            status=503,
-        )
-    return currency
 
 
 def _has_active_subscription(entity_id, function_code: str) -> bool:
@@ -193,11 +165,9 @@ def resolve_target_plan(entity_id, requested_code: str | None) -> PlanView:
 
 # NOTE: there is deliberately no "get or create the payer's customer" helper here, and
 # nothing in this module creates a Stripe Customer. A customer must not exist until a
-# card has actually been saved — creating one up front left an orphan behind every
-# abandoned checkout. Both entry points (``start_modules_checkout``,
-# ``start_payment_method_setup``) pass a possibly-None customer to
-# ``create_setup_checkout_session``, and Stripe creates it at session CONFIRMATION;
-# ``_adopt_session_customer`` then takes ownership of it.
+# card has actually been saved; the one place that makes one is the in-app card form's
+# confirm (``payment_methods._payer_customer_for_confirm``), after Stripe has said the
+# card exists.
 #
 # To READ the payer's customer use ``_resolve_customer_id`` (or
 # ``_customer_id_for_entity``), which never creates.
@@ -208,14 +178,14 @@ def _resolve_customer_id(user_id) -> str | None:
 
     The mapping row is a CACHE, not the source of truth. ``_seed_user_customer_mapping``
     swallows its own write failures, so a payer can have a real, card-bearing customer in
-    Stripe and no row here. Stripe knows which one: ``_adopt_session_customer`` stamps
-    ``metadata.user_id`` on every customer it adopts, and deliberately does NOT swallow
-    that failure — precisely so this lookup can recover from a lost mapping.
+    Stripe and no row here. Stripe knows which one: every customer we create carries a
+    ``metadata.user_id`` stamp (``stripe_client.create_customer_for_user``) — precisely so
+    this lookup can recover from a lost mapping.
 
     Skipping that second step is not a smaller answer, it is a WRONG one, and every
-    caller draws a different bad conclusion from it: checkout opens a setup session with
-    no customer and Stripe mints a DUPLICATE, and the trial-end job expires a trial whose
-    card was fine. The search is what makes the swallow above safe.
+    caller draws a different bad conclusion from it: the card form's confirm mints a
+    DUPLICATE customer, and the trial-end job expires a trial whose card was fine. The
+    search is what makes the swallow above safe.
 
     Re-seeds the mapping on a hit. That is NOT just a cache warm-up — it is load-bearing.
     The anchor and ``paid_through`` live on the very same ``user_stripe_customer`` row, so
@@ -422,21 +392,21 @@ def _resolve_checkout_plans(entity_id, requested_codes) -> list[PlanView]:
 def start_modules_checkout(
     entity,
     user,
-    success_url: str,
-    cancel_url: str,
     requested_codes: list[str] | None = None,
 ):
     """Subscribe an entity to one or more modules — ONE paid subscription per module.
 
-    Three outcomes:
+    Decided on the card NOMINATED FOR THIS COMPANY (``store.card_for_entity``), never the
+    account default — the default is only what pickers offer first. Three outcomes:
 
-    * **Card on file AND this entity has billing consent** → create the paid
-      subscriptions directly with the saved card. Returns ``{"created": [codes]}``.
-    * **Card on file but NO consent for this entity** → returns
+    * **A nominated card AND this entity has billing consent** → create the paid
+      subscriptions directly on that card. Returns ``{"created": [codes]}``.
+    * **A nominated card but NO consent for this entity** → returns
       ``{"needs_confirmation": {...}}`` and charges nothing. See below.
-    * **No card yet** → a hosted setup-mode Checkout captures one; the module codes
-      ride on its metadata and the subscriptions are created on return (see
-      ``complete_setup_checkout``). Returns ``{"url": <setup checkout url>}``.
+    * **No card nominated** → ``CheckoutError("Choose a card before subscribing.", 402)``.
+      There is no hosted fallback any more: a card is only ever added in-app, through a
+      billing account (the user's rule, 2026-10-01), and the caller nominates one before
+      asking again.
 
     The consent gate exists because the card is the PAYER's, shared by every entity
     they pay for. Without it, saving a card while setting up entity #1 silently
@@ -452,49 +422,37 @@ def start_modules_checkout(
     Raises ``CheckoutError`` when a module is unavailable, already actively
     subscribed, or the choice is ambiguous.
     """
-    customer_id = _customer_id_for_entity(entity.id)  # None on first checkout
+    # Asked about the payer whose card is about to be charged — which is the acting user.
+    # Every route reaching here carries the payer gate, so they are either the
+    # established payer or the one establishing the relationship.
+    user_id = getattr(user, "id", None)
     plans = _resolve_checkout_plans(entity.id, requested_codes)
 
-    # No customer is resolved-or-created here, deliberately: a payer with no customer
-    # also has no saved card, so they're headed for the setup checkout below — and
-    # creating one now would leave an orphan behind every abandoned checkout. Stripe
-    # creates it when the card is saved (see create_setup_checkout_session).
-    payment_method = customer_default_payment_method(customer_id) if customer_id else None
+    payment_method = store.card_for_entity(entity.id, user_id)
+    if not payment_method:
+        raise CheckoutError("Choose a card before subscribing.", status=402)
 
-    # A saved card implies a customer (it's read off one), but say so explicitly —
-    # customer_id is Optional now that this no longer creates one up front.
-    if customer_id and payment_method:
-        # Asked about the payer whose card is about to be charged — which is the acting
-        # user. Every route reaching here carries ``@require_subscription_payer``, so
-        # they are either the established payer or the one establishing the relationship;
-        # ``payer_for_entity`` would return the same answer and cost a query to do it.
-        if not store.has_billing_consent(entity.id, getattr(user, "id", None)):
-            # Charge NOTHING. The caller shows "you'll be billed X on card ending Y"
-            # and calls confirm_modules_checkout if the payer accepts.
-            return {"needs_confirmation": _billing_confirmation(entity, plans, payment_method)}
-        # Reuse the saved card — no redirect, no extra card. A fresh idempotency scope
-        # per attempt guards Stripe SDK network retries without blocking a later
-        # re-subscribe of the same module.
-        created = _create_paid_subscriptions(
-            entity, user, customer_id, plans, payment_method, uuid.uuid4().hex
+    # A nominated card is a card on the payer's customer, so a missing customer here is
+    # an inconsistency in our own records, not the customer's mistake. Refused with the
+    # same answer (re-choosing the card re-attaches it), and logged so it is seen.
+    customer_id = _customer_id_for_entity(entity.id) or _resolve_customer_id(user_id)
+    if not customer_id:
+        logger.error(
+            "checkout: entity {} is nominated onto {} but payer {} has no Stripe customer",
+            entity.id, payment_method, user_id,
         )
-        return {"created": created}
+        raise CheckoutError("Choose a card before subscribing.", status=402)
 
-    # No card yet: capture one via a hosted setup-mode Checkout (needs a currency —
-    # use the modules' billing currency, which they share).
-    currency = _session_currency(plans)
-    session = create_setup_checkout_session(
-        customer_id,
-        success_url,
-        cancel_url,
-        currency,
-        metadata={
-            "entity_id": str(entity.id),
-            "user_id": str(getattr(user, "id", "")),
-            "modules_to_subscribe": ",".join(p.function_code.upper() for p in plans),
-        },
+    if not store.has_billing_consent(entity.id, user_id):
+        # Charge NOTHING. The caller shows "you'll be billed X on card ending Y" and
+        # calls confirm_modules_checkout if the payer accepts.
+        return {"needs_confirmation": _billing_confirmation(entity, plans, payment_method)}
+    # A fresh idempotency scope per attempt guards Stripe SDK network retries without
+    # blocking a later re-subscribe of the same module.
+    created = _create_paid_subscriptions(
+        entity, user, customer_id, plans, payment_method, uuid.uuid4().hex
     )
-    return {"url": session.get("url")}
+    return {"created": created}
 
 
 def _billing_confirmation(entity, plans: list[PlanView], payment_method: str) -> dict:
@@ -531,52 +489,25 @@ def authorize_entity_billing(entity, user) -> dict:
     ``_resolve_checkout_plans``.
 
     Idempotent (consent is once per entity), so a double-click is harmless.
+
+    THE COMPANY MUST ALREADY BE ON A BILLING ACCOUNT. The caller puts it there first - the
+    account picker's move, or ``payment_method`` on the route - and with none this refuses
+    402 BEFORE consent is written, so the screen can open the Billing Accounts picker. There
+    is no fallback to the Stripe customer's default card any more (the user's rule,
+    2026-10-01: a card is chosen through a billing account, never inferred). Consent with no
+    account would be an agreement to be billed to nothing: the trial would expire at term
+    end having been told it would convert.
     """
     user_id = getattr(user, "id", None)
+    if store.billing_group_for_entity(entity.id, user_id) is None:
+        raise CheckoutError(NO_ACCOUNT_FOR_COMPANY, status=402)
     store.record_billing_consent(entity.id, user_id, "confirmed")
-    _ensure_nominated(entity.id, user_id)
     return {"ok": True}
-
-
-def _ensure_nominated(entity_id, user_id) -> None:
-    """Put this company on the payer's main card if it is on none.
-
-    THE BACKSTOP FOR CONSENT WITHOUT A CARD. Consenting and nominating are two records,
-    and every screen that asks for one asks for the other in the same step — but the
-    callers that do not (onboarding's billing sheet, which sets the account default and then
-    authorises) would otherwise leave a company authorised to be billed and billed to
-    nothing. Its trial would expire at term end having been told it would convert.
-
-    NOT the silent fallback the charge paths refuse. This runs at the moment the payer
-    says "yes, bill me for this company", against the card they were shown, and writes it
-    down where they can see and change it. The refusal is about the unattended jobs
-    guessing later, with nobody in the loop.
-
-    Never overwrites an existing nomination, and never raises: consent is recorded either
-    way, and a company that ends up on no card is reported by the charge paths rather than
-    losing the payer's agreement over a Stripe hiccup.
-    """
-    if not entity_id or not user_id:
-        return
-    try:
-        if store.billing_group_for_entity(entity_id, user_id) is not None:
-            return
-        customer_id = store.customer_id_for_user(user_id)
-        card = customer_default_payment_method(customer_id) if customer_id else None
-        if not card:
-            return
-        store.nominate_card_for_entity(entity_id, user_id, card, "confirmed")
-    except Exception:
-        logger.exception(
-            "billing: could not nominate a card for entity {} at consent", entity_id
-        )
 
 
 def confirm_modules_checkout(
     entity,
     user,
-    success_url: str,
-    cancel_url: str,
     requested_codes: list[str] | None = None,
 ):
     """Record the payer's consent to be billed for THIS entity, then subscribe.
@@ -587,147 +518,14 @@ def confirm_modules_checkout(
 
     Delegates to ``start_modules_checkout``, which re-validates the modules — the codes
     come back from the client, so they can't be trusted to still be buyable — and, now
-    that consent exists, takes the charge path. It still routes to a setup Checkout if
-    the card vanished between the two calls.
+    that consent exists, takes the charge path. It still refuses with 402 "Choose a card
+    before subscribing." if no card is nominated for the company by then.
     """
     user_id = getattr(user, "id", None)
+    # The company's billing account was chosen before this call (the picker's move, or
+    # ``payment_method`` on the route); ``start_modules_checkout`` refuses 402 without one.
     store.record_billing_consent(entity.id, user_id, "confirmed")
-    # The card they were shown, written down before the charge that reads it — see
-    # ``_ensure_nominated``. The routes that carry a picker have already nominated the
-    # chosen one, so this only fires for the paths that never asked.
-    _ensure_nominated(entity.id, user_id)
-    return start_modules_checkout(
-        entity, user, success_url, cancel_url, requested_codes
-    )
-
-
-def _save_setup_checkout_card(entity, session_id: str) -> tuple[str, str, dict]:
-    """Verify a setup-mode Checkout session belongs to this entity and save its card
-    as the customer's default.
-
-    Returns ``(customer_id, payment_method_id, session)``. Raises ``CheckoutError``
-    if the entity has no billing account, the session isn't theirs, or no card was
-    captured. Idempotent — re-running on the same session just re-sets the same
-    default, so a page refresh is harmless.
-
-    Shared by the two things a setup checkout can be for: capturing a card on its own
-    (``complete_payment_method_setup``) and capturing one in order to subscribe
-    (``complete_setup_checkout``).
-
-    The customer is read off the SESSION, not resolved from the entity: on a payer's
-    first card the customer didn't exist when the session was opened — Stripe created it
-    at confirmation — so there is nothing local to resolve yet. Session ownership is
-    checked against ``metadata.entity_id`` (which we stamp when opening the session)
-    instead of against a pre-existing customer id.
-    """
-    session = retrieve_checkout_session(session_id)
-    meta = session.get("metadata") or {}
-    if str(meta.get("entity_id") or "") != str(entity.id):
-        raise CheckoutError("Checkout session not found for this entity.", status=404)
-
-    session_customer = session.get("customer")
-    if isinstance(session_customer, dict):
-        session_customer = session_customer.get("id")
-    if not session_customer:
-        # Setup mode with customer_creation="always" populates this on confirmation;
-        # absent means the session was never completed.
-        raise CheckoutError("No card was saved; please try again.", status=409)
-
-    setup_intent = session.get("setup_intent") or {}
-    payment_method = (
-        setup_intent.get("payment_method") if isinstance(setup_intent, dict) else None
-    )
-    if isinstance(payment_method, dict):
-        payment_method = payment_method.get("id")
-    if not payment_method:
-        raise CheckoutError("No card was saved; please try again.", status=409)
-
-    customer_id = _adopt_session_customer(session_customer, meta.get("user_id"))
-    if customer_id != session_customer:
-        # The payer already had a customer; move the card onto it before defaulting.
-        attach_payment_method(payment_method, customer_id)
-
-    # Entering a card in a Checkout opened FOR THIS ENTITY is consent to bill it —
-    # this is the other way consent is granted, alongside the in-app confirmation.
-    # Without it, a payer who added a card during entity #2's own setup would still be
-    # asked to confirm, which would be nonsense.
-    store.record_billing_consent(entity.id, meta.get("user_id"), "card")
-
-    # ...and it is the choice of CARD for it, by the same reasoning. The Checkout was
-    # opened for this company and this is the card typed into it, so this is the company
-    # being put on that card — recorded as a separate fact from the consent, because a
-    # payer moving it later must not rewrite when they agreed to be billed.
-    #
-    # REQUIRED, not a nicety: nothing charges a company with no card nominated, so
-    # without this the payer would finish setup, be told they were subscribed, and never
-    # be billed.
-    payer_user_id = meta.get("user_id") or store.payer_for_entity(entity.id)
-    if payer_user_id:
-        store.nominate_card_for_entity(
-            entity.id, payer_user_id, payment_method, "capture"
-        )
-
-    # The captured card also becomes the account's main one — the card offered first the
-    # next time a company is put on one. It is no longer what gets charged; the
-    # nomination above is.
-    set_customer_default_payment_method(customer_id, payment_method)
-    return customer_id, payment_method, session
-
-
-def _adopt_session_customer(session_customer: str, user_id) -> str:
-    """Take ownership of the Customer a setup Checkout produced, and return the id to use.
-
-    Sessions for a payer with no customer are opened without one so that abandoning them
-    creates nothing (see ``create_setup_checkout_session``). The customer Stripe then
-    makes at confirmation has none of our bookkeeping, so this stamps ``metadata.user_id``
-    on it and writes the local mapping.
-
-    That stamp is load-bearing: it is what ``find_customer_by_user`` recovers from when
-    the local mapping is missing, so unlike ``_seed_user_customer_mapping`` its failure is
-    NOT swallowed. A customer with neither the stamp nor a mapping row is invisible to
-    every lookup we have, so it's better to fail the request and let the caller retry.
-
-    Ordering matters: the existing-customer check comes FIRST so we never stamp
-    ``user_id`` onto a duplicate — two stamped customers would make the search fallback
-    ambiguous, which is worse than the duplicate itself.
-
-    If the payer already had a customer (a second setup session confirming after the
-    first — two tabs, a back-button replay), that one wins and is returned. The duplicate
-    Stripe just made is logged for manual cleanup rather than deleted here: deleting a
-    Stripe customer is irreversible and this is not the place to do it unprompted.
-    """
-    if not user_id:
-        # No payer on the session metadata — nothing to key the mapping on. The customer
-        # still exists and holds the card, so use it rather than failing the save.
-        logger.error(
-            "subscription: setup session customer {} has no user_id in metadata; "
-            "cannot map it to a payer",
-            session_customer,
-        )
-        return session_customer
-
-    # Resolved rather than read straight off the mapping: this IS the duplicate guard,
-    # and a payer whose mapping row went missing is exactly the one Stripe has just
-    # built a second customer for. Reading locally here would miss the duplicate and
-    # then stamp ``user_id`` onto it — two stamped customers, which makes the search
-    # ambiguous and is worse than the duplicate itself.
-    existing = _resolve_customer_id(user_id)
-    if existing and existing != session_customer:
-        logger.error(
-            "subscription: payer {} already had customer {}; setup checkout created "
-            "duplicate {} — using the existing one, {} needs manual cleanup in Stripe",
-            user_id,
-            existing,
-            session_customer,
-            session_customer,
-        )
-        return existing
-
-    set_customer_identity(
-        session_customer, metadata={"user_id": str(user_id)}, **_payer_identity(user_id)
-    )
-    _seed_user_customer_mapping(user_id, session_customer)
-    return session_customer
+    return start_modules_checkout(entity, user, requested_codes)
 
 
 def _named_account(user_id):
@@ -860,79 +658,6 @@ def trial_payment_method(customer_id: str | None) -> str | None:
     ``convert_or_expire_due_trials``). So this reports its absence rather than raising.
     """
     return customer_default_payment_method(customer_id)
-
-
-def start_payment_method_setup(entity, user, success_url: str, cancel_url: str) -> dict:
-    """Open a hosted setup-mode Checkout that saves a card WITHOUT subscribing.
-
-    Used by onboarding Step 2, where the card must be on file before the wizard can
-    continue but the trials themselves aren't created until finalize. Returns
-    ``{"url": …}``.
-
-    Does NOT create the Stripe customer. A payer who has none yet gets a session with
-    ``customer_creation="always"``, so Stripe creates the customer only when the card is
-    actually saved — abandoning onboarding here leaves nothing behind. An existing
-    customer is passed through so the card lands on it rather than on a duplicate.
-
-    Setup mode needs a currency; use the modules' billing currency (they share one).
-    Raises if the catalog cannot supply one — see ``_session_currency``.
-    """
-    # Resolved, not read locally: passing None for a payer who DOES have a customer
-    # sends Stripe ``customer_creation="always"`` and mints a duplicate, stranding the
-    # card they already saved on the original.
-    customer_id = _resolve_customer_id(getattr(user, "id", None))
-    plans = catalog.available_plans()
-    currency = _session_currency(plans)
-    session = create_setup_checkout_session(
-        customer_id,
-        success_url,
-        cancel_url,
-        currency,
-        metadata={
-            "entity_id": str(entity.id),
-            "user_id": str(getattr(user, "id", "")),
-            # No modules_to_subscribe: this session saves a card, nothing more. The
-            # completion handler must not create subscriptions off it.
-            "purpose": "payment_method",
-        },
-    )
-    return {"url": session.get("url")}
-
-
-def complete_payment_method_setup(entity, session_id: str) -> bool:
-    """Finish a card-only setup checkout: save the captured card as the default.
-
-    Deliberately creates NO subscriptions — onboarding starts the trials at finalize,
-    once the whole wizard is done. Safe to re-run (a refresh of the return URL just
-    re-sets the same default). Returns True once the card is on file.
-    """
-    _save_setup_checkout_card(entity, session_id)
-    return True
-
-
-def complete_setup_checkout(entity, user, session_id: str) -> list[str]:
-    """Finish a setup-mode checkout: save the captured card as the customer default,
-    then create one paid subscription per module recorded on the session metadata.
-
-    Returns the codes subscribed (possibly empty). Raises ``CheckoutError`` if the
-    session isn't this entity's. Safe to re-run (idempotent subscription creation +
-    the already-subscribed guard), so a page refresh won't double-charge."""
-    customer_id, payment_method, session = _save_setup_checkout_card(entity, session_id)
-
-    codes = (session.get("metadata") or {}).get("modules_to_subscribe", "")
-    plans: list[PlanView] = []
-    for code in [c for c in codes.split(",") if c]:
-        plan = catalog.plan_for_module(code)
-        if plan is None or _has_active_subscription(entity.id, plan.function_code):
-            continue
-        plans.append(plan)
-    if not plans:
-        return []
-    # Scope idempotency to this checkout session so a fresh attempt (possibly a new
-    # card) can't collide with a burned key from an earlier one.
-    return _create_paid_subscriptions(
-        entity, user, customer_id, plans, payment_method, session_id
-    )
 
 
 def _set_module_access(entity_id, function_code: str, enabled: bool) -> None:
@@ -1259,8 +984,8 @@ def _notify_module():
 def _trial_has_card(payer_user_id, entity_id=None) -> bool:
     """Whether THIS company has a card the trial conversion could charge.
 
-    Half of ``_trial_will_convert``, split out so the ending-soon email can name WHICH
-    half is missing. Any failure answers False, for the same reason the conjunction does:
+    One half of what a trial conversion needs (the other is consent), asked on its own so
+    the ending-soon email can name WHICH half is missing. Any failure answers False:
     nagging a customer who was fine is a far smaller harm than letting a trial they
     wanted lapse in silence.
 
@@ -1276,29 +1001,6 @@ def _trial_has_card(payer_user_id, entity_id=None) -> bool:
     except Exception:
         logger.exception(
             "trial: could not determine whether payer {} has a card", payer_user_id
-        )
-        return False
-
-
-def _trial_will_convert(entity_id, payer_user_id) -> bool:
-    """Whether this entity's trial has everything it needs to become a paid subscription.
-
-    The exact conjunction ``_convert_due_trials`` enforces. A card alone is NOT enough —
-    the payer's card is shared across every entity they pay for, so consent is what
-    authorises charging it for THIS one. Any failure to determine it returns False, which
-    sends the warning variant: nagging a customer who was fine is a far smaller harm than
-    silently letting a trial they wanted lapse.
-    """
-    try:
-        customer_id = _resolve_customer_id(payer_user_id)
-        if not customer_id:
-            return False
-        if not _trial_has_card(payer_user_id, entity_id):
-            return False
-        return bool(store.has_billing_consent(entity_id, payer_user_id))
-    except Exception:
-        logger.exception(
-            "trial: could not determine conversion readiness for entity {}", entity_id
         )
         return False
 
@@ -3416,91 +3118,6 @@ def reactivate_module(entity, user, function_code: str) -> None:
         return
 
     _reactivate_module_in_house(entity, user, code, row)
-
-
-def _billing_portal_configuration() -> str:
-    """The ONLY configuration a portal session may ever use.
-
-    Cancellation is in-app EXCLUSIVELY. Stripe's own cancel button skips everything the
-    policy guarantees — it queues no access extension, stamps no ``app_access_until``,
-    writes no audit row — and the resulting webhook revokes access immediately, taking
-    the 30 days the customer paid for. The restricted config turns it off.
-
-    A session with no ``configuration`` silently uses the ACCOUNT DEFAULT, where cancel is
-    enabled. So this refuses rather than falling back: being briefly unable to show
-    invoices is recoverable, a customer cancelling through Stripe is not.
-    """
-    configuration = get_or_create_billing_management_configuration()
-    if not configuration:
-        logger.error(
-            "billing portal: the restricted configuration could not be resolved; "
-            "refusing rather than opening Stripe's default portal (cancel enabled)"
-        )
-        raise CheckoutError(
-            "Billing management is temporarily unavailable. Please try again shortly.",
-            status=503,
-        )
-    return configuration
-
-
-def open_payment_method_update_for_customer(customer_id: str | None, return_url: str):
-    """Open the Stripe portal's add/update payment-method flow for a CUSTOMER.
-
-    The card is an account-level fact — one payer, one Stripe customer, one default
-    method — so this is the form the operation really takes. ``open_payment_method_update``
-    is the same thing reached from an entity, and the payer portal (which has no entity in
-    hand) calls this directly.
-
-    Deep-links straight into the payment-method flow (not the portal home) with an
-    ``after_completion`` redirect, so the customer lands back on ``return_url`` as soon as
-    the card is saved. Raises ``CheckoutError`` when there is no customer yet: the portal
-    cannot mint one, and the first card has to come through setup-mode Checkout instead.
-    """
-    if not customer_id:
-        raise CheckoutError("This entity has no billing account yet.", status=409)
-    return create_billing_portal_session(
-        customer_id,
-        return_url,
-        # The flow deep-link decides where the session OPENS; the configuration decides
-        # what the customer can reach from there. Without it they can navigate to the
-        # default portal's home and cancel.
-        configuration=_billing_portal_configuration(),
-        flow_data={
-            "type": "payment_method_update",
-            "after_completion": {
-                "type": "redirect",
-                "redirect": {"return_url": return_url},
-            },
-        },
-    )
-
-
-def open_payment_method_update(entity, return_url: str):
-    """Open the add/update payment-method flow for the entity's payer.
-
-    Resolves entity -> payer -> customer and defers to
-    ``open_payment_method_update_for_customer``; the card does not belong to the entity,
-    it belongs to whoever pays for it.
-    """
-    return open_payment_method_update_for_customer(
-        _customer_id_for_entity(entity.id), return_url
-    )
-
-
-def open_billing_management_portal(entity, return_url: str):
-    """Open the Stripe portal showing invoice history + payment-method management, but
-    WITHOUT Stripe's own cancellation/update — cancelling is in-app only.
-
-    Raises ``CheckoutError`` if the entity has no Stripe customer yet, or if the
-    restricted configuration can't be resolved (see ``_billing_portal_configuration``:
-    this used to fall back to the default portal, which enables cancel).
-    """
-    customer_id = _customer_id_for_entity(entity.id)
-    if not customer_id:
-        raise CheckoutError("This entity has no billing account yet.", status=409)
-    return create_billing_portal_session(
-        customer_id, return_url, configuration=_billing_portal_configuration()
-    )
 
 
 def start_trials_for_enabled_modules(entity, user) -> list:

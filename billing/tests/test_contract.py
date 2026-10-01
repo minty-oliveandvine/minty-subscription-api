@@ -70,14 +70,26 @@ FLASK_MODULE_ACTIONS = {
     "start-trial", "subscribe-preview",
 }
 
-#: The nine card / billing-account routes of Flask's entity/routes/create.py (757-1247)
-#: plus the one new route.
+#: Of those, the nine DELETED on 2026-10-01 (the user's rule: a payment method is only ever
+#: added through a billing account, in-app - no route may hand the browser to a Stripe-hosted
+#: page). Setup-mode Checkout, the Billing Portal, and the module page's copies of the card
+#: routes (the payer portal's ``/api/me/billing/*`` are the card routes).
+REMOVED_MODULE_ACTIONS = {
+    "checkout", "confirm-billing", "checkout-complete", "payment-method", "manage-billing",
+    "payment-methods", "payment-methods/setup-intent", "payment-methods/confirm",
+    "payment-methods/default",
+}
+
+#: The nine card / billing-account routes of Flask's entity/routes/create.py (757-1247).
 FLASK_ONBOARDING_PATHS = {
     "/payment-method", "/payment-method/setup", "/payment-method/complete",
     "/billing/payment-methods", "/billing/payment-methods/setup-intent",
     "/billing/payment-methods/confirm", "/billing/payment-methods/default",
     "/billing/accounts", "/billing/authorize",
 }
+
+#: Of those, the two setup-mode Checkout routes, deleted on 2026-10-01 for the same rule.
+REMOVED_ONBOARDING_PATHS = {"/payment-method/setup", "/payment-method/complete"}
 
 
 def test_the_portal_carries_flasks_fifteen_paths():
@@ -91,14 +103,16 @@ def test_the_portal_carries_flasks_fifteen_paths():
     assert ("POST", "/billing/entity-payment-method") in ME_ROUTES
 
 
-def test_the_module_page_carries_flasks_nineteen_actions():
-    assert set(ACTIONS) == FLASK_MODULE_ACTIONS
-    assert len(ACTIONS) == 19
+def test_the_module_page_carries_flasks_actions_less_the_hosted_ones():
+    assert set(ACTIONS) == FLASK_MODULE_ACTIONS - REMOVED_MODULE_ACTIONS
+    assert len(ACTIONS) == 10
+    assert not set(ACTIONS) & REMOVED_MODULE_ACTIONS
 
 
-def test_the_onboarding_router_carries_the_nine_plus_trials_start():
+def test_the_onboarding_router_carries_flasks_seven_plus_trials_start():
     paths = {p for _, p in ONBOARDING_ROUTES}
-    assert paths == FLASK_ONBOARDING_PATHS | {"/trials/start"}
+    assert paths == (FLASK_ONBOARDING_PATHS - REMOVED_ONBOARDING_PATHS) | {"/trials/start"}
+    assert not paths & REMOVED_ONBOARDING_PATHS
     assert ("GET", "/billing/accounts") in ONBOARDING_ROUTES
     assert ("POST", "/billing/accounts") in ONBOARDING_ROUTES
     assert ("POST", "/trials/start") in ONBOARDING_ROUTES
@@ -123,6 +137,9 @@ def test_openapi_lists_every_path(client):
         assert f"/api/me{p}" in paths, p
     for _, p in ONBOARDING_ROUTES:
         assert f"/api/onboarding{p}" in paths, p
+    for p in REMOVED_ONBOARDING_PATHS:
+        assert f"/api/onboarding{p}" not in paths, p
+    assert "/api/entities/{entity_id}/modules/payment-methods" not in paths
     assert "/api/entities/{entity_id}/modules" in paths
     assert "/api/entities/{entity_id}/modules/{action}" in paths
     assert "/api/entities/{entity_id}/subscription-notice" in paths

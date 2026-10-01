@@ -242,7 +242,8 @@ def record_billing_consent(entity_id, user_id, source: str) -> None:
     """Record that ``user_id`` agreed to be billed for ``entity_id``.
 
     ``source`` is how it was given — ``"card"`` (entered a card in a setup Checkout
-    opened for this entity), ``"confirmed"`` (accepted the in-app charge confirmation
+    opened for this entity; that path was deleted on 2026-10-01, so only historical rows
+    carry it), ``"confirmed"`` (accepted the in-app charge confirmation
     against an already-saved card), or ``"transfer"`` (accepted a handover of the whole
     subscription, which is the same agreement made about a company someone else was
     paying for). Kept for support: "why was I billed for this entity?"
