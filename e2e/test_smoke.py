@@ -1,16 +1,14 @@
-"""The contract a deployment must honour, live or dark - the checks Part 2 step 7's runbook
-runs after the deploy (``curl BILLING_API/healthz`` = 200, ``/api/me/subscriptions`` = 404
-with CORS headers while dark)."""
+"""The contract a deployment must honour - the checks the runbook runs after each deploy
+(``curl BILLING_API/healthz`` = 200, ``/api/me/subscriptions`` = 401 without a token)."""
 
 from __future__ import annotations
 
 import pytest
 import requests
 
-from e2e.conftest import PAYMENTS_ORIGIN, WEB_ORIGIN, mint, subscriptions_dark
+from e2e.conftest import PAYMENTS_ORIGIN, WEB_ORIGIN, mint
 
 PORTAL = "/api/me/subscriptions"
-NOBODY = "00000000-0000-0000-0000-000000000000"
 
 
 def test_healthz(base_url):
@@ -40,34 +38,6 @@ def test_preflight_from_minty_web_succeeds(base_url):
     assert "x-entity-id" in res.headers.get("Access-Control-Allow-Headers", "").lower()
 
 
-@pytest.mark.skipif(not subscriptions_dark(), reason="the service runs live (E2E_SUBSCRIPTIONS != 0)")
-class TestDark:
-    def test_portal_is_404_with_cors(self, base_url):
-        res = requests.get(f"{base_url}{PORTAL}", headers={"Origin": WEB_ORIGIN}, timeout=10)
-        assert res.status_code == 404
-        assert res.json() == {"error": "not_found"}
-        assert res.headers.get("Access-Control-Allow-Origin") == WEB_ORIGIN
-
-    def test_a_valid_token_changes_nothing(self, base_url, credentials):
-        token = mint(credentials["secret"], credentials["user_id"])
-        res = requests.get(
-            f"{base_url}{PORTAL}", headers={"Authorization": f"Bearer {token}"}, timeout=10
-        )
-        assert res.status_code == 404
-        assert res.json() == {"error": "not_found"}
-
-    def test_module_page_notice_and_onboarding_are_404(self, base_url):
-        for path in (
-            f"/api/entities/{NOBODY}/modules",
-            f"/api/entities/{NOBODY}/subscription-notice",
-            "/api/onboarding/payment-method",
-        ):
-            res = requests.get(f"{base_url}{path}", timeout=10)
-            assert res.status_code == 404, path
-            assert res.json() == {"error": "not_found"}, path
-
-
-@pytest.mark.skipif(subscriptions_dark(), reason="the service runs dark (E2E_SUBSCRIPTIONS=0)")
 class TestLive:
     def test_unauthenticated_is_401(self, base_url):
         res = requests.get(f"{base_url}{PORTAL}", timeout=10)
@@ -144,5 +114,6 @@ class TestLive:
         assert res.status_code == 200, res.text
         body = res.json()
         assert isinstance(body["items"], list)
-        assert body["settings_path"] == f"/entity/settings/module/{eid}"
+        assert body["settings_path"].startswith("/handoff/minty-web?")
+        assert f"entity_id={eid}" in body["settings_path"]
         assert res.headers.get("Access-Control-Allow-Origin") == PAYMENTS_ORIGIN

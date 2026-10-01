@@ -7,7 +7,6 @@ service is not answering, and the token tests skip without the credentials.
 
     E2E_BASE_URL        default http://127.0.0.1:8004 (see the note at BASE_URL)
     E2E_WEB_ORIGIN      the minty-web origin the CORS assertions use, default http://localhost:3002
-    E2E_SUBSCRIPTIONS   0 when the service runs with SUBSCRIPTION_ENABLED=0 (dark); unset/1 = live
     E2E_JWT_SECRET      the SECRET_KEY shared with Minty - mints a Flask-shaped token (never commit it)
     E2E_MINTY_USER      a real user id in the service's database (Minty/scripts/e2e_seed.py --print)
     E2E_MINTY_ENTITY    optional: a company that user administers, for the module-page check
@@ -32,11 +31,6 @@ BASE_URL = os.environ.get("E2E_BASE_URL", "http://127.0.0.1:8004").rstrip("/")
 WEB_ORIGIN = os.environ.get("E2E_WEB_ORIGIN", "http://localhost:3002").rstrip("/")
 # The payment-request UI (billing-frontend), the notice's caller.
 PAYMENTS_ORIGIN = os.environ.get("E2E_PAYMENTS_ORIGIN", "http://localhost:3000").rstrip("/")
-
-
-def subscriptions_dark() -> bool:
-    raw = (os.environ.get("E2E_SUBSCRIPTIONS") or "1").strip().lower()
-    return raw in ("0", "false", "off", "no")
 
 
 def reachable() -> bool:

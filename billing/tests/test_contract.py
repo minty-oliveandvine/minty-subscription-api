@@ -3,7 +3,7 @@
 The route tables in ``billing/api/*`` are the contract Part 2 step 3 implements and the
 frontends are written against; this test keeps them from drifting silently, and checks the
 OpenAPI document actually carries every path (the document is what ``docs/openapi.json``
-is generated from, and what a reader gets while dark).
+is generated from, and what a reader gets without a token).
 """
 
 from __future__ import annotations
@@ -130,3 +130,23 @@ def test_openapi_lists_every_path(client):
     for path, ops in doc["paths"].items():
         for method, op in ops.items():
             assert op.get("security"), (method, path)
+
+
+def test_healthz_and_the_openapi_document_need_no_token(client):
+    res = client.get("/healthz")
+    assert res.status_code == 200
+    assert res.json()["service"] == "minty-billing-api"
+    assert client.get("/api/openapi.json").status_code == 200
+
+
+def test_the_cors_preflight_succeeds(client):
+    origin = "http://localhost:3002"
+    res = client.options(
+        "/api/me/subscriptions",
+        HTTP_ORIGIN=origin,
+        HTTP_ACCESS_CONTROL_REQUEST_METHOD="GET",
+        HTTP_ACCESS_CONTROL_REQUEST_HEADERS="authorization,x-entity-id",
+    )
+    assert res.status_code == 200
+    assert res["Access-Control-Allow-Origin"] == origin
+    assert "x-entity-id" in res["Access-Control-Allow-Headers"].lower()

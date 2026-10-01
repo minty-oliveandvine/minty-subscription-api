@@ -1,7 +1,7 @@
 """The projection writer produces Flask's rows, column for column.
 
-``entity_function_map`` has two writers during Part 2 - Flask while dark, this service when
-live - and Flask's gate reads whichever wrote last. So the row this service writes must be
+``entity_function_map`` has two writers during Part 2 - Flask and this service - and Flask's
+gate reads whichever wrote last. So the row this service writes must be
 indistinguishable from the one ``blueprints/entity/services/modules._write_pairs`` writes:
 explicit UTC stamps on insert (``created_at``, ``updated_at``, and ``enabled_at`` OR
 ``disabled_at``), ``created_by`` the acting user or NULL, and on an update only the flipped

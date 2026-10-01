@@ -26,9 +26,8 @@ per-request module gate reads (``blueprints/entity/routes/modules.py::_is_module
 ``billing/services/entity_modules.py``, the Django copy of Flask's
 ``entity/services/modules._write_pairs``, and its rows are byte-identical to Flask's. The
 access SWEEP exempts companies still in the wizard (``entities.status = onboarding``); the
-writer itself has no such check, exactly like Flask's. While subscriptions are dark this
-service writes the table not at all: Flask's toggle, the wizard's step 2 and ``flask modules
-set`` are the writers then.
+writer itself has no such check, exactly like Flask's. Flask's toggle, the wizard's step 2
+and ``flask modules set`` write it too.
 
 Read-only: ``user``, ``user_entity``, ``entities``, ``entity_function``, ``country_info``,
 ``currency_info``, ``invitation``. Identity and the company are Flask's until Part 3.
@@ -333,11 +332,10 @@ class EntityFunction(models.Model):
 class EntityFunctionMap(UpdatedAtMixin):
     """Per-entity module on/off - the projection Flask's module gate reads.
 
-    THE ONE WRITE OUTSIDE THE DOMAIN. When subscriptions are live this service is the
-    writer of ``is_enabled`` / ``enabled_at`` / ``disabled_at`` (a trial starting, a
+    THE ONE WRITE OUTSIDE THE DOMAIN. This service is the subscription writer of ``is_enabled`` / ``enabled_at`` / ``disabled_at`` (a trial starting, a
     renewal failing past its window, a cancellation running out - each ends in a row here),
     through ``billing/services/entity_modules.py`` only; the stamps and ``created_by`` are
-    written exactly as Flask's ``_write_pairs`` writes them. Dark, it does not write the table.
+    written exactly as Flask's ``_write_pairs`` writes them.
 
     The table is in ``01``'s updated_at-trigger list, hence the mixin (see it for what that
     means for the explicit stamp on an UPDATE).

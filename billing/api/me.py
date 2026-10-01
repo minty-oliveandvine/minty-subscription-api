@@ -12,9 +12,8 @@ Person-scoped (``SelfBearerAuth``): every row is found by the caller's ``user_id
 by the company in the token or the ``X-Entity-Id`` header.
 
 WHAT FLASK'S VIEWS DID THAT IS NOT HERE, because the framework does it: the CORS headers on
-every answer (``corsheaders`` middleware), the OPTIONS preflight (same), the 404-while-dark
-(``SubscriptionsDarkMiddleware``), the bearer check and the ``no_user_claim`` 403 (the auth
-class loads the user or refuses). What IS here is the contract each view kept:
+every answer (``corsheaders`` middleware), the OPTIONS preflight (same), the bearer check
+and the ``no_user_claim`` 403 (the auth class loads the user or refuses). What IS here is the contract each view kept:
 
 * ``400 {"error": "<field> is required"}`` for a missing routing id;
 * ``404 {"error": "That company isn't on your billing account."}`` when the read model answers

@@ -425,7 +425,7 @@ def get_module_cards(entity_id: str) -> list[dict]:
                 "needs_card": bool(
                     app_trial and not will_convert and not pending_cancel
                 ),
-                # Which of the two it is, so the banner can say "add a card" vs
+                # Which of the two it is, so the page can say "add a card" vs
                 # "confirm billing for this company" - the fix differs.
                 "needs_consent_only": bool(
                     has_payment_method and not has_billing_consent

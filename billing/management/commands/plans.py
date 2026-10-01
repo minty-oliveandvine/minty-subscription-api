@@ -1,7 +1,7 @@
 """``manage.py plans list`` - the port of ``flask plans list``: the price catalog as the
 database holds it. Read-only; the catalog is edited by hand in SQL and this is how you check
-it. Works while dark (a catalog is not a subscription), so it is also the quickest proof that
-the service reaches the database and the schema."""
+it. Writes nothing, so it is also the quickest proof that the service reaches the database
+and the schema."""
 
 from __future__ import annotations
 

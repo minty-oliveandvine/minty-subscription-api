@@ -17,15 +17,16 @@ renders and the nineteen actions behind one gate), `notice` (with Flask's claiml
 fallback) and `onboarding` (the nine wizard routes and the new `trials/start`, which fails
 loudly). `docs/openapi.json` is the committed contract, held current by `test_contract.py`
 (`manage.py export_openapi` regenerates it). Next: step 4 finishes minty-web's screens against
-the live API, step 5 cuts Flask's copies. The mirrors of all 21 tables are declared; the dark
-contract, the auth rules and the guard tests are in place. Skeleton verified 2026-09-21 on this
+the live API, step 5 cuts Flask's copies. The mirrors of all 21 tables are declared; the auth
+rules and the guard tests are in place. Subscriptions are always on: the dark switch
+(`SUBSCRIPTION_ENABLED`) was removed 2026-10-01, once the service ran on a test site. Skeleton verified 2026-09-21 on this
 workstation (Python 3.13.15
 via `uv`, PostgreSQL 18): `pytest` 35 passed on SQLite (00:02) and on the Postgres built from
 `01_schema_rebased.sql` (00:04); `ruff check .` clean; the `MINTY_DB_SCHEMA=pettycash_alt` guard
 passes; Minty's `audit_models.py` reports 0 for this repo (a planted bogus column is found);
-`runserver 8004` against the dev DB — `/healthz` 200, `/api/me/subscriptions` 404 with CORS dark and
-401 live, `plans list` reads the catalog, `tick` no-ops; `pytest e2e` 6 passed dark and 7 live
-(the identity-dependent ones with a real dev-DB user).
+`runserver 8004` against the dev DB — `/healthz` 200, `/api/me/subscriptions` 401 without a
+token, `plans list` reads the catalog; `pytest e2e` passed (the identity-dependent ones with a
+real dev-DB user).
 
 ## The three rules
 
@@ -42,16 +43,15 @@ passes; Minty's `audit_models.py` reports 0 for this repo (a planted bogus colum
    `STRIPE_PUBLISHABLE_KEY`; `billing/services/stripe_client.py` is the one module that
    imports `stripe`, `billing_gateway.py` the one that charges. Flask's copy goes in step 5.
 
-## The dark contract
+## Always on
 
-`SUBSCRIPTION_ENABLED` is **off unless set** — production cuts over with subscriptions dark.
-Off, every path but `/healthz` and `/api/openapi.json` answers `404 {"error": "not_found"}`
-**with CORS headers** (so the browser apps read "not there", not a CORS failure), the
-scheduler does not start whatever its own switch says, `manage.py subscriptions tick` exits 0
-having done nothing, and `revoke-ungranted` refuses. Switching it on writes nothing — no
-grant, no trial, no revocation; `revoke-ungranted` is the separate launch-day command.
-`core/middleware.py::SubscriptionsDarkMiddleware`, pinned by `billing/tests/test_dark.py`
-and `e2e/`.
+Subscriptions are always on: every route answers, every `manage.py subscriptions` job runs.
+The feature-wide dark switch (`SUBSCRIPTION_ENABLED` and its 404-everything middleware) was
+removed on 2026-10-01 by the user's decision — the service runs on a test site, so there is
+nothing left to keep dark. Removing it wrote nothing: no trial started, nothing granted or
+revoked. The scheduler keeps its own switch, `SUBSCRIPTION_SCHEDULER_ENABLED`, which alone
+decides whether the timer starts; `manage.py subscriptions revoke-ungranted` stays a
+deliberate command, dry unless `--apply`.
 
 ## The API
 
@@ -59,7 +59,7 @@ and `e2e/`.
 |---|---|---|---|
 | `me` | `/api/me` | `SelfBearerAuth` (person; token may be unscoped) | the payer portal — subscriptions, subscriber options, invite-admin (forwarded to Flask), transfers, invoices, cards |
 | `modules` | `/api/entities/{id}/modules[/{action}]` | `EntityBearerAuth` (a company is required) + `MODULE_VIEW` / `MODULE_MANAGE` + payer rule | the module settings page model and its 19 actions |
-| `notice` | `/api/entities/{id}/subscription-notice` | `EntityBearerAuth` | the notice the payment module's landing page shows |
+| `notice` | `/api/entities/{id}/subscription-notice` | `NoticeBearerAuth` (`EntityBearerAuth` plus Flask's fallback for a token that names no company) | the notice the payment module's landing page shows: `past_due` and a paid `pending_cancel` only (no trial notices since 2026-10-01); `settings_path` is Flask's `/handoff/minty-web` hand-over to the module page |
 | `onboarding` | `/api/onboarding/*` | `BearerAuth` (the wizard names its company in the body) | the wizard's 9 card/billing routes + `POST /trials/start` (finalize; must not fail silently — a failure fails finalize, the wizard offers Try again, both halves idempotent) |
 
 Paths and JSON are Flask's byte for byte (`billing/tests/test_contract.py` lists them);
@@ -70,7 +70,7 @@ bodies say `{"error": …}` with Flask's status codes (`core/exceptions.py`).
 `billing/scheduler.py` is the port of Minty's `services/app_runtime/scheduler.py`: an
 APScheduler thread started from `billing.apps.ready()` in the web process only, a FULL pass
 at `SUBSCRIPTION_SCHEDULER_FULL_HOUR` (05:00 Hong Kong) and a LIGHT pass every other hour,
-gated by `SUBSCRIPTION_ENABLED` **and** `SUBSCRIPTION_SCHEDULER_ENABLED`. Two gunicorn
+gated by `SUBSCRIPTION_SCHEDULER_ENABLED` alone. Two gunicorn
 workers start two timers; the pass's Postgres advisory lock (`daily.daily_lock`) lets one run.
 Known costs, kept on purpose until Part 3's Terraform: the job store is in memory, so a
 restart slips the next light pass by up to an hour and **a deploy after 05:00 HKT loses that
@@ -87,9 +87,8 @@ uv pip install --python .venv\Scripts\python.exe -r requirements.txt
 copy .env.example .env                                  # SECRET_KEY = Minty's; POSTGRES_* = the dev DB
 python manage.py runserver 8004
 curl http://localhost:8004/healthz                      # {"status":"ok","service":"minty-billing-api"}
-curl -i http://localhost:8004/api/me/subscriptions      # 404 not_found while dark; 401 when live
+curl -i http://localhost:8004/api/me/subscriptions      # 401 without a token
 python manage.py plans list                             # the catalog - proves DB + schema
-python manage.py subscriptions tick                     # no-op while dark
 python manage.py export_openapi                         # rewrite docs/openapi.json (--check in CI)
 ```
 
@@ -121,8 +120,8 @@ against the routers (step 3, importing the engine's stubs) - `docs/features/subs
 ## Layout
 
 ```
-config/          settings (the two switches, CORS, DB, Stripe keys, mail, logging) · settings_test · urls (the four routers, /healthz)
-core/            auth (BearerAuth, SelfBearerAuth, EntityBearerAuth) · exceptions ({"error"} shape) · middleware (dark gate, request log) · policy (roles/permissions) · flask_client (the ONLY caller of Flask) · log_formatters
+config/          settings (the scheduler switch, CORS, DB, Stripe keys, mail, logging) · settings_test · urls (the four routers, /healthz)
+core/            auth (BearerAuth, SelfBearerAuth, EntityBearerAuth) · exceptions ({"error"} shape) · middleware (service scope, request log) · policy (roles/permissions) · flask_client (the ONLY caller of Flask) · log_formatters
 shared_models/   the 21 mirrors, managed = False · enums (the Postgres enums) · fields (PgEnumField, CharNField)
 billing/         api/ (me, modules, notice, onboarding - the four routers, live; _json.py = Flask's jsonify) · services/ (THE ENGINE: the 24 modules of Minty's blueprints/subscription/services ported 1:1, plus entity_modules.py, _context.py, _log.py, and this service's own invoice_document.py + invoice_pdf.py - the invoice PDF, Figma 09-A) · static/email/ (the 9 inline images) · static/invoice/ (the PDF's Inter and Noto Sans HK fonts with their OFL licences, and 09-A's logo vector) · scheduler.py · management/commands/{subscriptions,plans,replay_scenarios,export_openapi}.py · tests/ (+ tests/engine/, the ported suite; tests/api/, the route tests)
 scripts/         replay_diff.py (Flask report vs Django report, normalised)
@@ -139,9 +138,9 @@ docs/openapi.json  the committed contract (= /api/openapi.json; manage.py export
 00:09); `MINTY_TEST_PG_URI=… MINTY_REPO=C:\Github\Minty pytest` green (1124 passed, 00:14; the
 harness builds `01_schema_rebased.sql`; a mirror column the schema lacks fails on the SELECT);
 `MINTY_DB_SCHEMA=pettycash_alt pytest billing/tests/test_schema_name.py` passes; `ruff check .`
-clean; `manage.py runserver 8004` → `/healthz` 200 and `/api/me/subscriptions` 404 with
-`Access-Control-Allow-Origin`; `python Minty/docs/schema/generators/audit_models.py` reports 0
-for all four repos. Live against the dev database with `SUBSCRIPTION_ENABLED=1`:
+clean; `manage.py runserver 8004` → `/healthz` 200 and `/api/me/subscriptions` 401 without a
+token; `python Minty/docs/schema/generators/audit_models.py` reports 0
+for all four repos. Against the dev database:
 `manage.py subscriptions revoke-ungranted` (dry) and `run-renewals` (dry) answer the same as
 `flask subscriptions revoke-ungranted` / `run-renewals` on the same database.
 

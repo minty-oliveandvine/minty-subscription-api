@@ -1,22 +1,21 @@
-"""The dashboard subscription notice: which one popup an entity gets, and once.
+"""The in-app subscription notice: what an entity's landing page interrupts someone with.
 
-Moved out of ``entity.services.modules``. Deciding that a company is past due, needs a
-card, needs consent, is winding down or has a trial about to end is subscription
-reasoning -- it reads phases, trial ends and billing consent -- and it was sitting in the
-entity blueprint only because the module card it derives from does.
+The port of Flask's ``blueprints/subscription/services/notices.py``. Deciding that a company
+is past due or winding down is subscription reasoning -- it reads phases, the dunning stamp
+and access ends -- derived from the same module cards the settings page renders.
 
-WHAT STAYS BEHIND: ``entity.services.modules`` re-exports both names, so every importer
-keeps working -- and there are several import styles among them (``routes/list.py`` binds
-at module level, ``routes/modules.py`` imports inside the request). Everything this module
-reads back off the entity side -- ``get_module_cards``, ``TRIAL_ENDING_SOON_DAYS``,
-``_NOTICE_ORDER``, ``NOTICE_SEEN_SESSION_KEY`` -- goes through the MODULE OBJECT and is
-resolved at call time, never bound at import.
+TWO KINDS, and only two (the user's decision, 2026-10-01): ``past_due`` (a renewal failed and
+the customer has been told) and ``pending_cancel`` (a PAID module cancelled and winding down).
+Every trial notice -- the trial ending, a trial that will not convert for want of a card or of
+consent, a lapsed trial, a cancelled trial -- was removed. The trial-ending EMAIL
+(``notify.py``, ``trial_ending``) is what still tells a payer about their trial.
 
-That is not stylistic. ``test_subscription_notice.py`` patches
-``blueprints.entity.services.modules.TRIAL_ENDING_SOON_DAYS`` and
-``...build_subscription_notices`` by dotted path; a ``from ... import`` here would capture
-the real values at import and the patches would be silently ignored (docs/code_cleanse/CODE_CLEANSE_NOTES.md,
-"dependency injection is required in this repo").
+Everything this module reads back off the entity side -- ``get_module_cards``,
+``_NOTICE_ORDER``, ``NOTICE_SEEN_SESSION_KEY`` -- goes through the MODULE OBJECT
+(``billing.services.entity_modules``) and is resolved at call time, never bound at import, so
+a test that patches ``billing.services.entity_modules.get_module_cards`` by dotted path is
+honoured; a ``from ... import`` here would capture the real value and the patch would be
+silently ignored.
 """
 from __future__ import annotations
 
@@ -75,70 +74,14 @@ def build_subscription_notices(entity_id: str, user_id) -> dict:
             )
             continue
 
-        # 2. The trial ALREADY lapsed and the gate is off. This state was silent: a
-        #    payer could lose a module and never be told, because branch 3 below only
-        #    fires while a trial is still running and there was nothing after it. The
-        #    restart screen on the settings page can fix it, so the notice is the thing
-        #    that gets them there.
-        #
-        #    Reuses ``needs_card`` rather than inventing a kind: the billing frontend
-        #    types NoticeKind as a closed union and renders every kind generically, so a
-        #    new one would arrive there unhandled.
-        #
-        #    NAMES THE MODULE, and has to. An entity can be part-lapsed with another
-        #    trial still running, and a notice implying the whole company is down would
-        #    be wrong for the half that is fine.
-        if card.get("trial_expired") and not card.get("has_access"):
-            ended = card.get("access_end_long") or card.get("trial_end_long")
-            items.append(
-                {
-                    "kind": "needs_card",
-                    "severity": "critical",
-                    "module": name,
-                    "module_code": code,
-                    "title": f"{name} has expired",
-                    "detail": (
-                        (f"Its free trial ended {ended}. " if ended else "")
-                        + "Restart billing to get it back."
-                    ),
-                    "deadline": ended,
-                }
-            )
-            continue
-
-        # 3. A trial that will NOT convert. Two different fixes, so two kinds — a
-        #    payer with a card saved still has to authorise THIS company before it
-        #    can be charged (see checkout._convert_due_trial).
-        if card.get("needs_card"):
-            consent_only = card.get("needs_consent_only")
-            deadline = card.get("period_end_long") or card.get("period_end_short")
-            items.append(
-                {
-                    "kind": "needs_consent" if consent_only else "needs_card",
-                    "severity": "warning",
-                    "module": name,
-                    "module_code": code,
-                    "title": (
-                        f"Confirm billing to keep {name}"
-                        if consent_only
-                        else f"Add a payment method to keep {name}"
-                    ),
-                    "detail": (
-                        (
-                            "Your saved card is used by your other companies and won't be "
-                            "charged for this one until you confirm."
-                        )
-                        if consent_only
-                        else "Your free trial will end without converting."
-                    )
-                    + (f" Free trial ends {deadline}." if deadline else ""),
-                    "deadline": deadline,
-                }
-            )
-            continue
-
-        # 4. Winding down — cancelled but still inside the paid period.
-        if card.get("pending_cancel") and card.get("access_end_long"):
+        # 2. Winding down — a PAID module cancelled but still inside its paid period.
+        #    A cancelled free trial also reads ``pending_cancel``; that is a trial, and
+        #    trials get no notice.
+        if (
+            card.get("pending_cancel")
+            and card.get("access_end_long")
+            and not card.get("trial_cancelled")
+        ):
             items.append(
                 {
                     "kind": "pending_cancel",
@@ -152,50 +95,6 @@ def build_subscription_notices(entity_id: str, user_id) -> dict:
                     "deadline": card.get("access_end_long"),
                 }
             )
-            continue
-
-        # 5. A healthy trial that will convert. Not a problem — but the first charge
-        #    is a surprise if nobody said it was coming, so it carries its date for
-        #    the whole trial rather than only near the end.
-        period_end = card.get("period_end")
-        if (
-            card.get("subscription_status") == "trialing"
-            and period_end
-            and not card.get("pending_cancel")
-        ):
-            # Still >= 0 even with no window: a trial past its end date is not
-            # "ending", it has ended, and the sweep is what speaks next.
-            #
-            # ``trial_closing`` is the one exception, and it is not a contradiction of
-            # that rule: it means the term has passed but nothing has closed the trial
-            # out YET and the customer still has access. Dropping the notice there would
-            # take the "first charge is coming, on this date" message away in the final
-            # hour before the charge — the moment it is most worth having on screen — and
-            # would make the panel visibly rearrange itself for a state nobody can act on.
-            days_left = (period_end - now).days
-            if (days_left >= 0 or card.get("trial_closing")) and (
-                entity_modules.TRIAL_ENDING_SOON_DAYS is None
-                or days_left <= entity_modules.TRIAL_ENDING_SOON_DAYS
-            ):
-                items.append(
-                    {
-                        "kind": "trial_ending",
-                        "severity": "info",
-                        "module": name,
-                        "module_code": code,
-                        # "is ending" was true when this only fired in the last week.
-                        # It now runs the whole trial, and reading "ending" on day one
-                        # of thirty would look like a bug — so the title states the
-                        # state and the detail carries the date.
-                        "title": f"{name} is on a free trial",
-                        "detail": (
-                            f"Your trial ends {card.get('period_end_long')} and billing starts then."
-                            if card.get("period_end_long")
-                            else "Billing starts when your trial ends."
-                        ),
-                        "deadline": card.get("period_end_long"),
-                    }
-                )
 
     items.sort(key=lambda i: entity_modules._NOTICE_ORDER.index(i["kind"]))
 

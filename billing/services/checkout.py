@@ -1203,12 +1203,11 @@ def notify_trials_ending(days_before: int = 7, limit: int | None = None) -> dict
                 "trial_end": min(row.trial_end for row in rows),
                 "amount": amount,
                 "currency": currency,
-                # TWO reasons a trial will not convert. The email no longer words
-                # them differently — one "action needed" body covers both, and the
-                # in-app banner (``notices.py``) is what still distinguishes "add a
-                # payment method" from "confirm billing for this company". Both flags
-                # stay because the SEND now gates on them: either one means the trial
-                # lapses, and neither means there is nothing to say.
+                # TWO reasons a trial will not convert. The email does not word them
+                # differently — one "action needed" body covers both (the in-app trial
+                # notices that told them apart were removed 2026-10-01). Both flags stay
+                # because the SEND gates on them: either one means the trial lapses,
+                # and neither means there is nothing to say.
                 "needs_card": not _trial_has_card(payer),
                 "needs_consent": not store.has_billing_consent(entity_id, payer),
             }

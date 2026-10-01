@@ -21,9 +21,7 @@ unless its router says otherwise, so forgetting the decorator on a new endpoint 
 closed. The ``me`` router opts into ``SelfBearerAuth`` (person, not company); nothing is
 public but ``/healthz`` and the OpenAPI document.
 
-EVERY ROUTER IS A STUB UNTIL PART 2 STEP 3: each path exists, is authenticated, and
-answers ``501 {"error": "not_implemented"}``. The dark middleware sits in front of all of
-it (``core/middleware.py``), which is what ``billing/tests/test_dark.py`` pins.
+Every router is live (Part 2 step 3); ``billing/tests/test_contract.py`` pins the paths.
 """
 
 from django.http import JsonResponse
@@ -38,9 +36,8 @@ api = NinjaAPI(
     version="0.1.0",
     description="The subscription engine, extracted from Minty (Part 2 of the modernisation plan).",
     auth=BearerAuth(),
-    # The document is one of the two paths that answer while dark (the other is /healthz), so
-    # the contract can be read without switching the feature on. Interactive docs stay off
-    # the public surface; open them locally with DEBUG if wanted.
+    # The document is public (with /healthz) so the contract can be read without a token.
+    # Interactive docs stay off the public surface; open them locally with DEBUG if wanted.
     openapi_url="/openapi.json",
     docs_url="/_docs",
 )
@@ -59,7 +56,7 @@ api.add_router("/onboarding", onboarding_router, tags=["Onboarding"])
 
 
 def healthz(request):
-    """Liveness only - does not touch the database, and answers while dark.
+    """Liveness only - does not touch the database, and needs no token.
 
     Deliberately not a readiness check: the container entrypoint already waits for the
     database and the schema before starting, so a health endpoint that also queried would

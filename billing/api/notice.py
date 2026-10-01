@@ -1,5 +1,5 @@
 """``GET /api/entities/{id}/subscription-notice`` - the notice the payment module's landing
-page shows (trial ending, past due, cancelled...). Flask served it as
+page shows (past due, or a paid module winding down). Flask served it as
 ``/api/entity/<id>/subscription-notice`` in ``entity/routes/modules.py``
 (``subscription_notice_api``); the plural is the one path change. The JSON keeps
 ``settings_path`` so billing-frontend's ``buildMintyEnterUrl`` is untouched. Flask's own
@@ -74,6 +74,11 @@ def subscription_notice(request, entity_id: str):
         return respond({"items": []})
 
     # A Minty PATH, not a URL: the frontend's buildMintyEnterUrl() hands its token back for
-    # a session. Returning a bare origin here would land on the login form.
-    notice["settings_path"] = f"/entity/settings/module/{entity_id}"
+    # a session. Returning a bare origin here would land on the login form. The path is
+    # Flask's hand-over to minty-web, which lands on this company's module page.
+    from billing.services.notify import handoff_path
+
+    notice["settings_path"] = handoff_path(
+        f"/subscription/entities/{entity_id}/modules", entity_id=entity_id
+    )
     return respond(notice)

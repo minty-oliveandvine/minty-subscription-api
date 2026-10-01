@@ -20,10 +20,8 @@ clock, the policy row, the catalog, the Stripe default-card answer) are what Fla
 ``app.app_context()`` gave the timer; ``run_pass_now`` opens one around each pass, on the
 job thread, and closes stale database connections either side of it.
 
-**Off unless asked, twice.** ``SUBSCRIPTION_ENABLED`` outranks everything: dark, there is
-nothing to convert, renew or retry, and a timer that charged anyway would be the one thing
-the switch exists to make impossible. ``SUBSCRIPTION_SCHEDULER_ENABLED`` is the timer's
-own switch, unset by default so importing the app in a test or a shell bills nobody.
+**Off unless asked.** ``SUBSCRIPTION_SCHEDULER_ENABLED`` is the timer's own switch and the
+only one: unset by default so importing the app in a test or a shell bills nobody.
 
 **A missed run costs an hour, except for the full pass.** The job store is in memory, so a
 process starting at 09:30 schedules its next run for 10:00. The FULL pass can lose a DAY: a
@@ -51,8 +49,7 @@ LIGHT = "light"
 
 
 def run_pass_now(*, mode: str) -> dict | None:
-    """One pass, under the lock. Returns None if another holder was already running one,
-    or if subscriptions are dark.
+    """One pass, under the lock. Returns None if another holder was already running one.
 
     Both the full and the light job call this, and they share ONE lock rather than having
     one each - a light pass overlapping the full pass would put a narrowed sweep and an
@@ -63,9 +60,6 @@ def run_pass_now(*, mode: str) -> dict | None:
     scheduler that is switched on and silently not charging is indistinguishable from one
     that is working; stopping every charge means SUBSCRIPTION_SCHEDULER_ENABLED off.
     """
-    if not settings.SUBSCRIPTION_ENABLED:
-        logger.info("subscriptions: dark - the %s pass does nothing", mode)
-        return None
     from django.db import close_old_connections
 
     from billing.services import _context, clock, daily
@@ -100,9 +94,6 @@ def start_scheduler():
     management commands and the autoreloader parent). Returning None is the normal case:
     only the deployed web service sets ``SUBSCRIPTION_SCHEDULER_ENABLED``.
     """
-    if not settings.SUBSCRIPTION_ENABLED:
-        logger.info("scheduler: not started - subscriptions are dark (SUBSCRIPTION_ENABLED)")
-        return None
     if not settings.SUBSCRIPTION_SCHEDULER_ENABLED:
         logger.debug("scheduler: disabled (SUBSCRIPTION_SCHEDULER_ENABLED is not set)")
         return None

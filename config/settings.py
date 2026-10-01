@@ -37,12 +37,8 @@ INSTALLED_APPS = [
     "billing",
 ]
 
-# Order matters at the tail: the dark gate answers its 404 INSIDE CorsMiddleware, so the
-# refusal still carries Access-Control-Allow-Origin and the browser apps read "not there"
-# rather than a CORS failure (core/middleware.py::SubscriptionsDarkMiddleware).
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
-    "core.middleware.SubscriptionsDarkMiddleware",
     "core.middleware.ServiceScopeMiddleware",
     "core.middleware.RequestLoggingMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -72,23 +68,16 @@ def _flag(name: str, default: bool = False) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# The two switches
+# The scheduler switch
 #
-# SUBSCRIPTION_ENABLED - the feature as a whole, mirrored from Minty's
-# ``blueprints/shared/feature_flags.py`` and deployed with the same value on Minty,
-# onboarding-backend and the two web apps. OFF unless set: production cut over with
-# subscriptions dark. Off, every path but /healthz and the OpenAPI document answers 404
-# (with CORS headers), the scheduler does not start whatever its own switch says, and
-# ``manage.py subscriptions tick`` exits 0 having done nothing. Switching it on writes
-# NOTHING - no grant, no trial, no revocation; ``revoke-ungranted`` is the separate
-# launch-day command.
+# Subscriptions are always on: every route answers. (The feature-wide dark switch,
+# SUBSCRIPTION_ENABLED, was removed 2026-10-01 once the service ran on a test site.)
 #
-# SUBSCRIPTION_SCHEDULER_ENABLED - the in-process timer (billing/scheduler.py). Off by
-# default so importing the app in a test or a shell bills nobody; on in the deployed web
-# service only, until Part 3's Terraform moves the pass to a Render Cron Job running
-# ``manage.py subscriptions tick``.
+# SUBSCRIPTION_SCHEDULER_ENABLED - the in-process timer (billing/scheduler.py), and the only
+# thing that decides whether it starts. Off by default so importing the app in a test or a
+# shell bills nobody; on in the deployed web service only, until Part 3's Terraform moves the
+# pass to a Render Cron Job running ``manage.py subscriptions tick``.
 # ---------------------------------------------------------------------------
-SUBSCRIPTION_ENABLED = _flag("SUBSCRIPTION_ENABLED", False)
 SUBSCRIPTION_SCHEDULER_ENABLED = _flag("SUBSCRIPTION_SCHEDULER_ENABLED", False)
 SUBSCRIPTION_SCHEDULER_LIGHT = _flag("SUBSCRIPTION_SCHEDULER_LIGHT", True)
 SUBSCRIPTION_SCHEDULER_TZ = os.environ.get("SUBSCRIPTION_SCHEDULER_TZ") or "Asia/Hong_Kong"

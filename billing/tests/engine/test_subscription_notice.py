@@ -1,11 +1,14 @@
 """The subscription notice shown on both landing pages.
 
-Nothing in the product told a customer their trial was about to lapse or their card
-had been declined — the settings page held all of it, and you only saw it if you went
-looking. This is the interruption: one modal, once per entity per login, on the Petty
-Cash dashboard and the Payment landing page.
+Nothing in the product told a customer their card had been declined — the settings
+page held all of it, and you only saw it if you went looking. This is the interruption:
+one modal, once per entity per login, on the Petty Cash dashboard and the Payment landing
+page. Two kinds only: ``past_due`` and a PAID module's ``pending_cancel``. Every trial
+notice was removed 2026-10-01 (the user's decision); the trial-ending email speaks instead.
 
-Two things are worth pinning down and neither is the copy:
+Three things are worth pinning down and none is the copy:
+
+* **Trials say nothing.** Running, won't-convert, lapsed or cancelled - no item.
 
 * **The list is the point.** A company can be past due on one module and winding down
   another. Picking "the most important" one and hiding the rest would be a lie of
@@ -38,6 +41,9 @@ def _card(code, name, **overrides):
         "needs_card": False,
         "needs_consent_only": False,
         "pending_cancel": False,
+        "trial_cancelled": False,
+        "trial_expired": False,
+        "has_access": False,
         "access_end_long": None,
         "period_end": None,
         "period_end_long": None,
@@ -156,25 +162,6 @@ def test_past_due_without_a_deadline_still_says_something_actionable(notices):
     assert "payment method" in result["items"][0]["detail"]
 
 
-def test_trial_without_a_card_is_distinguished_from_one_needing_consent(notices):
-    """Two reasons a trial won't convert, and the fix differs — so must the copy."""
-    no_card = notices(
-        [_card("PETTY_CASH", "Petty Cash", needs_card=True,
-               period_end_long="19 Aug 2026")]
-    )["items"][0]
-    consent = notices(
-        [_card("PETTY_CASH", "Petty Cash", needs_card=True, needs_consent_only=True,
-               period_end_long="19 Aug 2026")]
-    )["items"][0]
-
-    assert no_card["kind"] == "needs_card"
-    assert "Add a payment method" in no_card["title"]
-
-    assert consent["kind"] == "needs_consent"
-    assert "Confirm billing" in consent["title"]
-    assert "other companies" in consent["detail"]
-
-
 def test_pending_cancel_reports_when_access_ends(notices):
     result = notices(
         [_card("PAYMENT_REQUEST", "Payment", pending_cancel=True, access_end_long="1 Sep 2026")]
@@ -186,105 +173,36 @@ def test_pending_cancel_reports_when_access_ends(notices):
     assert "won't be billed again" in item["detail"]
 
 
-# --- the trial-ending window ------------------------------------------------
+# --- trials ---------------------------------------------------------------
 
 
-def test_a_trial_ending_soon_is_announced(notices):
-    soon = datetime.now(UTC) + timedelta(days=2)
-    result = notices(
-        [_card("PETTY_CASH", "Petty Cash", subscription_status="trialing",
-               period_end=soon, period_end_long="10 Aug 2026")]
-    )
+def test_no_trial_produces_a_notice(notices):
+    """Removed 2026-10-01 by the user's decision: a trial is never an in-app notice.
 
-    assert result["items"][0]["kind"] == "trial_ending"
-    assert result["items"][0]["severity"] == "info"
-
-
-def test_a_trial_ending_far_off_is_announced_too(notices):
-    """No window: a running trial carries its first-charge date from day one.
-
-    This used to be silent outside a 7-day window. It isn't, because the point of
-    the line is that nobody can say they were never told the date — which is only
-    true if it is there before the last week.
+    A cancelled free trial reads ``pending_cancel`` too (with an access end), and is the
+    case most likely to slip back in through the paid branch.
     """
-    later = datetime.now(UTC) + timedelta(days=45)
-    result = notices(
-        [_card("PETTY_CASH", "Petty Cash", subscription_status="trialing",
-               period_end=later, period_end_long="30 Sep 2026")]
-    )
-
-    assert result["items"][0]["kind"] == "trial_ending"
-    assert "30 Sep 2026" in result["items"][0]["detail"]
-
-
-def test_a_trial_titles_the_state_not_a_countdown(notices):
-    """"is ending" on day one of thirty reads as a bug."""
-    later = datetime.now(UTC) + timedelta(days=45)
-    result = notices(
-        [_card("PETTY_CASH", "Petty Cash", subscription_status="trialing",
-               period_end=later, period_end_long="30 Sep 2026")]
-    )
-
-    assert result["items"][0]["title"] == "Petty Cash is on a free trial"
-
-
-def test_a_trial_past_its_end_date_is_not_announced(notices):
-    """It has ended, not "is ending" — the sweep is what speaks next."""
-    past = datetime.now(UTC) - timedelta(days=3)
-    result = notices(
-        [_card("PETTY_CASH", "Petty Cash", subscription_status="trialing",
-               period_end=past, period_end_long="1 Aug 2026")]
-    )
-
-    assert result["items"] == []
-
-
-def test_a_trial_still_being_closed_out_keeps_its_notice(notices):
-    """The one exception, and it does not contradict the rule above.
-
-    ``trial_closing`` means the term has passed but the subscription pass has not closed
-    the trial out yet and the customer still has access — a window of under an hour. The
-    notice carries "the first charge is coming, on this date", so dropping it here would
-    remove that message in the final minutes before the charge, which is when it is most
-    worth having on screen. It would also make the page visibly rearrange itself for a
-    state nobody can act on.
-
-    The card above has no ``trial_closing`` flag at all, which is what keeps a genuinely
-    stale trial silent.
-    """
-    past = datetime.now(UTC) - timedelta(minutes=20)
-    result = notices(
-        [_card("PETTY_CASH", "Petty Cash", subscription_status="trialing",
-               period_end=past, period_end_long="12 Aug 2026", trial_closing=True)]
-    )
-
-    assert [i["kind"] for i in result["items"]] == ["trial_ending"]
-    assert result["items"][0]["title"] == "Petty Cash is on a free trial"
-
-
-def test_the_window_can_be_restored(notices, monkeypatch):
-    """TRIAL_ENDING_SOON_DAYS = int goes back to warning only near the end."""
-    monkeypatch.setattr(
-        "billing.services.entity_modules.TRIAL_ENDING_SOON_DAYS", 7
-    )
-    later = datetime.now(UTC) + timedelta(days=45)
-    result = notices(
-        [_card("PETTY_CASH", "Petty Cash", subscription_status="trialing",
-               period_end=later, period_end_long="30 Sep 2026")]
-    )
-
-    assert result["items"] == []
-
-
-def test_a_trial_that_wont_convert_reports_the_fix_not_the_countdown(notices):
-    """needs_card wins over trial_ending: "add a card" is the actionable half."""
-    soon = datetime.now(UTC) + timedelta(days=1)
-    result = notices(
-        [_card("PETTY_CASH", "Petty Cash", subscription_status="trialing",
-               needs_card=True, period_end=soon, period_end_long="5 Aug 2026")]
-    )
-
-    assert [i["kind"] for i in result["items"]] == ["needs_card"]
+    future = datetime.now(UTC) + timedelta(days=10)
+    trials = {
+        "running": _card("PETTY_CASH", "Petty Cash", subscription_status="trialing",
+                         has_access=True, period_end=future, period_end_long="10 Oct 2026"),
+        "no card": _card("PETTY_CASH", "Petty Cash", subscription_status="trialing",
+                         has_access=True, needs_card=True, period_end=future,
+                         period_end_long="10 Oct 2026"),
+        "consent only": _card("PETTY_CASH", "Petty Cash", subscription_status="trialing",
+                              has_access=True, needs_card=True, needs_consent_only=True,
+                              period_end=future, period_end_long="10 Oct 2026"),
+        "lapsed": _card("PETTY_CASH", "Petty Cash", trial_expired=True, has_access=False,
+                        access_end_long="1 Sep 2026"),
+        "cancelled": _card("PETTY_CASH", "Petty Cash", subscription_status="trialing",
+                           has_access=True, pending_cancel=True, trial_cancelled=True,
+                           access_end_long="10 Oct 2026", period_end=future,
+                           period_end_long="10 Oct 2026"),
+    }
+    for label, card in trials.items():
+        result = notices([card])
+        assert result["items"] == [], label
+        assert result["severity"] is None, label
 
 
 # --- the list ---------------------------------------------------------------

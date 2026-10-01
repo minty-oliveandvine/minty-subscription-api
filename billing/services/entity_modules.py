@@ -7,7 +7,7 @@ catalog (``entity_function``) defines which modules exist; per-entity on/off liv
 single place in THIS service that writes those rows, so the daily pass and the subscription
 lifecycle produce rows shaped exactly as Flask's ``_write_pairs`` produces them (id columns,
 audit columns, enabled/disabled timestamps) - the projection has two writers during Part 2
-(Flask while dark, this service when live) and their rows must be indistinguishable.
+(Flask and this service) and their rows must be indistinguishable.
 
 Two helpers:
   * ``apply_module_selection(s)`` / ``apply_default_modules`` - write the FULL state at once
@@ -80,15 +80,10 @@ MODULE_DISPLAY: dict[str, dict] = {
     },
 }
 
-# How close a converting trial has to be before it is worth mentioning, or None to
-# mention it for the whole trial. None is deliberate: a running trial has a first
-# charge coming, and a customer who is told the date on day one cannot say they were
-# never told.
-TRIAL_ENDING_SOON_DAYS: int | None = None
-
 # Ordering for the notice list, most severe first. The modal shows every item that
-# applies rather than picking one.
-_NOTICE_ORDER = ("past_due", "needs_card", "needs_consent", "pending_cancel", "trial_ending")
+# applies rather than picking one. It is also the list of every kind ``notices`` may
+# emit: a kind missing here makes the sort raise. Trial kinds were removed 2026-10-01.
+_NOTICE_ORDER = ("past_due", "pending_cancel")
 
 #: Session key holding the entity ids whose notice has already been shown this login
 #: (Flask's dashboard; kept as a name because ``notices`` spells it).
@@ -159,33 +154,6 @@ def get_enabled_modules_for_entities(entity_ids: list[str]) -> dict[str, set[str
         state = _enabled_state(entity_id)
         result[entity_id] = {code for code, on in state.items() if on}
     return result
-
-
-def get_plain_module_cards(entity_id: str) -> list[dict]:
-    """The module page's list while subscriptions are dark: one card per catalogue
-    module with its name, description, illustration and whether it is on.
-
-    No subscription state, no Stripe read, no price - ``is_enabled`` is the whole answer.
-    Ordered by the catalogue's ``display_order``.
-    """
-    state = _enabled_state(entity_id)
-    rows = list(EntityFunction.objects.filter(function_code__in=MODULE_CODES))
-    by_code = {fn.function_code: fn for fn in rows}
-    cards = []
-    for code in MODULE_CODES:
-        fn = by_code.get(code)
-        display = MODULE_DISPLAY.get(code, {})
-        cards.append({
-            "code": code,
-            "name": fn.function_name if fn and fn.function_name else code,
-            "description": fn.description if fn and fn.description else "",
-            "image": display.get("image", ""),
-            "learn_more": display.get("learn_more", "#"),
-            "enabled": bool(state.get(code)),
-            "display_order": getattr(fn, "display_order", None) or 0,
-        })
-    cards.sort(key=lambda c: (c["display_order"], c["code"]))
-    return cards
 
 
 def module_display_names(codes) -> dict[str, str]:

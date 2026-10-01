@@ -144,8 +144,12 @@ def test_notice_api_returns_the_items_and_a_minty_settings_path(client, user, en
     assert body["items"][0]["kind"] == "past_due"
     assert body["can_manage"] is True
     # A PATH, not a URL: the frontend wraps it in buildMintyEnterUrl so its token buys a
-    # Flask session. A bare origin would land on the login form instead.
-    assert body["settings_path"] == f"/entity/settings/module/{entity.id}"
+    # Flask session. A bare origin would land on the login form instead. The path is
+    # Flask's hand-over to minty-web's module page for this company.
+    assert body["settings_path"] == (
+        "/handoff/minty-web?next=%2Fsubscription%2Fentities%2F"
+        f"{entity.id}%2Fmodules&entity_id={entity.id}"
+    )
     assert res["Access-Control-Allow-Origin"] == ORIGIN
 
 

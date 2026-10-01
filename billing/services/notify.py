@@ -322,17 +322,24 @@ def settings_url(entity_id) -> str:
     return handoff_url(f"/subscription/entities/{entity_id}/modules", entity_id=entity_id)
 
 
-def handoff_url(next_path: str, *, entity_id=None) -> str:
-    """``{MINTY_PUBLIC_URL}/handoff/minty-web?next=...[&entity_id=...]`` — a link into
-    minty-web that Flask authenticates on the way through. Empty when there is no public
-    origin, like every other link here."""
-    root = base_url()
-    if not root:
-        return root
+def handoff_path(next_path: str, *, entity_id=None) -> str:
+    """``/handoff/minty-web?next=...[&entity_id=...]`` — the PATH on Flask that
+    authenticates the caller and hands them to ``next_path`` in minty-web. Relative, for a
+    caller that prefixes its own Minty origin (the notice API's ``settings_path``)."""
     params = {"next": "/" + str(next_path or "").lstrip("/")}
     if entity_id:
         params["entity_id"] = str(entity_id)
-    return f"{root}/handoff/minty-web?{urlencode(params)}"
+    return f"/handoff/minty-web?{urlencode(params)}"
+
+
+def handoff_url(next_path: str, *, entity_id=None) -> str:
+    """``{MINTY_PUBLIC_URL}`` + ``handoff_path`` — a link into minty-web that Flask
+    authenticates on the way through. Empty when there is no public origin, like every
+    other link here."""
+    root = base_url()
+    if not root:
+        return root
+    return root + handoff_path(next_path, entity_id=entity_id)
 
 
 def portal_url(next_path: str = "/subscription/subscriptions") -> str:
@@ -483,10 +490,11 @@ def _trial_ending(ctx: dict) -> dict:
                 "If you'd rather not continue, you can cancel any time before that date."
 
     Kept because the consent wording named the one thing this email no longer explains:
-    WHY a card the customer can see on their own billing page will not be charged. That
-    explanation now lives only in the in-app banner (``notices.py``), which distinguishes
-    "add a payment method" from "confirm billing for this company". If a payer ever asks
-    why they were told to add a card they already have, this is the paragraph they needed.
+    WHY a card the customer can see on their own billing page will not be charged. Nothing
+    says it any more: the in-app banner that told "add a payment method" apart from
+    "confirm billing for this company" was removed with every other trial notice
+    (2026-10-01). If a payer ever asks why they were told to add a card they already have,
+    this is the paragraph they needed.
     """
     entity = ctx.get("entity_name") or "your company"
     ends = day(ctx.get("trial_end"), ctx.get("zone"))

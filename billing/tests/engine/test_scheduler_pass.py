@@ -64,9 +64,7 @@ def test_a_held_lock_skips_the_pass(monkeypatch):
     assert called == []
 
 
-def test_dark_runs_nothing(settings, monkeypatch):
-    settings.SUBSCRIPTION_ENABLED = False
-    called = []
-    monkeypatch.setattr(daily, "run_daily", lambda *a, **k: called.append(1))
-    assert scheduler.run_pass_now(mode="full") is None
-    assert called == []
+def test_scheduler_does_not_start_without_its_own_switch(settings):
+    """``SUBSCRIPTION_SCHEDULER_ENABLED`` alone decides whether the timer starts."""
+    settings.SUBSCRIPTION_SCHEDULER_ENABLED = False
+    assert scheduler.start_scheduler() is None

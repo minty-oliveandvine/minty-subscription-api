@@ -68,15 +68,9 @@ and lands back on the page — silent while the Flask session is alive, a login 
 - **Read a Xero token.** No `user_token` mirror, no `XERO_*` setting.
 - **Sign anyone in.** No session, no cookie; `django.contrib.auth` is not installed.
 
-## Dark
-
-While `SUBSCRIPTION_ENABLED` is off the dark middleware answers 404 *before* authentication,
-with or without a token, with CORS headers — the same 404 Flask's `require_subscriptions_enabled`
-gives. A valid token changes nothing (`e2e/test_smoke.py::TestDark`).
-
 ## Configuration
 
-`SECRET_KEY` (shared), `SUBSCRIPTION_ENABLED`, `MINTY_DB_SCHEMA` → `DB_SCHEMA` (the
+`SECRET_KEY` (shared), `MINTY_DB_SCHEMA` → `DB_SCHEMA` (the
 `search_path`), `MINTY_WEB_URL` / `PAYMENTS_WEB_URL` / `CORS_ALLOWED_ORIGINS` (the two browser
 origins), `FLASK_APP_URL` (the one forwarded call and the re-handoff links).
 

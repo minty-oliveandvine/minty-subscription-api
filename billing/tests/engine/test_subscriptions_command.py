@@ -1,9 +1,7 @@
-"""``manage.py subscriptions <job>`` - one test per job, plus the two contracts around them.
+"""``manage.py subscriptions <job>`` - one test per job, plus the contracts around them.
 
-Dark: every job is a no-op that exits 0, except ``revoke-ungranted`` which refuses (pinned in
-``billing/tests/test_dark.py`` as well). Live: each job reaches its service and prints its
-ASCII report; the Stripe-touching ones, run with no key, report the missing key as THEIR
-failure and take nothing else down with them.
+Each job reaches its service and prints its ASCII report; the Stripe-touching ones, run with
+no key, report the missing key as THEIR failure and take nothing else down with them.
 """
 
 from __future__ import annotations
@@ -27,23 +25,7 @@ def run(*args):
     return out.getvalue()
 
 
-# --- dark -------------------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("job", ["tick", "run-daily", "close-trials", "run-renewals", "retry-dunning",
-                                 "notify-trial-ending", "sweep-access", "reconcile-customers"])
-def test_every_job_is_a_no_op_while_dark(settings, job):
-    settings.SUBSCRIPTION_ENABLED = False
-    assert "dark" in run(job)
-
-
-def test_revoke_ungranted_refuses_while_dark(settings):
-    settings.SUBSCRIPTION_ENABLED = False
-    with pytest.raises(CommandError):
-        run("revoke-ungranted")
-
-
-# --- live -------------------------------------------------------------------------------------
+# --- the jobs ---------------------------------------------------------------------------------
 
 
 def test_jobs_run_inside_a_request_scope(monkeypatch):

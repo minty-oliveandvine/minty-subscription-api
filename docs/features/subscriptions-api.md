@@ -21,8 +21,9 @@ page and this one disagree, this one is right.
   the two module cards (Petty Cash, Payment Request) with their state, and the nineteen actions —
   start a trial, buy, restart, cancel, retry a payment, change the card, manage billing. One page
   model plus one action endpoint.
-- **The notice** a dashboard shows for a company (trial ending, past due, cancelled): one route,
-  read by billing-frontend's landing page and by Flask's dashboard server-side.
+- **The notice** a dashboard shows for a company (past due, or a paid module winding down; no
+  trial notices since 2026-10-01): one route, read by billing-frontend's landing page and by
+  Flask's dashboard server-side.
 - **The wizard's money steps** (onboarding step 8/9): capturing a card, choosing a billing
   account, authorising billing, and — on All Set — starting the trial. Nine routes proxied here
   by onboarding-backend plus `POST /api/onboarding/trials/start`.
@@ -33,7 +34,7 @@ page and this one disagree, this one is right.
 
 Mounted by `config/urls.py`; auth per router in `docs/features/authentication.md`. Bodies are
 `{"error": "<sentence>"}` with Flask's status codes (`core/exceptions.py`): 400 bad input, 401
-no/invalid token, 402 card declined, 403 not allowed / no consent, 404 not yours or dark, 409
+no/invalid token, 402 card declined, 403 not allowed / no consent, 404 not yours, 409
 already done, 5xx upstream. `billing/tests/test_contract.py` pins every table below.
 
 ### `me` — the payer portal (`/api/me`, `SelfBearerAuth`)
@@ -72,7 +73,7 @@ sentence>}` for a stated refusal (handovers, the invitation - 422 not 403 becaus
 shows the server's words only when they read as prose), each route's own 500 copy for a
 surprise, and `payment_methods.run`'s 200/409/422/500 for the wallet. What the framework does
 instead: CORS on every answer including errors (`corsheaders`; a preflight is 200 where
-Flask-CORS said 204, and `Vary: origin`), the OPTIONS answer, the dark 404, the bearer check.
+Flask-CORS said 204, and `Vary: origin`), the OPTIONS answer, the bearer check.
 `billing/api/_json.py` is `jsonify`: a `datetime`/`date` in a payload renders RFC 822 (`Thu, 06
 Aug 2026 12:00:00 GMT` - `transfers._as_dict`'s `expires_at`, the subscriber screen's `since`;
 the clients parse that form), `Decimal` as a string, and a body that is missing, not JSON or
@@ -129,7 +130,21 @@ minty-web's page (`{MINTY_WEB_URL}/subscription/entities/{id}/modules`, `?sessio
 ### `notice` (`/api/entities`, `NoticeBearerAuth`)
 
 `GET /{entity_id}/subscription-notice` — Flask's `/api/entity/<id>/subscription-notice`
-(`entity/routes/modules.py`), the plural being the one path change; keeps `settings_path`.
+(`entity/routes/modules.py`), the plural being the one path change; keeps `settings_path`, which
+is now Flask's hand-over to minty-web's module page, a relative path:
+`/handoff/minty-web?next=/subscription/entities/{id}/modules&entity_id={id}` (url-encoded,
+`notify.handoff_path`; Flask's own notice points at the same destination). It was
+`/entity/settings/module/{id}`, Flask's retired settings page.
+
+**Two kinds, no trial notices (the user's decision, 2026-10-01).** `billing/services/notices.py`
+emits `past_due` (critical; only once the customer has been told, `dunning.told_of_failure`) and
+`pending_cancel` (warning; a PAID module cancelled and still inside its paid period - a cancelled
+free trial also reads `pending_cancel` and is skipped by `trial_cancelled`). The trial kinds -
+`trial_ending`, `needs_card` / `needs_consent` (a trial that will not convert) and the lapsed
+trial's `needs_card` - were removed, with `TRIAL_ENDING_SOON_DAYS`. `entity_modules._NOTICE_ORDER`
+is `("past_due", "pending_cancel")` and doubles as the list of kinds: an emitted kind missing
+there makes the sort raise, which the route turns into an empty notice. The trial-ending EMAIL
+(`notify.py`, event `trial_ending`) is unchanged and is what tells a payer about their trial.
 
 **Live since step 3 slice C (2026-09-22)** — `billing/api/notice.py`. Its auth class is
 `EntityBearerAuth` plus Flask's one fallback: a token that names NO company (billing-frontend's
@@ -176,19 +191,18 @@ browser to `ONBOARDING_WEB_URL` (`/?pm_session_id=…`, `/?pm_cancelled=1`). Fla
 
 ### Everything else
 
-`GET /healthz` (liveness, no database; answers while dark) and `GET /api/openapi.json` (the
-contract; answers while dark). Nothing else is public.
+`GET /healthz` (liveness, no database) and `GET /api/openapi.json` (the contract). Nothing else
+is public (`billing/tests/test_contract.py`).
 
-## 3. The dark contract
+## 3. Always on (the dark switch is gone)
 
-`SUBSCRIPTION_ENABLED` off (the default, and production's state from the cutover to launch):
-every path above but the two open ones answers `404 {"error": "not_found"}` **with CORS headers**,
-before authentication, with or without a token; the scheduler does not start whatever its own
-switch says; `manage.py subscriptions tick` and every other job exit 0 having done nothing;
-`revoke-ungranted` refuses with a `CommandError` so nobody believes access was revoked. Switching
-it on writes nothing. `core/middleware.py::SubscriptionsDarkMiddleware`; `billing/tests/test_dark.py`;
-`e2e/test_smoke.py::TestDark`. Launch day (plan step 8b) switches the API on **first**, then the
-web apps, then Minty and onboarding-backend.
+Subscriptions are always on: every route answers. The feature-wide switch `SUBSCRIPTION_ENABLED`
+and its `SubscriptionsDarkMiddleware` (every path 404 with CORS, the scheduler held, every job a
+no-op, `revoke-ungranted` refusing) were removed on 2026-10-01, by the user's decision, once the
+service ran on a test site. Removing it wrote nothing - no trial started, nothing granted or
+revoked. What remains: the scheduler has its own switch, `SUBSCRIPTION_SCHEDULER_ENABLED`, which
+alone decides whether the timer starts (§5); `manage.py subscriptions revoke-ungranted` stays a
+deliberate command, dry unless `--apply`.
 
 ## 4. The data — what this service writes
 
@@ -215,7 +229,7 @@ of `Minty/docs/schema/01_schema_rebased.sql`):
 (`blueprints/entity/routes/modules.py::_is_module_enabled`). Written only through
 `billing/services/entity_modules.py` (step 2) - the Django copy of Flask's
 `entity/services/modules._write_pairs`, whose rows it matches column for column (explicit UTC
-stamps, `created_by` only on insert) - and never while dark. The access SWEEP exempts companies
+stamps, `created_by` only on insert). The access SWEEP exempts companies
 still `onboarding` (the wizard writes the map at step 2 but trials start only at finalize);
 the writer itself has no such check, exactly like Flask's.
 
@@ -229,7 +243,7 @@ Read-only mirrors: `user`, `user_entity`, `entities`, `entity_function`, `countr
 decision until Part 3's Terraform. FULL pass at `SUBSCRIPTION_SCHEDULER_FULL_HOUR` (05:00
 `Asia/Hong_Kong`): close trials, raise renewals, retry dunning, notify trial-ending, sweep access
 for everyone. LIGHT pass every hour except the full one: close trials and raise renewals, sweep
-the payers touched. Gated by `SUBSCRIPTION_ENABLED` **and** `SUBSCRIPTION_SCHEDULER_ENABLED`; started from
+the payers touched. Gated by `SUBSCRIPTION_SCHEDULER_ENABLED` alone; started from
 `billing.apps.ready()` in the web process only (never from a management command, the test
 runner or the autoreloader parent). Two gunicorn workers → two timers → the pass's advisory lock
 (`daily.daily_lock`) lets one run: `pg_try_advisory_lock` on a **dedicated raw connection**
@@ -277,9 +291,9 @@ inside a scope): `tick` (what a cron will call — full at the full hour, light 
 `run-renewals [--issue] [--user ID]… [--limit N]` (DRY by default — the only job whose flag moves
 money; `run-daily` without `--issue` still converts due trials, retries dunning and sweeps),
 `retry-dunning [--limit N]`, `notify-trial-ending [--days-before 3] [--limit N]`, `sweep-access`,
-`reconcile-customers [--repair]`, `revoke-ungranted [--apply]` (launch day; refuses while dark;
+`reconcile-customers [--repair]`, `revoke-ungranted [--apply]` (deliberate only; dry unless `--apply`;
 the ORM rewrite of Flask's two raw statements — `billing/tests/engine/test_revoke_ungranted.py`).
-`manage.py plans list` reads the catalog and works dark — the quickest proof the service reaches
+`manage.py plans list` reads the catalog and writes nothing — the quickest proof the service reaches
 the database. On 2026-09-21 Django's and Flask's `revoke-ungranted` (dry) and `run-renewals`
 (dry) were run against the same dev database (`postgres`) and answered identically (0 rows, 0
 payers due).
@@ -485,7 +499,7 @@ path was written for.
   lapses as after any grace.
 - **A dunning stamp now means exactly "the customer was told".** `dunning.customer_told` (a
   stamp, or collection over) and its per-company form `dunning.told_of_failure(entity_id, now)`
-  (unknown is told) are the one rule the banner (`notices`), the module cards'
+  (unknown is told) are the one rule the notice (`notices`), the module cards'
   `subscription_status`, the subscriptions list (`portal._module_state(told=)`) and the
   accounts' `past_due` ask: a silent grace shows as active, never as a failed payment.
 - **Dunning and Pay now** — `retry_invoice` answers `(False, UNAVAILABLE)`, a marker like
@@ -682,8 +696,8 @@ Stripe return URLs of the module page's actions.
 
 ## 8. Where it is tested
 
-`billing/tests/`: `test_contract.py` (the tables above and the OpenAPI document), `test_dark.py`,
-`test_auth.py`, `test_models_guard.py`, `test_schema_name.py`, `test_settings_guard.py`,
+`billing/tests/`: `test_contract.py` (the tables above, the OpenAPI document, `/healthz` and the
+CORS preflight), `test_auth.py`, `test_models_guard.py`, `test_schema_name.py`, `test_settings_guard.py`,
 `test_no_flask_imports.py` (no `flask` / `sqlalchemy` / `loguru` / `blueprints` / `models.db`
 import anywhere under `billing`, `core`, `shared_models`, `config`) — and
 `billing/tests/engine/`, the ported `Minty/tests/test_subscription_*` family: 51 files, 762
@@ -694,8 +708,8 @@ both halves stub the same seams; `conftest.py` there lists the three ways Django
 from Flask's). Run on SQLite (`MINTY_TEST_PG_URI= pytest` — the blank prefix matters once a
 `.env` names the harness; 983 passed + 2 Postgres-only lock tests skipped, 00:07 on 2026-09-21
 after slice A) and on the Postgres built from `01` (`MINTY_TEST_PG_URI=… MINTY_REPO=C:\Github\Minty
-pytest`; 985 passed, 00:10). `e2e/test_smoke.py` against a running service, dark and live
-(`e2e/README.md`). After step 3 (2026-09-22): 1122 + 2 skipped on SQLite (00:09), 1124 on
+pytest`; 985 passed, 00:10). `e2e/test_smoke.py` against a running service (`e2e/README.md`; its dark cases were
+removed 2026-10-01). After step 3 (2026-09-22): 1122 + 2 skipped on SQLite (00:09), 1124 on
 Postgres (00:14); `pytest e2e` live against `runserver` on the dev database with a replay
 payer: 8 passed, 3 dark-only skipped (00:05). After the billing accounts (2026-09-25): 1219 + 2
 skipped on SQLite (00:09), 1221 on Postgres (00:15), `pytest e2e` 9 passed + 3 dark-only skipped
@@ -737,7 +751,13 @@ portal, notice, module-card and lifecycle files. The fake processor in
 by a mutation that puts its old behaviour back — 42 mutants (31 for the six failures, 11 for the
 review's findings), each failing at least one test. Both conftests (`engine/`, `api/`) now import
 `billing_gateway` before `_no_stripe` stubs the client: first imported under the stub, the module
-kept the stub's `get_stripe` after the test that installed it.
+kept the stub's `get_stripe` after the test that installed it. After the dark switch and the
+trial notices were removed (2026-10-01): 1571 + 2 skipped on SQLite (00:30), 1573 on Postgres
+(00:39) — `test_dark.py` deleted (its scheduler-switch case moved to
+`engine/test_scheduler_pass.py`, `/healthz` and the preflight to `test_contract.py`), the dark
+cases of `test_subscriptions_command.py` and `test_scheduler_pass.py` and the eight trial cases
+of `engine/test_subscription_notice.py` deleted, one case added there (`test_no_trial_produces_a_notice`:
+running, no card, consent only, lapsed and cancelled trials each say nothing).
 
 How the ported tests differ from Minty's, by rule: DB tests use pytest-django's `db` (a
 transaction per test) where Flask's `db_session` DELETEd tables afterwards — which is why the
@@ -906,7 +926,7 @@ against the ninja routers, into `billing/tests/api/`:
 - `tests/test_purchase_card_choice.py` (2 route tests) — **PORTED, slice B** into `billing/tests/api/test_module_settings_api.py`, together with the behaviour versions of `test_subscription_payer_permission`'s and `test_restart_billing_guard`'s route-source checks (every action as a co-admin, as a cashier who holds the card, the return leg as a co-admin; the restart route's four refusals in order) and the page model's wire shape — 84 tests
 - `tests/test_subscription_notice.py` (10) — **PORTED, slice C**: `billing/tests/api/test_subscription_notice.py`, all 10 (the stranger cases answer 401 at the door, see §2) plus the superadmin read and the real builder over an empty company — 12 tests
 - `tests/test_char_subscription.py`: the report-page gate check (Flask's gate); the rest is `billing/tests/engine/test_char_subscription.py` through the services
-- `tests/test_char_subscription_dark.py`: the HTTP and CLI-runner halves (`test_dark.py` and `test_subscriptions_command.py` pin the same contracts here)
+- `tests/test_char_subscription_dark.py`: not applicable since 2026-10-01 - this service has no dark switch any more (`test_dark.py` and the dark cases of `test_subscriptions_command.py` / `test_scheduler_pass.py` were deleted with it)
 
 Step 3 also renders the raw datetimes the services return in dicts (`transfers._as_dict`,
 the portal's `since`) as RFC 822, which Flask's `jsonify` did for free (`billing/api/_json.py`).
@@ -946,4 +966,4 @@ happening.**
 | 3 | DONE 2026-09-22: all four routers filled from Flask's views — `me` (`billing/api/me.py`, `_json.py` = `jsonify`; the invitation forwarded with the caller's bearer), `modules` (the page model minty-web renders + the 19 actions behind one gate), `notice` (`NoticeBearerAuth`, Flask's claimless fallback), `onboarding` (the nine + `trials/start`, which fails loudly); `docs/openapi.json` committed and held current by `test_contract.py` / `manage.py export_openapi`; 173 route tests in `billing/tests/api/` (32 portal + 7 wallet, 84 module page, 12 notice, 38 onboarding); e2e smoke asserts the live shapes |
 | 4c+ | DONE 2026-09-25: **billing accounts in the portal** — `GET /billing/accounts` (`portal.build_billing_accounts`), `update` / `default-card` / `move` (`billing/services/billing_accounts.py`), the account fields on `confirm`, `account` on `invoices` and `remove`, `next_billing` on `subscriptions`. Five silent failures fixed on the way: the landing's "Next Billing Date" was the anchor (the FIRST charge); the removal guard stopped at the first account on a shared card; card-keyed nomination raised on a shared card (`_group_for_card`, oldest wins); a company moved onto an emptied account lost access (`_carry_paid_days`' idle branch); a blanked address field was dropped by the SDK instead of cleared. Flask not mirrored (dark there; Django replaces it). **Same day, later: `next_bill` per account** (08-B's "Amount (estimated)") - `portal.next_bill_for_account` prices the account's next renewal with `renewals.build_renewal(..., converting_by=period.start)`: the runner's own invoice for the period starting on the next billing date, plus the trials that will have converted by then (`renewals._trial_converts` - the trial-end job's conjunction of customer, card for the company and consent, read from the database alone, never Stripe). `converting_by` is the forecast's only; the runner never passes it, so what it bills is unchanged. A figure that cannot be priced is null and logged, never a failed page. **Later still: schema item 23** - `subscription_invoice_line` records what each line PAID FOR (`period_start` / `period_end` / `unit_amount`), written by BOTH engines at issue: `billing.Line` carries them from whatever priced the line (`paid_from` holds a mid-period start to the period as `prorate` does), and an extension's come from `checkout.pending_extension_terms` - the paid-through date to the access end, and the rate only when re-deriving it piece by piece (`_extension_pieces`, which `_segmented_extension` now sums) reproduces the billed amount at ONE rate; never a blend, never a failed renewal. The breakdown reads them first. Minty migration `x1a01_invoice_line_span` ALTERs a database already up; both local ones have it, Supabase does not yet. **And 08-C's address became Stripe's own form** (the user's call): `?countries=1` also answers `publishable_key`, `update` takes `cardholder` (written with the address in one `billing_details` update, the account's card required as for the address), and every field is held to 255 characters. **2026-09-28: 08-K** - `POST /invoices/{invoice_id}/retry` and `retryable` on the invoice rows (above); `retry_now` gained `group_id` / `expect_invoice` in BOTH engines. And the engine now recognises a REPLAY-SCOPED renewal key (`dunning._names_period`: `<key>` or `<key>-<suffix>` - `replay_scenarios` scopes every key it issues so same-day runs do not collide at Stripe) where it picks the current period's invoice and where it settles one, so the dev database's lived past-due accounts can be retried and settle; production keys are never scoped. NOT covered: the renewal runner's duplicate guard (`_already_invoiced`) still matches keys exactly, so the live scheduler re-bills a replay-lived period (seen 2026-09-28 07:00 UTC on the catalogue's two 'Failed' accounts). **2026-09-29: the invoice PDF (Figma 09-A)** - `GET /invoices/{invoice_id}/pdf` and `has_pdf` on the invoice rows (above; Django only, Flask never had the portal's invoice actions); and in BOTH engines, a declined reinstatement voids the invoice it left open, and every Stripe item carries its own line's days (§6) |
 | 5 | Flask's copies deleted; onboarding-backend proxies here; the Stripe keys leave Flask |
-| 7 | deployed dark beside the phase-C builds at the cutover; 8b switches it on |
+| 7 | deployed beside the phase-C builds (on a test site since before 2026-10-01; the dark switch the plan's step 7/8b relied on was removed that day) |

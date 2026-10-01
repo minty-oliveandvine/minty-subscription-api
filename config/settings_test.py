@@ -7,9 +7,6 @@ from config.settings import *  # noqa: F401, F403
 # with Flask in production, too.
 SECRET_KEY = "test-secret-key-shared-with-flask"
 
-# The subscription feature is ON for the suite (its default is off - production cut over
-# dark); billing/tests/test_dark.py overrides it per test.
-SUBSCRIPTION_ENABLED = True
 # Never a timer in a test process.
 SUBSCRIPTION_SCHEDULER_ENABLED = False
 

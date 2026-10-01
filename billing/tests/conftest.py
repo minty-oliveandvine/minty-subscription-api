@@ -6,7 +6,7 @@ of ``01_schema_rebased.sql`` when ``MINTY_TEST_PG_URI`` is set (root ``conftest.
 
 WHAT THESE TESTS CAN AND CANNOT PROVE
 
-On SQLite they prove the service's own logic: auth decisions, the dark contract, response
+On SQLite they prove the service's own logic: auth decisions, response
 shapes, status codes. They cannot prove the model mirrors match the real schema - SQLite
 builds tables FROM the models. That gap is closed by the Postgres mode and by Minty's
 ``audit_models.py`` (``tests/test_zz_schema_audit.py`` there). Both are needed.
@@ -115,13 +115,6 @@ def auth_scoped(user, entity):
         "HTTP_AUTHORIZATION": f"Bearer {make_token(user.id, entity_id=entity.id)}",
         "HTTP_X_ENTITY_ID": str(entity.id),
     }
-
-
-@pytest.fixture
-def dark(settings):
-    """Run one test with subscriptions dark (the suite default is live)."""
-    settings.SUBSCRIPTION_ENABLED = False
-    return settings
 
 
 # ---------------------------------------------------------------------------------------

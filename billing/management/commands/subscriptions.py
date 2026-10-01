@@ -14,13 +14,8 @@
     sweep-access          reconcile module access with the subscriptions
     reconcile-customers   report (or --repair) payers whose Stripe customer has no mapping
     revoke-ungranted      launch day: take access from modules no subscription backs,
-                          dry unless --apply. REFUSES while dark.
-
-EVERY JOB EXITS 0 AND DOES NOTHING WHILE ``SUBSCRIPTION_ENABLED`` IS OFF. That is the dark
-contract for the command line: a cron job or a runbook step that fires against a dark
-deployment must be a no-op, not a failure that pages somebody, and never a write. The one
-exception is spelled out - ``revoke-ungranted`` says so and exits 1, because a launch-day
-command that silently did nothing would leave the operator believing access was revoked.
+                          dry unless --apply. A deliberate command: nothing else
+                          (no switch, no deploy) ever runs it.
 
 Every job runs inside a request scope (``billing.services._context.scope()``): the engine's
 per-request memos - the clock, the policy row, the price catalog, the Stripe default-card
@@ -74,16 +69,6 @@ class Command(BaseCommand):
 
     def handle(self, *args, job: str, mode: str, issue: bool, apply: bool, repair: bool,
                limit, days_before, users, **options):
-        if job == "revoke-ungranted" and not settings.SUBSCRIPTION_ENABLED:
-            # Not a no-op: the operator must know it did not run.
-            raise CommandError(
-                "revoke-ungranted refuses while SUBSCRIPTION_ENABLED is off - switch the "
-                "API on first (launch day, step 8b), then run it dry, read, then --apply."
-            )
-        if not settings.SUBSCRIPTION_ENABLED:
-            self.stdout.write(f"subscriptions {job}: dark (SUBSCRIPTION_ENABLED off) - nothing to do")
-            return
-
         from billing.services import _context
 
         runner = getattr(self, "_job_" + job.replace("-", "_"))
@@ -292,8 +277,8 @@ class Command(BaseCommand):
             )
 
     def _job_revoke_ungranted(self, *, apply, **_):
-        """LAUNCH DAY: the m1a01 step the cutover skipped while subscriptions were dark.
-        Dry by default; --apply writes. Grants nothing, starts nothing."""
+        """The m1a01 step the cutover skipped: take access from modules no subscription
+        backs. Deliberate only. Dry by default; --apply writes. Grants nothing, starts nothing."""
         from billing.services.access_sweep import revoke_ungranted_module_access
 
         hits = revoke_ungranted_module_access(dry_run=not apply)
