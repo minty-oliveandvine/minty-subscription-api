@@ -594,6 +594,10 @@ def test_a_refused_address_leaves_the_name_alone(app, wallet, countries, monkeyp
         ({}, 422, "nothing to change"),
         ({"billing_company": "   "}, 422, "company name"),
         ({"billing_email": "not-an-address"}, 422, "doesn't look right"),
+        ({"billing_email": "ap@acme"}, 422, "doesn't look right"),
+        # English only (2026-10-01): Korean either side of the "@" is its own sentence.
+        ({"billing_email": "김철수@acme.test"}, 422, "English letters, numbers and symbols"),
+        ({"billing_email": "ap@회사.한국"}, 422, "English letters, numbers and symbols"),
         # VARCHAR(255) - and Stripe's name, held to the same limit.
         ({"billing_company": "x" * 256}, 422, "under 255 characters"),
         ({"billing_email": "a" * 250 + "@acme.test"}, 422, "under 255 characters"),
@@ -614,6 +618,14 @@ def test_each_refusal_names_its_field(app, wallet, countries, kwargs, status, wo
     assert caught.value.status == status
     assert words in caught.value.message
     assert wallet["updated"] == []
+
+
+@pytest.mark.parametrize("email", ["a+b@sub.domain.museum", "o'neil_1@x-y.co.uk"])
+def test_the_email_rule_is_english_only_but_still_shallow(email):
+    """Printable ASCII is the whole tightening: an odd but English address still passes."""
+    from billing.services import billing_accounts
+
+    assert billing_accounts.validate_identity(email, None, require_both=False) == (email, None)
 
 
 def test_an_account_whose_card_is_gone_cannot_hold_an_address(app, wallet, countries):  # noqa: F811

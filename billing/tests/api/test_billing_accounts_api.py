@@ -217,6 +217,22 @@ def test_a_new_account_without_both_fields_is_refused_before_stripe(client, user
     assert confirm_spy == []
 
 
+@pytest.mark.parametrize("onto_existing", [False, True])
+def test_a_non_english_email_is_refused_before_stripe(client, user, confirm_spy, onto_existing):
+    """Opening an account, or renaming the caller's own one with the card."""
+    body = {"setup_intent": "seti_1", "billing_email": "김철수@vine.test"}
+    if onto_existing:
+        body["billing_group_id"] = str(_open(user, "pm_mine").id)
+    else:
+        body["billing_company"] = "Vine Consulting"
+
+    response = post_json(client, CONFIRM, body, **bearer(user))
+
+    assert response.status_code == 422
+    assert response.json()["error"] == "Email can only contain English letters, numbers and symbols."
+    assert confirm_spy == []
+
+
 def test_a_card_for_someone_elses_account_is_refused_before_stripe(
     client, user, other_user, confirm_spy
 ):

@@ -472,6 +472,8 @@ def my_payment_method_confirm(request):
         email, company = billing_email, billing_company
         if billing_group_id:
             payment_methods.account_of(uid, billing_group_id)
+            # An email sent with an existing account renames it: the same email rule.
+            email, _ = billing_accounts.validate_identity(email, None, require_both=False)
         elif email is not None or company is not None:
             email, company = billing_accounts.validate_identity(
                 email, company, require_both=True

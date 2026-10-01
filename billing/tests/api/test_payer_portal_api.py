@@ -533,6 +533,23 @@ def test_a_company_the_caller_does_not_pay_for_is_refused_before_flask_is_asked(
     assert calls == []
 
 
+@pytest.mark.parametrize(("email", "words"), [
+    ("김철수@example.com", "Email can only contain English letters, numbers and symbols."),
+    ("new.admin@예시.한국", "Email can only contain English letters, numbers and symbols."),
+    ("new.admin@example", "That doesn't look like an email address."),
+])
+def test_an_address_outside_the_rule_is_refused_before_flask_is_asked(
+    client, user, entity, invite_setup, email, words
+):
+    calls = invite_setup(_FlaskAnswer(200, {"status": "success", "email_sent": True}))
+
+    response = _post(client, user, f"{PORTAL}/invite-admin", {"entity": str(entity.id), "email": email})
+
+    assert response.status_code == 422
+    assert response.json() == {"error": words}
+    assert calls == []
+
+
 def test_a_company_row_carries_when_it_was_created(client, user, entity, monkeypatch):
     """The step-3 addition minty-web's Manage Subscriptions list asked for: ``created_at`` on
     each company row, ISO like ``date_iso`` because it is sorted on, not read. Everything

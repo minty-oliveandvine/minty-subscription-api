@@ -805,11 +805,16 @@ def invite_admin_to_entity(user_id, entity_id, email: str, *, send) -> tuple[boo
     a member", "an invitation is already pending") and passes through.
     """
     from billing.services import store as sub_store
+    from billing.services.billing_accounts import email_refusal
     from core.policy import Permission, has_permission
 
+    # The API's one email rule (``billing_accounts.EMAIL_RE``: printable ASCII, one "@", a
+    # dot in the domain), checked before Flask is asked - Flask refuses non-ASCII too.
+    not_an_address = "That doesn't look like an email address."
     address = (email or "").strip()
-    if not address or " " in address or address.count("@") != 1 or not all(address.split("@")):
-        return False, "That doesn't look like an email address."
+    refusal = email_refusal(address, not_an_address) if address else not_an_address
+    if refusal:
+        return False, refusal
 
     entity = _by_pk(Entity, entity_id) if entity_id else None
     if entity is None:

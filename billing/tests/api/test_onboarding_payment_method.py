@@ -141,6 +141,40 @@ def test_confirm_makes_the_new_card_the_default_when_asked(client, user, monkeyp
     }
 
 
+NOT_ENGLISH = "Email can only contain English letters, numbers and symbols."
+
+
+@pytest.mark.parametrize("email", ["김철수@vine.test", "ap@회사.한국"])
+def test_confirm_refuses_a_non_english_email_before_stripe(client, user, monkeypatch, email):
+    from billing.services import payment_methods
+
+    monkeypatch.setattr(payment_methods, "confirm_setup", lambda *a, **k: pytest.fail("reached Stripe"))
+
+    res = post_json(
+        client, "/api/onboarding/billing/payment-methods/confirm",
+        {"setup_intent": "seti_1", "billing_company": "Vine", "billing_email": email}, **bearer(user),
+    )
+
+    assert res.status_code == 422
+    assert res.json() == {"error": NOT_ENGLISH}
+
+
+def test_opening_an_account_refuses_a_non_english_email(client, user, monkeypatch):
+    from billing.services import payment_methods
+    from billing.services import store as sub_store
+
+    monkeypatch.setattr(payment_methods, "_owned", lambda uid, pm_id: None)
+    monkeypatch.setattr(sub_store, "create_billing_account", lambda *a, **k: pytest.fail("must not open"))
+
+    res = post_json(
+        client, "/api/onboarding/billing/accounts",
+        {"payment_method": "pm_mine", "billing_email": "김철수@vine.test"}, **bearer(user),
+    )
+
+    assert res.status_code == 422
+    assert res.json() == {"error": NOT_ENGLISH}
+
+
 def test_opening_an_account_needs_a_saved_card(client, user):
     res = post_json(client, "/api/onboarding/billing/accounts", {}, **bearer(user))
     assert res.status_code == 400

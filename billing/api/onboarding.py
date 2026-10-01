@@ -214,22 +214,27 @@ def billing_confirm(request):
     """Body ``{setup_intent, make_default?, billing_group_id?, billing_email?,
     billing_company?}``. Saving a card AUTHORISES NOTHING - that is ``/billing/authorize``.
     The three account fields are optional: a group id puts the card on an account the payer
-    already has (the service checks it is theirs), an email or company opens a new one."""
+    already has (the service checks it is theirs), an email or company opens a new one.
+    The email is held to the API's rule (``billing_accounts.validate_identity``) BEFORE the
+    service runs: the service reaches it only after the card is attached at Stripe."""
     from billing.services import payment_methods
+    from billing.services.billing_accounts import validate_identity
 
     payload = body(request)
     setup_intent = str(payload.get("setup_intent") or "").strip()
     make_default = bool(payload.get("make_default"))
     billing_group_id = str(payload.get("billing_group_id") or "").strip() or None
-    return _billing_call(
-        request,
-        lambda uid: payment_methods.confirm_setup(
+
+    def _confirm(uid):
+        email, _ = validate_identity(payload.get("billing_email"), None, require_both=False)
+        return payment_methods.confirm_setup(
             uid, setup_intent, make_default=make_default,
             billing_group_id=billing_group_id,
-            billing_email=payload.get("billing_email"),
+            billing_email=email,
             billing_company=payload.get("billing_company"),
-        ),
-    )
+        )
+
+    return _billing_call(request, _confirm)
 
 
 @onboarding_router.post("/billing/payment-methods/default", summary="Make one card the account's main one")
@@ -261,11 +266,14 @@ def billing_accounts(request):
 
     def _open(uid):
         from billing.services import store as sub_store
+        from billing.services.billing_accounts import validate_identity
 
         # OWNERSHIP FIRST: a ``pm_...`` copied from anywhere else cannot open an account.
         payment_methods._owned(uid, payment_method)
+        # The email rule before the write (printable ASCII; 422 in the form's words).
+        email, _ = validate_identity(billing_email, None, require_both=False)
         account = sub_store.create_billing_account(
-            uid, payment_method, billing_email=billing_email, billing_company=billing_company
+            uid, payment_method, billing_email=email, billing_company=billing_company
         )
         return {
             "id": account.id,

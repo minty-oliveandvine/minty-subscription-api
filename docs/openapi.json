@@ -866,7 +866,7 @@
     },
     "/api/onboarding/billing/payment-methods/confirm": {
       "post": {
-        "description": "Body ``{setup_intent, make_default?, billing_group_id?, billing_email?,\nbilling_company?}``. Saving a card AUTHORISES NOTHING - that is ``/billing/authorize``.\nThe three account fields are optional: a group id puts the card on an account the payer\nalready has (the service checks it is theirs), an email or company opens a new one.",
+        "description": "Body ``{setup_intent, make_default?, billing_group_id?, billing_email?,\nbilling_company?}``. Saving a card AUTHORISES NOTHING - that is ``/billing/authorize``.\nThe three account fields are optional: a group id puts the card on an account the payer\nalready has (the service checks it is theirs), an email or company opens a new one.\nThe email is held to the API's rule (``billing_accounts.validate_identity``) BEFORE the\nservice runs: the service reaches it only after the card is attached at Stripe.",
         "operationId": "billing_api_onboarding_billing_confirm",
         "parameters": [],
         "responses": {

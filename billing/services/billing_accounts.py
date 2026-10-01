@@ -39,10 +39,12 @@ from billing.services.payment_methods import (
     write_billing_address,
 )
 
-#: One "@", something either side, a dot in the domain — onboarding's ``EMAIL_RE``
-#: (``onboarding/lib/validation.ts``), deliberately shallow: these addresses authenticate
-#: nobody, and the only real proof one works is sending to it.
-EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+#: One "@", something either side, a dot in the domain, PRINTABLE ASCII ONLY (English only,
+#: the user's call 2026-10-01) — the frontends' ``EMAIL_RE`` (minty-web ``lib/emailInput.ts``
+#: and its copies), deliberately shallow: these addresses authenticate nobody, and the only
+#: real proof one works is sending to it. ``fullmatch`` — ``$`` alone would let a trailing
+#: newline through.
+EMAIL_RE = re.compile(r"[\x21-\x3F\x41-\x7E]+@[\x21-\x3F\x41-\x7E]+\.[\x21-\x3F\x41-\x7E]+")
 
 #: ``payer_billing_group.billing_email`` / ``billing_company`` are VARCHAR(255).
 FIELD_MAX = 255
@@ -52,7 +54,21 @@ FIELD_MAX = 255
 COMPANY_REQUIRED = "Enter the company name to invoice."
 EMAIL_REQUIRED = "Enter the email address invoices should go to."
 EMAIL_INVALID = "That email address doesn't look right."
+#: The frontends' ``EMAIL_ASCII_HINT``, word for word. Its own sentence rather than
+#: ``EMAIL_INVALID``: Korean in an address is a rule, not a typo, and the fix differs.
+EMAIL_NOT_ENGLISH = "Email can only contain English letters, numbers and symbols."
 TOO_LONG = "Keep that under 255 characters."
+
+
+def email_refusal(email: str, invalid: str) -> str | None:
+    """Why ``email`` (already trimmed, non-empty) is refused, or None. Non-ASCII first, in
+    its own words; anything else ``EMAIL_RE`` rejects gets the caller's ``invalid``. Shared
+    with ``portal.invite_admin_to_entity`` so the two email inputs here cannot drift."""
+    if not email.isascii():
+        return EMAIL_NOT_ENGLISH
+    if not EMAIL_RE.fullmatch(email):
+        return invalid
+    return None
 
 
 def validate_identity(email, company, *, require_both: bool) -> tuple[str | None, str | None]:
@@ -74,8 +90,9 @@ def validate_identity(email, company, *, require_both: bool) -> tuple[str | None
     if require_both and not email:
         raise PaymentMethodError(EMAIL_REQUIRED, status=422)
     if email:
-        if not EMAIL_RE.match(email):
-            raise PaymentMethodError(EMAIL_INVALID, status=422)
+        refusal = email_refusal(email, EMAIL_INVALID)
+        if refusal:
+            raise PaymentMethodError(refusal, status=422)
         if len(email) > FIELD_MAX:
             raise PaymentMethodError(TOO_LONG, status=422)
     return email, company
