@@ -27,7 +27,7 @@ THREE RULES, all of them load-bearing:
    (2026-09-30). Every write commits as it happens, so there is nothing staged left to roll
    back under a notice already sent; and nothing is mailed while a charge is in flight.
 
-The copy for all eight events lives in ``_COPY`` below rather than in eight templates, so
+The copy for all eight billing events (and the setup reminder) lives in ``_COPY`` below rather than in eight templates, so
 the entire customer-facing vocabulary of the billing system is reviewable on one screen —
 which matters more here than template purity, because these are the only words Minty ever
 says to a customer about their money. The eight are exactly the approved Figma designs
@@ -62,6 +62,13 @@ account's past-due access runs out (``payment_deadline``). From that moment "Pay
 refused and the next sweep cuts access, so a customer who pays at any time on the printed
 day is in time.
 
+ONE EMAIL HERE IS NOT ABOUT MONEY: ``onboarding_reminder`` (2026-10-01, Figma frame
+2969:1368 on page 573:990, minty-billing-api only - Flask never had it). It nudges the
+person who started setting up a company and stopped, lists the wizard steps still to do
+(``ONBOARDING_STEPS``) and comes from its own sender (``onboarding_sender``). It lives here
+for the template, the send-once log and the daily pass; ``onboarding_reminders`` decides
+who gets it and when.
+
 PORTED FROM FLASK (Part 2 step 2). The copy, the builders and the three rules are Flask's
 ``blueprints/subscription/services/notify.py`` verbatim; what changed is the delivery
 layer underneath them - Flask-Mail became Django's mail framework (``InlineImageMessage``
@@ -72,6 +79,7 @@ Flask's re-handoff (``settings_url`` / ``portal_url``) instead of to Flask's own
 """
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from email import encoders
@@ -114,6 +122,8 @@ SUBSCRIBER_TRANSFER_REQUESTED = "subscriber_transfer_requested"
 SUBSCRIBER_TRANSFER_ACCEPTED = "subscriber_transfer_accepted"
 SUBSCRIBER_TRANSFER_DECLINED = "subscriber_transfer_declined"
 SUBSCRIBER_TRANSFER_EXPIRED = "subscriber_transfer_expired"
+# Not billing: the "finish setting up your company" reminder (``onboarding_reminders``).
+ONBOARDING_REMINDER = "onboarding_reminder"
 
 # Retired 2026-09. The strings stay documented because historical ``subscription_email_log``
 # rows still carry them, and anyone reading a row for "trial_converted" needs to find out
@@ -143,6 +153,7 @@ EVENTS = (
     SUBSCRIBER_TRANSFER_ACCEPTED,
     SUBSCRIBER_TRANSFER_DECLINED,
     SUBSCRIBER_TRANSFER_EXPIRED,
+    ONBOARDING_REMINDER,
 )
 
 #: The emails about a billing account's MONEY - declined, declined again, settled. They go
@@ -364,6 +375,29 @@ def billing_sender() -> str | None:
     """
     return (getattr(settings, "SUBSCRIPTION_EMAIL", None)
             or getattr(settings, "DEFAULT_FROM_EMAIL", None))
+
+
+def onboarding_sender() -> str | None:
+    """The From address for the setup reminder: ``ONBOARDING_EMAIL``, else
+    ``DEFAULT_FROM_EMAIL`` - the same fallback, for the same reason, as ``billing_sender``."""
+    return (getattr(settings, "ONBOARDING_EMAIL", None)
+            or getattr(settings, "DEFAULT_FROM_EMAIL", None))
+
+
+def sender_for(event: str) -> str | None:
+    """Who an email comes from: the setup reminder its own address, the rest billing's."""
+    return onboarding_sender() if event == ONBOARDING_REMINDER else billing_sender()
+
+
+def setup_url(entity_id) -> str:
+    """Where a half-set-up company carries on: Flask's ``/entity/<id>``, which signs the
+    reader in, checks they belong to the company and sends a company still ``onboarding``
+    into the wizard with a fresh token, at the step they saved. No token goes in the link -
+    the wizard's lasts an hour. Without a company, Minty's front door."""
+    root = base_url()
+    if not root or not entity_id:
+        return root
+    return f"{root}/entity/{entity_id}"
 
 
 def settings_url(entity_id) -> str:
@@ -750,6 +784,58 @@ def _subscriber_transfer_expired(ctx: dict) -> dict:
     }
 
 
+#: The setup reminder's "Still to do" blocks: (first wizard step, last wizard step, title,
+#: line). The wizard's own numbering (onboarding ``lib/wizardSteps.ts``): 1 basic info, 2
+#: modules, 3 invite, 4 Xero, 5-8 the accounting settings, 9 "All set" (which finishes).
+#: Step 1 has no block - the company exists, so it is done.
+ONBOARDING_STEPS = (
+    (2, 2, "Choose your modules",
+     "Pick Petty Cash, Payment Request or both, and add a card for after your free trial."),
+    (3, 3, "Invite your team (optional)",
+     "Add the colleagues who will submit and approve expenses."),
+    (4, 4, "Connect Xero",
+     "Link your Xero organisation so Minty can publish to your books."),
+    (5, 8, "Set up your accounts",
+     "Choose the account codes and settings Minty uses for your company."),
+)
+
+
+def remaining_steps(saved_step) -> list[dict]:
+    """The blocks still to do for a company saved at wizard step ``saved_step``.
+
+    The step they saved on is included: "Save & Exit" records the page they were on, not
+    one they finished. Never saved (None, or anything that is not a step) shows them all.
+    """
+    try:
+        step = int(saved_step)
+    except (TypeError, ValueError):
+        step = 1
+    return [
+        {"number": first, "title": title, "text": line}
+        for first, last, title, line in ONBOARDING_STEPS
+        if last >= step
+    ]
+
+
+def _onboarding_reminder(ctx: dict) -> dict:
+    """Started setting a company up, stopped. Figma frame 2969:1368 (2026-10-01)."""
+    entity = " ".join(str(ctx.get("entity_name") or "").split())
+    return {
+        "subject": f"Finish setting up {entity} on Minty" if entity
+        else "Finish setting up your company on Minty",
+        "heading": "Let's finish setting up",
+        "entity_name": entity or None,
+        "body": [
+            "You started setting up your company on Minty but haven't finished yet. Your "
+            "progress is saved, so you can pick up right where you left off.",
+        ],
+        "steps": remaining_steps(ctx.get("saved_step")),
+        "footnote": "Once your company is set up, these reminders stop.",
+        "cta_label": "Continue setup",
+        "cta_url": setup_url(ctx.get("entity_id")),
+    }
+
+
 _COPY = {
     TRIAL_ENDING: _trial_ending,
     RENEWAL_FAILED: _renewal_failed,
@@ -759,6 +845,7 @@ _COPY = {
     SUBSCRIBER_TRANSFER_ACCEPTED: _subscriber_transfer_accepted,
     SUBSCRIBER_TRANSFER_DECLINED: _subscriber_transfer_declined,
     SUBSCRIBER_TRANSFER_EXPIRED: _subscriber_transfer_expired,
+    ONBOARDING_REMINDER: _onboarding_reminder,
 }
 
 
@@ -1015,6 +1102,70 @@ def _claim(user_id, event: str, dedupe_key: str):
     return row
 
 
+def build_message(event: str, context: dict, *, address: str, first_name: str = "",
+                  inline: bool = False) -> InlineImageMessage:
+    """One email, ready to send: its copy (``_COPY``), the template, the sender and the images.
+
+    ``notify`` sends what this returns; ``manage.py preview_emails`` renders it without the
+    claim. ``inline`` puts the images in the page as ``data:`` URIs (a file a browser can
+    open) instead of attaching them as CID parts (what a mail client needs).
+    """
+    content = _COPY[event](context)
+    logo = logo_bytes()
+    # Resolved from the EVENT, not from anything the builder returns, so copy and art
+    # cannot drift apart and no builder has to know a filename.
+    art = image_bytes(*illustration_path(event))
+
+    def src(data: bytes | None, cid: str) -> str | None:
+        # Only offered to the template when the bytes are actually there, so the markup
+        # can never reference a part that isn't.
+        if not data:
+            return None
+        return ("data:image/png;base64," + base64.b64encode(data).decode()) if inline \
+            else f"cid:{cid}"
+
+    html = render_to_string(
+        NOTICE_TEMPLATE,
+        {
+            "first_name": first_name,
+            "base_url": base_url(),
+            "logo_src": src(logo, LOGO_CID),
+            "illustration_src": src(art, ILLUSTRATION_CID),
+            **content,
+        },
+    )
+    message = InlineImageMessage(
+        subject=content["subject"],
+        sender=sender_for(event),
+        recipients=[address],
+        html=html,
+    )
+    if inline:
+        return message
+    if logo:
+        message.attach(
+            "logo.png",
+            "image/png",
+            logo,
+            "inline",
+            # Angle brackets are required by RFC 2392 for the header; the ``src``
+            # references it WITHOUT them (``cid:minty-logo``). Getting that pair
+            # wrong is the usual reason an inline image silently fails to resolve.
+            headers={"Content-ID": f"<{LOGO_CID}>",
+                     "X-Attachment-Id": LOGO_CID},
+        )
+    if art:
+        message.attach(
+            "illustration.png",
+            "image/png",
+            art,
+            "inline",
+            headers={"Content-ID": f"<{ILLUSTRATION_CID}>",
+                     "X-Attachment-Id": ILLUSTRATION_CID},
+        )
+    return message
+
+
 def notify(user_id, event: str, *, dedupe_key: str, context: dict | None = None) -> bool:
     """Send one billing email to a payer. Returns whether it went out. Never raises.
 
@@ -1023,8 +1174,7 @@ def notify(user_id, event: str, *, dedupe_key: str, context: dict | None = None)
     The distinctions are in the log and in ``subscription_email_log.error``.
     """
     try:
-        builder = _COPY.get(event)
-        if builder is None:
+        if event not in _COPY:
             logger.error("notify: unknown billing email event {}", event)
             return False
 
@@ -1048,50 +1198,7 @@ def notify(user_id, event: str, *, dedupe_key: str, context: dict | None = None)
             logger.debug("notify: {} / {} already sent", event, dedupe_key)
             return False
 
-        content = builder(context)
-        logo = logo_bytes()
-        # Resolved from the EVENT, not from anything the builder returns, so copy and art
-        # cannot drift apart and no builder has to know a filename.
-        art = image_bytes(*illustration_path(event))
-        html = render_to_string(
-            NOTICE_TEMPLATE,
-            {
-                "first_name": first_name,
-                "base_url": base_url(),
-                # Only offered to the template when the bytes are actually going to be
-                # attached, so the markup can never reference a part that isn't there.
-                "logo_src": f"cid:{LOGO_CID}" if logo else None,
-                "illustration_src": f"cid:{ILLUSTRATION_CID}" if art else None,
-                **content,
-            },
-        )
-        message = InlineImageMessage(
-            subject=content["subject"],
-            sender=billing_sender(),
-            recipients=[address],
-            html=html,
-        )
-        if logo:
-            message.attach(
-                "logo.png",
-                "image/png",
-                logo,
-                "inline",
-                # Angle brackets are required by RFC 2392 for the header; the ``src``
-                # references it WITHOUT them (``cid:minty-logo``). Getting that pair
-                # wrong is the usual reason an inline image silently fails to resolve.
-                headers={"Content-ID": f"<{LOGO_CID}>",
-                         "X-Attachment-Id": LOGO_CID},
-            )
-        if art:
-            message.attach(
-                "illustration.png",
-                "image/png",
-                art,
-                "inline",
-                headers={"Content-ID": f"<{ILLUSTRATION_CID}>",
-                         "X-Attachment-Id": ILLUSTRATION_CID},
-            )
+        message = build_message(event, context, address=address, first_name=first_name)
         # Cut to the column. A billing email may be 255 characters and the log keeps 200:
         # uncut, the save AFTER a successful send failed, the claim stayed ``failed``, and
         # the same email went out again on every run.

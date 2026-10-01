@@ -10,6 +10,11 @@
   clients strip <style> blocks and ignore flex/grid, so anything laid out the way the rest
   of the app is laid out arrives as a stack of unstyled paragraphs.
 
+  One email adds to that: the setup reminder (``onboarding_reminder``, Figma 2969:1368)
+  hands over ``steps`` - a "Still to do" list of numbered blocks under the button, then the
+  button again - and a ``footnote``. Both render only when given, so the billing emails
+  are untouched.
+
   Deliberately absent, all per the approved mockups: no facts table, no footer, no
   greeting, and no tone colour — a declined payment and a resolved one carry the same teal
   heading, so the WORDS have to carry the urgency on their own. Copy written for this
@@ -29,6 +34,30 @@
    is a neutral UI sans and falls back to Helvetica, which is what it was drawn against. #}
 {% set heading_font = "'Plus Jakarta Sans','Trebuchet MS',Verdana,Arial,Helvetica,sans-serif" %}
 {% set font = "'Inter','Helvetica Neue',Helvetica,Arial,sans-serif" %}
+{% set title_grey = '#2D3748' %}
+{# Wrapped in a table rather than left as a bare inline-block anchor. Outlook's Word
+   rendering engine drops padding and border-radius on an <a>, which collapses the button
+   to a line of underlined blue text — the table cell carries both instead, and the
+   ``bgcolor`` attribute is the fallback for clients that strip the style attribute
+   outright.
+
+   ``min-width`` rather than ``width`` so the button keeps its shape for a short label like
+   "Go to Minty" and still grows to fit a long one like "Go to Manage Subscription" instead
+   of wrapping inside it. #}
+{% macro button(url, label, colour, family) %}
+                  <table cellpadding="0" cellspacing="0" role="presentation"
+                         style="margin:0 auto;">
+                    <tr>
+                      <td align="center" bgcolor="{{ colour }}"
+                          style="background:{{ colour }};border-radius:34px;">
+                        <a href="{{ url }}"
+                           style="display:block;min-width:220px;padding:20px 36px;color:#ffffff;text-decoration:none;font-size:14px;font-weight:700;font-family:{{ family }};text-align:center;">
+                          {{ label }}
+                        </a>
+                      </td>
+                    </tr>
+                  </table>
+{% endmacro %}
 <!DOCTYPE html>
 <html>
 <head>
@@ -157,27 +186,70 @@
             {% if cta_url and cta_label %}
               <tr>
                 <td align="center" style="padding:40px 24px 0;">
-                  {# Wrapped in a table rather than left as a bare inline-block anchor.
-                     Outlook's Word rendering engine drops padding and border-radius on an
-                     <a>, which collapses the button to a line of underlined blue text —
-                     the table cell carries both instead, and the ``bgcolor`` attribute is
-                     the fallback for clients that strip the style attribute outright.
+{{ button(cta_url, cta_label, teal_button, font) }}
+                </td>
+              </tr>
+            {% endif %}
 
-                     ``min-width`` rather than ``width`` so the button keeps its shape for
-                     a short label like "Go to Minty" and still grows to fit a long one
-                     like "Go to Manage Subscription" instead of wrapping inside it. #}
-                  <table cellpadding="0" cellspacing="0" role="presentation"
-                         style="margin:0 auto;">
+            {# The setup reminder's "Still to do": one row per wizard step left, a teal
+               numbered disc then a title and a line. The disc is a table cell, not an
+               image, so it needs no attachment and survives image blocking. #}
+            {% if steps %}
+              <tr>
+                <td style="padding:44px 24px 0;">
+                  <table width="100%" cellpadding="0" cellspacing="0" role="presentation"
+                         style="border-top:1px solid #E6E6E6;">
                     <tr>
-                      <td align="center" bgcolor="{{ teal_button }}"
-                          style="background:{{ teal_button }};border-radius:34px;">
-                        <a href="{{ cta_url }}"
-                           style="display:block;min-width:220px;padding:20px 36px;color:#ffffff;text-decoration:none;font-size:14px;font-weight:700;font-family:{{ font }};text-align:center;">
-                          {{ cta_label }}
-                        </a>
+                      <td style="padding:22px 0 6px;font-family:{{ font }};font-size:11px;font-weight:700;color:{{ body_grey }};">
+                        Still to do
                       </td>
                     </tr>
+                    {% for step in steps %}
+                      <tr>
+                        <td style="padding:10px 0;">
+                          <table cellpadding="0" cellspacing="0" role="presentation">
+                            <tr>
+                              <td valign="top" width="26" style="padding:0 14px 0 0;">
+                                <table cellpadding="0" cellspacing="0" role="presentation">
+                                  <tr>
+                                    <td align="center" valign="middle" width="26" height="26" bgcolor="{{ teal_button }}"
+                                        style="width:26px;height:26px;border-radius:13px;background:{{ teal_button }};font-family:{{ font }};font-size:12px;font-weight:700;line-height:26px;color:#ffffff;">
+                                      {{ step.number }}
+                                    </td>
+                                  </tr>
+                                </table>
+                              </td>
+                              <td valign="top">
+                                <p style="margin:2px 0 4px;font-family:{{ font }};font-size:14px;line-height:1.4;font-weight:700;color:{{ title_grey }};">
+                                  {{ step.title }}
+                                </p>
+                                <p style="margin:0;font-family:{{ font }};font-size:12px;line-height:1.6;color:{{ body_grey }};">
+                                  {{ step.text }}
+                                </p>
+                              </td>
+                            </tr>
+                          </table>
+                        </td>
+                      </tr>
+                    {% endfor %}
                   </table>
+                </td>
+              </tr>
+              {% if cta_url and cta_label %}
+                <tr>
+                  <td align="center" style="padding:28px 24px 0;">
+{{ button(cta_url, cta_label, teal_button, font) }}
+                  </td>
+                </tr>
+              {% endif %}
+            {% endif %}
+
+            {% if footnote %}
+              <tr>
+                <td align="center" style="padding:24px 24px 0;">
+                  <p style="margin:0;font-family:{{ font }};font-size:11px;line-height:1.6;color:{{ body_grey }};text-align:center;">
+                    {{ footnote }}
+                  </p>
                 </td>
               </tr>
             {% endif %}

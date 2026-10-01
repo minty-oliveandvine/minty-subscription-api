@@ -1048,8 +1048,13 @@ def test_the_retired_events_stay_retired(app):
     assert [e for e in retired if e in notify._COPY] == []
     assert [e for e in retired if e in notify.EVENTS] == []
     # The live set, stated once so a silent addition shows up here: exactly the eight
-    # approved Figma designs.
-    assert len(notify._COPY) == 8
+    # approved billing designs plus the setup reminder (Figma 2969:1368, 2026-10-01).
+    assert sorted(notify._COPY) == sorted([
+        notify.TRIAL_ENDING, notify.RENEWAL_FAILED, notify.DUNNING_RETRY_FAILED,
+        notify.PAYMENT_RECOVERED, notify.SUBSCRIBER_TRANSFER_REQUESTED,
+        notify.SUBSCRIBER_TRANSFER_ACCEPTED, notify.SUBSCRIBER_TRANSFER_DECLINED,
+        notify.SUBSCRIBER_TRANSFER_EXPIRED, notify.ONBOARDING_REMINDER,
+    ])
 
 
 def test_renewal_declines_are_deduped_on_the_billing_period(app, db_session, mail):

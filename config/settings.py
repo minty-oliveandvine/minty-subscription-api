@@ -169,9 +169,10 @@ STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
 STRIPE_PUBLISHABLE_KEY = os.environ.get("STRIPE_PUBLISHABLE_KEY", "")
 
 # ---------------------------------------------------------------------------
-# Mail - the eight subscription notices, on the same Brevo SMTP Minty uses. Without
-# EMAIL_HOST every send is logged and skipped rather than failing the pass that raised it
-# (Flask's rule, kept). The sender is SUBSCRIPTION_EMAIL, as in Flask.
+# Mail - the eight subscription notices and the setup reminder, on the same Brevo SMTP
+# Minty uses. Without EMAIL_HOST every send is logged and skipped rather than failing the
+# pass that raised it (Flask's rule, kept). The billing sender is SUBSCRIPTION_EMAIL, as in
+# Flask; the setup reminder's is ONBOARDING_EMAIL.
 # ---------------------------------------------------------------------------
 EMAIL_BACKEND = os.environ.get(
     "EMAIL_BACKEND",
@@ -191,6 +192,8 @@ DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL") or os.environ.get(
     "SUBSCRIPTION_EMAIL", "noreply@example.com"
 )
 SUBSCRIPTION_EMAIL = os.environ.get("SUBSCRIPTION_EMAIL", DEFAULT_FROM_EMAIL)
+# The "finish setting up your company" reminder's sender (notify.onboarding_sender).
+ONBOARDING_EMAIL = os.environ.get("ONBOARDING_EMAIL", DEFAULT_FROM_EMAIL)
 
 # ---------------------------------------------------------------------------
 # Logging - core + API formatters (same shape as the other two Django services so the

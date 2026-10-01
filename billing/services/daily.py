@@ -33,6 +33,9 @@ and the order is the whole point:
 
     notify-trial-ending -> close-trials -> run-renewals -> retry-dunning -> sweep-access
 
+(The full pass also opens with ``notify-onboarding``, the "finish setting up your company"
+reminder. It reads and writes no billing state, so it goes first, where nothing waits on it.)
+
 * ``close-trials`` before ``run-renewals``, so a trial that converts today is billed by
   today's pass rather than waiting a month;
 * ``retry-dunning`` after ``run-renewals``, so a renewal that fails this morning is
@@ -85,6 +88,8 @@ from billing.services._log import logger
 # Every job in the pass, in call order. Names match the CLI commands so a line in the log
 # and a command a human can type are the same string.
 NOTIFY_TRIAL_ENDING = "notify-trial-ending"
+# Not billing: the setup reminder (``onboarding_reminders``). Full pass only - it is daily.
+NOTIFY_ONBOARDING = "notify-onboarding"
 CLOSE_TRIALS = "close-trials"
 SWEEP_ACCESS = "sweep-access"
 RUN_RENEWALS = "run-renewals"
@@ -112,6 +117,7 @@ FULL = "full"
 LIGHT = "light"
 
 JOB_ORDER = (
+    NOTIFY_ONBOARDING,
     NOTIFY_TRIAL_ENDING,
     CLOSE_TRIALS,
     # BEFORE the renewal. A stranded handover has already been paid for, and completing
@@ -225,6 +231,12 @@ def _notify_trial_ending(now: datetime, *, days_before: int, issue: bool) -> dic
     return notify_trials_ending(days_before=days_before)
 
 
+def _notify_onboarding(now: datetime, *, days_before: int, issue: bool) -> dict:
+    from billing.services.onboarding_reminders import notify_unfinished_onboarding
+
+    return notify_unfinished_onboarding(now)
+
+
 def _close_trials(now: datetime, *, days_before: int, issue: bool) -> dict:
     from billing.services.checkout import convert_or_expire_due_trials
 
@@ -277,6 +289,7 @@ def _retry_dunning(now: datetime, *, days_before: int, issue: bool) -> dict:
 
 
 _RUNNERS = {
+    NOTIFY_ONBOARDING: _notify_onboarding,
     NOTIFY_TRIAL_ENDING: _notify_trial_ending,
     CLOSE_TRIALS: _close_trials,
     SWEEP_ACCESS: _sweep_access,

@@ -285,7 +285,7 @@ next light pass by up to an hour and **a deploy after 05:00 HKT loses that day's
 paused instance runs nothing.
 
 The pass itself is `billing/services/daily.py::run_daily(now, issue, mode)` — the job order
-`notify-trial-ending → close-trials → repair-transfers → collect-transfers → run-renewals →
+`notify-onboarding → notify-trial-ending → close-trials → repair-transfers → collect-transfers → run-renewals →
 retry-dunning → sweep-access` (light: `close-trials → repair-transfers → collect-transfers →
 run-renewals → sweep-touched`), each job caught on its own, a sweep skipped when a job that
 grants entitlement failed before it. Both transfer jobs run **before** the renewal and for
@@ -319,7 +319,8 @@ inside a scope): `tick` (what a cron will call — full at the full hour, light 
 `run-daily --mode full|light [--issue] [--days-before N]`, `close-trials [--limit N]`,
 `run-renewals [--issue] [--user ID]… [--limit N]` (DRY by default — the only job whose flag moves
 money; `run-daily` without `--issue` still converts due trials, retries dunning and sweeps),
-`retry-dunning [--limit N]`, `notify-trial-ending [--days-before 3] [--limit N]`, `sweep-access`,
+`retry-dunning [--limit N]`, `notify-trial-ending [--days-before 3] [--limit N]`,
+`notify-onboarding [--limit N]` (the setup reminder, below), `sweep-access`,
 `reconcile-customers [--repair]`, `revoke-ungranted [--apply]` (deliberate only; dry unless `--apply`;
 the ORM rewrite of Flask's two raw statements — `billing/tests/engine/test_revoke_ungranted.py`).
 `manage.py plans list` reads the catalog and writes nothing — the quickest proof the service reaches
@@ -665,14 +666,15 @@ for a handover that is over.
   (`TRIAL_CLOSING_WINDOW`) and trial expired after that, while its access stays on for the grace.
 
 Mail: Django `EMAIL_*` on the same Brevo SMTP Minty uses, sender `SUBSCRIPTION_EMAIL` (fallback
-`DEFAULT_FROM_EMAIL`); each SMTP step times out after `EMAIL_TIMEOUT` seconds (10; Django's
+`DEFAULT_FROM_EMAIL`; the setup reminder's is `ONBOARDING_EMAIL`, production
+`onboarding@dailyminty.com`, same fallback - `notify.sender_for`); each SMTP step times out after `EMAIL_TIMEOUT` seconds (10; Django's
 own default blocks forever, inside the pass that holds the scheduler lock). `notify.mail_configured()` is false for the console and dummy backends
 and for SMTP with no `EMAIL_HOST`, and it is checked BEFORE the dedupe claim — an unconfigured
 host skips the notice without spending it, so the first configured run still sends it (Flask's
 extension always existed, so its unconfigured case claimed and then failed to connect; same net
 effect). The template (`templates/email/subscription_notice.html`; the receipt's went with the
 receipt, 2026-09-30) is Minty's verbatim on the Jinja2 backend — a render from each backend with
-the same context is byte-identical (checked 2026-09-21); the nine inline images live in `billing/static/email/`;
+the same context is byte-identical (checked 2026-09-21); the ten inline images (the logo and nine illustrations) live in `billing/static/email/`;
 `InlineImageMessage` keeps the `multipart/related; type="multipart/alternative"` wire shape
 with `Content-ID` parts; dedup stays in `subscription_email_log`. Links in emails point at
 minty-web through Flask's login-gated re-handoff (`notify.settings_url` →
@@ -694,6 +696,26 @@ a whole billing account uses the zone all its companies share, else Asia/Hong_Ko
 because from that instant "Pay now" is refused. Every read behind a date is its own savepoint,
 taken before the dedupe claim, so a failed one sends the email without that detail and never
 leaves the claim's transaction broken.
+
+**The setup reminder (2026-10-01, this service only - Flask never had it).** One email that is not
+about money: `onboarding_reminder`, "Finish setting up {Company} on Minty" (Figma frame 2969:1368
+on page 573:990). `billing/services/onboarding_reminders.py::notify_unfinished_onboarding`, run
+first in the full daily pass (`notify-onboarding`), picks every company still `onboarding` that
+has been quiet - `entities.updated_at`, which a trigger moves on every write including the
+wizard's saved step - for **1, 3 or 7 days**; each reminder has a window (1-2, 3-6, 7-8 days) so
+a missed pass catches up, and nothing goes out after day 9, so the companies abandoned before this
+shipped are never mailed. It goes to the person who started the company - the earliest approved
+admin on `user_entity`, skipped (not replaced) when that user is inactive - at their own address,
+never the company's business email. Dedupe key `{entity}:{user}:{updated_at}:{day}`: each
+reminder once per quiet spell, and a fresh series after they come back and stop again. It stops
+once `finalize` moves the company off `onboarding`. The body lists the steps still to do from
+`onboarding_saved_step` (`notify.ONBOARDING_STEPS`/`remaining_steps`: 2 modules, 3 invite, 4 Xero,
+5-8 accounts; the saved step itself counts as not done, NULL shows all four) under the template's
+optional `steps` block, and both "Continue setup" buttons open Flask's login-gated `/entity/{id}`
+(`notify.setup_url`), which sends a company in setup into the wizard at its saved step - the
+wizard's own one-hour token never goes in an email. No unsubscribe link: three emails at most,
+stopping by themselves. Review with `manage.py preview_emails [--only EVENTS] [--send ADDRESS]`
+(all nine events from fixtures, no log rows - the port of Minty's `preview_billing_emails.py`).
 
 **Who a money email goes to (2026-09-30, both engines).** Every notice went to the payer's login
 address (`notify.recipient_for`), so a billing account's "Billing Email" — where the company

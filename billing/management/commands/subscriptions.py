@@ -11,6 +11,7 @@
                           (--user ID, repeatable; --limit N)
     retry-dunning         retry declined renewals on schedule (--limit N)
     notify-trial-ending   warn payers whose trial ends in --days-before days (default 3)
+    notify-onboarding     remind whoever stopped setting a company up, 1, 3 and 7 days on
     sweep-access          reconcile module access with the subscriptions
     reconcile-customers   report (or --repair) payers whose Stripe customer has no mapping
     revoke-ungranted      launch day: take access from modules no subscription backs,
@@ -37,6 +38,7 @@ JOBS = (
     "run-renewals",
     "retry-dunning",
     "notify-trial-ending",
+    "notify-onboarding",
     "sweep-access",
     "reconcile-customers",
     "revoke-ungranted",
@@ -61,7 +63,8 @@ class Command(BaseCommand):
         parser.add_argument("--repair", action="store_true",
                             help="reconcile-customers: write the missing mapping rows")
         parser.add_argument("--limit", type=int, default=None,
-                            help="close-trials / run-renewals / retry-dunning / notify-trial-ending: at most N")
+                            help="close-trials / run-renewals / retry-dunning / notify-trial-ending / "
+                                 "notify-onboarding: at most N")
         parser.add_argument("--days-before", type=int, default=None, dest="days_before",
                             help="notify-trial-ending (default 3) / run-daily: the trial warning window")
         parser.add_argument("--user", action="append", dest="users", default=[],
@@ -208,6 +211,16 @@ class Command(BaseCommand):
         self.stdout.write(f"Warned {len(warned)} payer(s) about a trial ending.")
         for item in warned:
             self.stdout.write(f"  warned: {item['entity_id']} ({', '.join(item.get('codes') or [])})")
+
+    def _job_notify_onboarding(self, *, limit, **_):
+        from billing.services.onboarding_reminders import notify_unfinished_onboarding
+
+        result = notify_unfinished_onboarding(limit=limit)
+        self.stdout.write(f"Reminded {len(result['reminded'])} about an unfinished setup.")
+        for item in result["reminded"]:
+            self.stdout.write(f"  reminded: {item['entity_id']} (day {item['stage']})")
+        for item in result["skipped"]:
+            self.stdout.write(f"  skipped:  {item['entity_id']} ({item['reason']})")
 
     def _job_sweep_access(self, **_):
         from billing.services.access_sweep import sweep_expired_module_access
