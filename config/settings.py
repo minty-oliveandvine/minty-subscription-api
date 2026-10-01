@@ -184,6 +184,9 @@ EMAIL_PORT = int(os.environ.get("EMAIL_PORT", "587"))
 EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER", "")
 EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "")
 EMAIL_USE_TLS = _flag("EMAIL_USE_TLS", True)
+# Seconds each SMTP step may take. Django's default is None - block forever - and the notices
+# go out inside the billing pass, which holds the scheduler lock while it waits.
+EMAIL_TIMEOUT = float(os.environ.get("EMAIL_TIMEOUT") or 10)
 DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL") or os.environ.get(
     "SUBSCRIPTION_EMAIL", "noreply@example.com"
 )

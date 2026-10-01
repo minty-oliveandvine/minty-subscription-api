@@ -665,7 +665,8 @@ for a handover that is over.
   (`TRIAL_CLOSING_WINDOW`) and trial expired after that, while its access stays on for the grace.
 
 Mail: Django `EMAIL_*` on the same Brevo SMTP Minty uses, sender `SUBSCRIPTION_EMAIL` (fallback
-`DEFAULT_FROM_EMAIL`). `notify.mail_configured()` is false for the console and dummy backends
+`DEFAULT_FROM_EMAIL`); each SMTP step times out after `EMAIL_TIMEOUT` seconds (10; Django's
+own default blocks forever, inside the pass that holds the scheduler lock). `notify.mail_configured()` is false for the console and dummy backends
 and for SMTP with no `EMAIL_HOST`, and it is checked BEFORE the dedupe claim — an unconfigured
 host skips the notice without spending it, so the first configured run still sends it (Flask's
 extension always existed, so its unconfigured case claimed and then failed to connect; same net
@@ -685,7 +686,14 @@ trial ending, renewal failed, dunning retry failed (the same design), payment re
 the four transfer notices. `renewal_paid` (the receipt) and `trial_expired` are retired: a
 successful charge and a lapsed trial are silent (Stripe's own receipt, if switched on in its
 Dashboard, is the only receipt). Dates are written in the company's time zone
-(`notify.entity_zone`: `entities.timezone`, Asia/Hong_Kong when NULL or unknown).
+(`notify.entity_zone`: `entities.timezone`, Asia/Hong_Kong when NULL or unknown); an email about
+a whole billing account uses the zone all its companies share, else Asia/Hong_Kong
+(`notify.account_zone`). The two payment-failed emails name the LAST FULL DAY to pay
+(`notify.pay_by`): the day before the account's past-due access runs out
+(`notify.payment_deadline` → `dunning.suspension_at`, `paid_through` + the past-due window),
+because from that instant "Pay now" is refused. Every read behind a date is its own savepoint,
+taken before the dedupe claim, so a failed one sends the email without that detail and never
+leaves the claim's transaction broken.
 
 **Who a money email goes to (2026-09-30, both engines).** Every notice went to the payer's login
 address (`notify.recipient_for`), so a billing account's "Billing Email" — where the company

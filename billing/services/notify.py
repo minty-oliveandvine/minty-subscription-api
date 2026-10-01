@@ -54,7 +54,13 @@ onboarding recorded one: a trial usually has no billing account yet. See ``addre
 the one place a recipient is decided.
 
 Dates are written in the company's time zone (``entities.timezone``, Hong Kong when unset -
-``entity_zone``); scheduling itself stays in UTC.
+``entity_zone``); an email about a whole billing account uses the zone every company on it
+shares, else Hong Kong (``account_zone``). Scheduling itself stays in UTC.
+
+The two payment-failure emails name the LAST FULL DAY to pay (``pay_by``): the day before the
+account's past-due access runs out (``payment_deadline``). From that moment "Pay now" is
+refused and the next sweep cuts access, so a customer who pays at any time on the printed
+day is in time.
 
 PORTED FROM FLASK (Part 2 step 2). The copy, the builders and the three rules are Flask's
 ``blueprints/subscription/services/notify.py`` verbatim; what changed is the delivery
@@ -67,7 +73,7 @@ Flask's re-handoff (``settings_url`` / ``portal_url``) instead of to Flask's own
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from email import encoders
 from email.mime.base import MIMEBase
 from email.mime.image import MIMEImage
@@ -143,6 +149,9 @@ EVENTS = (
 #: to the account's address when it has one (``address_for``, ``store.account_email``).
 MONEY_EVENTS = frozenset({RENEWAL_FAILED, DUNNING_RETRY_FAILED, PAYMENT_RECOVERED})
 
+#: The two declines. They name the last day to pay (``payment_deadline``, ``pay_by``).
+PAYMENT_FAILED_EVENTS = frozenset({RENEWAL_FAILED, DUNNING_RETRY_FAILED})
+
 # One template for every email. The receipt had its own - a document has to itemise and
 # this design is prose-only - and went with the receipt (2026-09-30).
 NOTICE_TEMPLATE = "email/subscription_notice.html"
@@ -205,10 +214,61 @@ def entity_zone(entity_id):
         try:
             from billing.services import store
 
-            name = store.entity_timezone(entity_id)
+            # A savepoint: a failed read must not break the transaction the claim commits in.
+            with transaction.atomic():
+                name = store.entity_timezone(entity_id)
         except Exception:
             logger.exception("notify: could not read the time zone of company {}", entity_id)
     return zone_named(name)
+
+
+def account_zone(billing_group_id):
+    """The zone an email about a whole billing account is dated in.
+
+    The zone every company on the account is dated in (``entity_zone``'s rule per company),
+    else ``DEFAULT_TIMEZONE`` (the user's rule, 2026-09-30): one account can pay for
+    companies on different calendars, and picking one of them would date the others' email
+    wrongly. A failure to read it dates the email in the default, logged.
+    """
+    names: list = []
+    try:
+        from billing.services import store
+
+        with transaction.atomic():
+            group = store.billing_group(billing_group_id) if billing_group_id else None
+            names = store.account_timezones(group) if group is not None else []
+    except Exception:
+        logger.exception(
+            "notify: could not read the time zones of billing account {}", billing_group_id
+        )
+    zones = {zone_named(name).zone for name in names}
+    return pytz.timezone(zones.pop()) if len(zones) == 1 else zone_named(None)
+
+
+def payment_deadline(billing_group_id) -> datetime | None:
+    """When a declined account's past-due access runs out, or None if it is not in dunning.
+
+    ``dunning.suspension_at`` - the instant ``access.access_end`` and the give-up rule both
+    use - under the live window. Read at send time from the account itself, so both
+    failure emails name the same moment the access sweep and "Pay now" act on. A failure
+    to read it sends the email without a date, logged.
+    """
+    if not billing_group_id:
+        return None
+    try:
+        from billing.services import dunning, policy, store
+
+        with transaction.atomic():
+            group = store.billing_group(billing_group_id)
+            if group is None or group.dunning_started_at is None:
+                return None
+            return dunning.suspension_at(group, policy.current().past_due_window_days)
+    except Exception:
+        logger.exception(
+            "notify: could not read the payment deadline of billing account {}",
+            billing_group_id,
+        )
+        return None
 
 
 def in_zone(value: datetime, zone=None) -> datetime:
@@ -516,6 +576,19 @@ def _trial_ending(ctx: dict) -> dict:
     }
 
 
+def pay_by(value, zone=None) -> str:
+    """The last full day to pay before ``value``, on ``zone``'s calendar: ``15 Oct 2026``.
+
+    ``value`` is the instant access runs out. From that moment "Pay now" is refused, so the
+    day it falls on is only partly payable - naming it would promise hours the customer
+    does not have. The day before is safe to pay on from start to end. Empty when unknown,
+    for the same reason as ``day``.
+    """
+    if not isinstance(value, datetime):
+        return ""
+    return display.day(in_zone(value, zone).date() - timedelta(days=1)) or ""
+
+
 def _payment_failed_body(deadline: str) -> list[str]:
     """Shared body for the two payment-failure emails, which share a design and art.
 
@@ -549,7 +622,7 @@ def _renewal_failed(ctx: dict) -> dict:
         # No entity line: a card belongs to the payer and may cover several companies, so
         # naming one of them would be arbitrary rather than merely redundant.
         "body": ["We could not process your latest subscription payment."]
-        + _payment_failed_body(day(ctx.get("deadline"), ctx.get("zone"))),
+        + _payment_failed_body(pay_by(ctx.get("deadline"), ctx.get("zone"))),
         "cta_label": "Go to Manage Subscription",
         "cta_url": base_url(),
     }
@@ -560,7 +633,7 @@ def _dunning_retry_failed(ctx: dict) -> dict:
         "subject": "We couldn't process your payment",
         "heading": "We couldn't process your payment",
         "body": ["We still could not process your subscription payment."]
-        + _payment_failed_body(day(ctx.get("deadline"), ctx.get("zone"))),
+        + _payment_failed_body(pay_by(ctx.get("deadline"), ctx.get("zone"))),
         "cta_label": "Go to Manage Subscription",
         "cta_url": base_url(),
     }
@@ -853,13 +926,15 @@ def address_for(user_id, event: str, context: dict | None) -> tuple[str | None, 
     try:
         from billing.services import store
 
-        if event in MONEY_EVENTS and context.get("billing_group_id"):
-            group = store.billing_group(context["billing_group_id"])
-            if group is None or str(group.payer_user_id) != str(user_id):
-                return address, first_name
-            return store.account_email(group) or address, first_name
-        if event == TRIAL_ENDING and context.get("entity_id"):
-            return store.business_email(context["entity_id"]) or address, first_name
+        # A savepoint: a failed read must not break the transaction the claim commits in.
+        with transaction.atomic():
+            if event in MONEY_EVENTS and context.get("billing_group_id"):
+                group = store.billing_group(context["billing_group_id"])
+                if group is None or str(group.payer_user_id) != str(user_id):
+                    return address, first_name
+                return store.account_email(group) or address, first_name
+            if event == TRIAL_ENDING and context.get("entity_id"):
+                return store.business_email(context["entity_id"]) or address, first_name
     except Exception:
         logger.exception("notify: could not read where {} should go; mailing the payer", event)
     return address, first_name
@@ -882,6 +957,26 @@ def already_sent(event: str, dedupe_key: str) -> bool:
     except Exception:
         logger.exception("notify: could not read whether {} / {} went out", event, dedupe_key)
         return False
+
+
+def _with_dates(event: str, context: dict | None) -> dict:
+    """A copy of ``context`` with what its dates need: ``zone``, and the decline's ``deadline``.
+
+    A copy, not the caller's dict: the billing jobs hand over their own result entries. The
+    zone is the company's when the email is about one company, else the billing account's
+    (``account_zone``), else the default. A decline names when access runs out unless the
+    caller said so itself.
+    """
+    context = dict(context or {})
+    if context.get("entity_id"):
+        context["zone"] = entity_zone(context["entity_id"])
+    elif context.get("billing_group_id"):
+        context["zone"] = account_zone(context["billing_group_id"])
+    else:
+        context["zone"] = zone_named(None)
+    if event in PAYMENT_FAILED_EVENTS and not context.get("deadline"):
+        context["deadline"] = payment_deadline(context.get("billing_group_id"))
+    return context
 
 
 def _claim(user_id, event: str, dedupe_key: str):
@@ -944,18 +1039,15 @@ def notify(user_id, event: str, *, dedupe_key: str, context: dict | None = None)
             logger.error("notify: mail is not configured; skipping {}", event)
             return False
 
+        # Read BEFORE the claim, so a failed read (logged, and the email sent without that
+        # detail) can never sit in the transaction the claim then commits.
+        context = _with_dates(event, context)
+
         row = _claim(user_id, event, dedupe_key)
         if row is None:
             logger.debug("notify: {} / {} already sent", event, dedupe_key)
             return False
 
-        # A copy, not the caller's dict: the billing jobs hand over their own result
-        # entries. The zone is the company's when the email is about one company. The
-        # account-level (money) emails carry no date today and get the default; if one
-        # ever does, the decided rule (2026-09-30) is the zone all the account's companies
-        # share, else the default - the same shape as ``store.shared_business_email``.
-        context = dict(context or {})
-        context["zone"] = entity_zone(context.get("entity_id"))
         content = builder(context)
         logo = logo_bytes()
         # Resolved from the EVENT, not from anything the builder returns, so copy and art

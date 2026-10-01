@@ -1365,3 +1365,181 @@ def test_the_same_payer_is_still_only_warned_once(app, db_session, mail, monkeyp
         checkout.notify_trials_ending(days_before=3)
 
         assert SubscriptionEmailLog.objects.filter(event="trial_ending").count() == 1
+
+
+# ---------------------------------------------------------------------------
+# The payment-failed emails' date: the last full day to pay (decided 2026-09-30)
+# ---------------------------------------------------------------------------
+# Figma's "[date]". Access runs out at ``paid_through`` + the past-due window
+# (``dunning.suspension_at``); from that instant "Pay now" is refused, so the email names
+# the day BEFORE it, on the account's calendar - the zone every company on it shares, else
+# Hong Kong.
+
+
+def _declined_account(db, payer, *, suspends_at, zones=(None,), in_dunning=True):
+    """A billing account whose past-due access runs out at ``suspends_at``, with one
+    company on it per entry in ``zones`` (each company's ``timezone``)."""
+    from billing.services import policy
+
+    account = _billing_account(payer)
+    window = policy.current().past_due_window_days
+    account.paid_through = suspends_at - timedelta(days=window)
+    account.dunning_started_at = account.paid_through if in_dunning else None
+    account.save(update_fields=["paid_through", "dunning_started_at"])
+    for index, zone in enumerate(zones):
+        _on_account(db, payer, account,
+                    _company(db, f"declined-{suspends_at:%H}-{index}", timezone=zone))
+    return account
+
+
+@pytest.mark.parametrize("event", ["renewal_failed", "dunning_retry_failed"])
+@pytest.mark.parametrize("suspends_at, printed", [
+    # 10:00 in Hong Kong on the 16th: paying later that day is already too late.
+    (datetime(2026, 10, 16, 2, tzinfo=UTC), "15 Oct 2026"),
+    # 04:00 in Hong Kong on the 16th, still the 15th in UTC - the HK calendar decides.
+    (datetime(2026, 10, 15, 20, tzinfo=UTC), "15 Oct 2026"),
+])
+def test_a_decline_names_the_last_full_day_to_pay(app, db_session, mail, event,
+                                                 suspends_at, printed):
+    from billing.services import notify
+
+    with app.app_context():
+        payer = _make_payer(db_session)
+        account = _declined_account(db_session, payer, suspends_at=suspends_at)
+
+        assert notify.notify(payer, event, dedupe_key="k",
+                             context={**DECLINE, "billing_group_id": account.id}) is True
+
+        assert (f"will be suspended if the payment is not received by {printed}."
+                in mail.sent[0].html)
+
+
+def test_an_account_whose_companies_share_a_zone_is_dated_on_that_calendar(
+    app, db_session, mail
+):
+    """02:00 UTC on the 16th is still the 15th in New York, so New York's last full day is
+    the 14th - Hong Kong's would be the 15th."""
+    from billing.services import notify
+
+    with app.app_context():
+        payer = _make_payer(db_session)
+        account = _declined_account(
+            db_session, payer, suspends_at=datetime(2026, 10, 16, 2, tzinfo=UTC),
+            zones=("America/New_York", "America/New_York"),
+        )
+
+        notify.notify(payer, notify.RENEWAL_FAILED, dedupe_key="k",
+                      context={**DECLINE, "billing_group_id": account.id})
+
+        assert "received by 14 Oct 2026." in mail.sent[0].html
+
+
+def test_companies_on_different_calendars_are_dated_in_hong_kong(app, db_session, mail):
+    """A company that never set a zone counts as Hong Kong, so it differs from New York."""
+    from billing.services import notify
+
+    with app.app_context():
+        payer = _make_payer(db_session)
+        account = _declined_account(
+            db_session, payer, suspends_at=datetime(2026, 10, 16, 2, tzinfo=UTC),
+            zones=("America/New_York", None),
+        )
+
+        notify.notify(payer, notify.RENEWAL_FAILED, dedupe_key="k",
+                      context={**DECLINE, "billing_group_id": account.id})
+
+        assert "received by 15 Oct 2026." in mail.sent[0].html
+
+
+def test_an_account_not_in_dunning_names_no_date(app, db_session, mail):
+    """No collection running means no suspension scheduled: no date rather than a wrong one."""
+    from billing.services import notify
+
+    with app.app_context():
+        payer = _make_payer(db_session)
+        account = _declined_account(
+            db_session, payer, suspends_at=datetime(2026, 10, 16, 2, tzinfo=UTC),
+            in_dunning=False,
+        )
+
+        notify.notify(payer, notify.RENEWAL_FAILED, dedupe_key="k",
+                      context={**DECLINE, "billing_group_id": account.id})
+
+        html = mail.sent[0].html
+        assert "will be suspended if the payment is not received." in html
+        assert "received by" not in html
+
+
+def test_a_deadline_the_caller_gives_wins(app, db_session, mail):
+    from billing.services import notify
+
+    with app.app_context():
+        payer = _make_payer(db_session)
+        account = _declined_account(
+            db_session, payer, suspends_at=datetime(2026, 10, 16, 2, tzinfo=UTC),
+        )
+
+        notify.notify(payer, notify.DUNNING_RETRY_FAILED, dedupe_key="k", context={
+            "billing_group_id": account.id,
+            "deadline": datetime(2026, 11, 3, 2, tzinfo=UTC),
+        })
+
+        assert "received by 2 Nov 2026." in mail.sent[0].html
+
+
+def test_a_failed_read_still_sends_and_is_recorded_once(app, db_session, mail,
+                                                        monkeypatch, caplog):
+    """A database error while reading the account aborts the transaction. Left that way,
+    the commit AFTER a successful send failed, the claim stayed ``failed``, and the email
+    went out again on every run. Each read is its own savepoint, so it is undone, logged,
+    and the email sent without the date."""
+    from django.db import connection
+
+    from billing.services import notify, store
+    from shared_models.models import SubscriptionEmailLog
+
+    def _broken(group_id):
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT * FROM no_such_table_for_this_test")
+
+    with app.app_context():
+        payer = _make_payer(db_session)
+        account = _declined_account(
+            db_session, payer, suspends_at=datetime(2026, 10, 16, 2, tzinfo=UTC),
+        )
+        monkeypatch.setattr(store, "billing_group", _broken)
+        context = {**DECLINE, "billing_group_id": account.id}
+
+        assert notify.notify(payer, notify.RENEWAL_FAILED, dedupe_key="k", context=context)
+        assert notify.notify(payer, notify.RENEWAL_FAILED, dedupe_key="k",
+                             context=context) is False
+
+        assert len(mail.sent) == 1
+        assert "will be suspended if the payment is not received." in mail.sent[0].html
+        row = SubscriptionEmailLog.objects.get(event=notify.RENEWAL_FAILED, dedupe_key="k")
+        assert row.status == notify.STATUS_SENT
+        assert "could not read the payment deadline" in caplog.text
+
+
+def test_pay_by_is_the_day_before_on_the_given_calendar(app):
+    import pytz
+
+    from billing.services import notify
+
+    hong_kong = pytz.timezone("Asia/Hong_Kong")
+    # Local midnight: nothing of the 16th is payable, so the 15th is the last full day.
+    assert notify.pay_by(datetime(2026, 10, 15, 16, tzinfo=UTC), hong_kong) == "15 Oct 2026"
+    assert notify.pay_by(datetime(2026, 10, 16, 2, tzinfo=UTC)) == "15 Oct 2026"
+    assert notify.pay_by(None) == ""
+
+
+def test_suspension_is_paid_through_plus_the_window():
+    from types import SimpleNamespace
+
+    from billing.services import dunning
+
+    paid = datetime(2026, 10, 1, 2, tzinfo=UTC)
+    assert dunning.suspension_at(SimpleNamespace(paid_through=paid), 15) == datetime(
+        2026, 10, 16, 2, tzinfo=UTC
+    )
+    assert dunning.suspension_at(SimpleNamespace(paid_through=None), 15) is None

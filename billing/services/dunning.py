@@ -87,6 +87,19 @@ def is_exhausted(attempts: int, offsets: tuple[int, ...] = RETRY_OFFSETS_DAYS) -
     return attempts >= len(offsets)
 
 
+def suspension_at(group, window_days: int) -> datetime | None:
+    """When a card's past-due access runs out: its ``paid_through`` plus the window.
+
+    The SAME instant ``access.access_end`` gives a past-due module, and the one ``give_up_at``
+    is clamped to - so the access sweep, the retries, "Pay now" and the payment-failed
+    email's date all act on one moment. None for a card that has never collected: it cannot
+    be past due on a renewal.
+    """
+    if group.paid_through is None:
+        return None
+    return group.paid_through + timedelta(days=window_days)
+
+
 def give_up_at(
     first_failed_at: datetime,
     window_days: int = GIVE_UP_AFTER_DAYS,
@@ -927,11 +940,7 @@ def _collect_one_group(group, now, offsets, window) -> dict[str, list]:
     #
     # A card with no paid_through has never collected and cannot be past due on a
     # renewal; there is nothing to clamp against, so the unclamped deadline stands.
-    access_ends_at = (
-        group.paid_through + timedelta(days=window)
-        if group.paid_through is not None
-        else None
-    )
+    access_ends_at = suspension_at(group, window)
     try:
         if should_give_up(now, started, window, access_ends_at):
             paid = _paid_at_the_deadline(account, group)
@@ -1150,11 +1159,7 @@ def _retry_context(user_id, entity_id, group_id=None):
     window = policy.current().past_due_window_days
     started = group.dunning_started_at
     attempts = int(group.dunning_attempts or 0)
-    access_ends_at = (
-        group.paid_through + timedelta(days=window)
-        if group.paid_through is not None
-        else None
-    )
+    access_ends_at = suspension_at(group, window)
 
     # Only meaningful while collection is running: with no stamp there is no schedule to
     # have outrun, so there is no deadline to be past. A card that paid as it ran out is
