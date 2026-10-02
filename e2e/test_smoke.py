@@ -14,7 +14,7 @@ PORTAL = "/api/me/subscriptions"
 def test_healthz(base_url):
     res = requests.get(f"{base_url}/healthz", timeout=10)
     assert res.status_code == 200
-    assert res.json() == {"status": "ok", "service": "minty-billing-api"}
+    assert res.json() == {"status": "ok", "service": "minty-subscription-api"}
 
 
 def test_openapi_document_is_readable(base_url):

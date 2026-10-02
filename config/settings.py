@@ -1,26 +1,32 @@
 import os
 from pathlib import Path
 
+from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
+
+from config.dburl import database_url, parse_database_url
+from config.smtpurl import parse_smtp_url
 
 load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# Shared with the Flask app (Minty), billing-backend and onboarding-backend. Flask MINTS
-# the JWTs this service verifies (``core/auth.py``); this service never mints one, and a
-# mismatch here 401s every request rather than failing loudly at boot. All four services
-# must read it from one source (Part 3's ``minty-infra`` makes that one place).
+# Shared with the Flask app (Minty), minty-payment-request-api and minty-onboarding-api.
+# Flask MINTS the JWTs this service verifies (``core/auth.py``); this service never mints
+# one, and a mismatch here 401s every request rather than failing loudly at boot. All four
+# services must read it from one source (Part 3's ``minty-infra`` makes that one place).
 _DEFAULT_SECRET_KEY = "change-me-in-production"
 SECRET_KEY = os.environ.get("SECRET_KEY", _DEFAULT_SECRET_KEY)
-DEBUG = os.environ.get("DEBUG", "True").lower() in ("true", "1", "yes")
+# APP_ENV is ``development`` or ``production`` (the default); anything else is production.
+APP_ENV = os.environ.get("APP_ENV", "production").strip().lower()
+DEBUG = APP_ENV == "development"
 
-# REFUSE TO BOOT WITH THE PLACEHOLDER KEY OUTSIDE DEBUG. On 2026-09-14 onboarding-backend
-# ran in production without SECRET_KEY set: every authenticated call answered 401 while
+# REFUSE TO BOOT WITH THE PLACEHOLDER KEY OUTSIDE DEVELOPMENT. On 2026-09-14 the onboarding
+# API ran in production without SECRET_KEY set: every authenticated call answered 401 while
 # the public endpoints kept working, and nothing said why. Worse than broken, it was
 # forgeable - the fallback string is in the repo. A crash at startup is the loud failure.
 if not DEBUG and SECRET_KEY == _DEFAULT_SECRET_KEY:
-    raise RuntimeError(
+    raise ImproperlyConfigured(
         "SECRET_KEY is not set. It must be the same value the Flask app mints tokens "
         "with; without it every request is refused with 401. Refusing to start."
     )
@@ -87,33 +93,37 @@ SUBSCRIPTION_SCHEDULER_FULL_HOUR = int(os.environ.get("SUBSCRIPTION_SCHEDULER_FU
 # Cross-service: the Flask app. Identity and the company are Flask's until Part 3, so
 # the portal's invite-admin forwards there (core/flask_client.py - the only module that
 # calls Flask), and the links this service puts in emails point at minty-web via Flask's
-# login-gated re-handoff (``{FLASK_APP_URL}/handoff/minty-web?next=...``).
+# login-gated re-handoff (``{PETTY_CASH_PUBLIC_URL}/handoff/minty-web?next=...``).
 # ---------------------------------------------------------------------------
-FLASK_APP_URL = os.environ.get("FLASK_APP_URL", "http://localhost:5001").rstrip("/")
-# The address a PERSON reaches Minty at - the links in emails (Flask's PUBLIC_URL). Distinct
-# from FLASK_APP_URL, which in the docker stack is the internal service name; defaults to it
-# so a single-host setup needs one variable.
-MINTY_PUBLIC_URL = os.environ.get("MINTY_PUBLIC_URL", FLASK_APP_URL).rstrip("/")
-FLASK_PROXY_TIMEOUT = int(os.environ.get("FLASK_PROXY_TIMEOUT", "20"))
+PETTY_CASH_URL = (os.environ.get("PETTY_CASH_URL") or "http://localhost:8010").rstrip("/")
+# The address a PERSON reaches Minty at - the links in emails. Distinct from PETTY_CASH_URL,
+# which in the docker stack is the internal service name; defaults to it so a single-host
+# setup needs one variable.
+PETTY_CASH_PUBLIC_URL = (os.environ.get("PETTY_CASH_PUBLIC_URL") or PETTY_CASH_URL).rstrip("/")
+# Seconds a forwarded call to Flask may take (core/flask_client.py).
+FLASK_PROXY_TIMEOUT = 20
 
 # ---------------------------------------------------------------------------
 # CORS - three browser apps call this API: minty-web (the payer portal and the module
 # settings page), and - since the sidebar with My Profile was copied into them on
-# 2026-09-30 - billing-frontend and Flask's own pages, whose My Profile shows the
-# Subscriptions Overview from ``/api/me/subscriptions``. Flask (``MINTY_PUBLIC_URL``, the
-# address a person's browser reaches it at) and onboarding-backend also call it server-side,
+# 2026-09-30 - minty-payment-request-web and Flask's own pages, whose My Profile shows the
+# Subscriptions Overview from ``/api/me/subscriptions``. Flask (``PETTY_CASH_PUBLIC_URL``, the
+# address a person's browser reaches it at) and minty-onboarding-api also call it server-side,
 # which needs no CORS.
 #
-# ``x-entity-id`` IS advertised, unlike onboarding-backend: the module settings page
+# ``x-entity-id`` IS advertised, unlike minty-onboarding-api: the module settings page
 # reached from the portal carries an unscoped token and names the company in this header,
-# exactly as billing-frontend does with billing-backend.
+# exactly as minty-payment-request-web does with minty-payment-request-api.
 # ---------------------------------------------------------------------------
-MINTY_WEB_URL = os.environ.get("MINTY_WEB_URL", "http://localhost:3002").rstrip("/")
-PAYMENTS_WEB_URL = os.environ.get("PAYMENTS_WEB_URL", "http://localhost:3000").rstrip("/")
+MINTY_WEB_URL = (os.environ.get("MINTY_WEB_URL") or "http://localhost:3000").rstrip("/")
+PAYMENT_REQUEST_WEB_URL = (
+    os.environ.get("PAYMENT_REQUEST_WEB_URL") or "http://localhost:3020"
+).rstrip("/")
 CORS_ALLOWED_ORIGINS = [
-    origin.strip()
-    for origin in os.environ.get(
-        "CORS_ALLOWED_ORIGINS", f"{MINTY_WEB_URL},{PAYMENTS_WEB_URL},{MINTY_PUBLIC_URL}"
+    origin.strip().rstrip("/")
+    for origin in (
+        os.environ.get("CORS_ALLOWED_ORIGINS")
+        or f"{MINTY_WEB_URL},{PAYMENT_REQUEST_WEB_URL},{PETTY_CASH_PUBLIC_URL}"
     ).split(",")
     if origin.strip()
 ]
@@ -130,23 +140,14 @@ CORS_ALLOW_HEADERS = [
 #
 # This service is a TENANT of the schema, never its owner. Every model is managed = False
 # and this repo ships no migrations: Alembic in Minty is the owner-of-record for all DDL.
-# The schema name is a setting shared with Minty (blueprints/shared/schema.py reads the
-# SAME variable with the same default); every db_table is unqualified and resolves through
-# search_path. `MINTY_DB_SCHEMA=pettycash_alt pytest` proves nothing spells it.
+# The schema name is a setting shared with Minty: ``?schema=`` on DATABASE_URL (default
+# pettycashv3, config/dburl.py), the same URL Minty reads. Every db_table is unqualified and
+# resolves through search_path. `DATABASE_URL=...?schema=pettycash_alt pytest` proves nothing
+# spells it.
 # ---------------------------------------------------------------------------
-DB_SCHEMA = os.environ.get("MINTY_DB_SCHEMA", "pettycashv3")
+_DEFAULT_DB, DB_SCHEMA = parse_database_url(database_url())
 
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.postgresql",
-        "NAME": os.environ.get("POSTGRES_DB", "postgres"),
-        "USER": os.environ.get("POSTGRES_USER", "postgres"),
-        "PASSWORD": os.environ.get("POSTGRES_PASSWORD", "admin"),
-        "HOST": os.environ.get("DB_HOST", "localhost"),
-        "PORT": os.environ.get("DB_PORT", "5432"),
-        "OPTIONS": {"options": f"-c search_path={DB_SCHEMA},public"},
-    }
-}
+DATABASES = {"default": _DEFAULT_DB}
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
@@ -170,30 +171,27 @@ STRIPE_PUBLISHABLE_KEY = os.environ.get("STRIPE_PUBLISHABLE_KEY", "")
 
 # ---------------------------------------------------------------------------
 # Mail - the eight subscription notices and the setup reminder, on the same Brevo SMTP
-# Minty uses. Without EMAIL_HOST every send is logged and skipped rather than failing the
-# pass that raised it (Flask's rule, kept). The billing sender is SUBSCRIPTION_EMAIL, as in
-# Flask; the setup reminder's is ONBOARDING_EMAIL.
+# Minty uses: SMTP_URL (config/smtpurl.py). Without it every send is logged and skipped
+# rather than failing the pass that raised it (Flask's rule, kept). MAIL_FROM is the default
+# sender; the billing sender is SUBSCRIPTION_EMAIL, as in Flask, and the setup reminder's
+# ONBOARDING_EMAIL - both default to MAIL_FROM.
 # ---------------------------------------------------------------------------
-EMAIL_BACKEND = os.environ.get(
-    "EMAIL_BACKEND",
-    "django.core.mail.backends.smtp.EmailBackend"
-    if os.environ.get("EMAIL_HOST")
-    else "django.core.mail.backends.console.EmailBackend",
-)
-EMAIL_HOST = os.environ.get("EMAIL_HOST", "")
-EMAIL_PORT = int(os.environ.get("EMAIL_PORT", "587"))
-EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER", "")
-EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "")
-EMAIL_USE_TLS = _flag("EMAIL_USE_TLS", True)
-# Seconds each SMTP step may take. Django's default is None - block forever - and the notices
-# go out inside the billing pass, which holds the scheduler lock while it waits.
-EMAIL_TIMEOUT = float(os.environ.get("EMAIL_TIMEOUT") or 10)
-DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL") or os.environ.get(
-    "SUBSCRIPTION_EMAIL", "noreply@example.com"
-)
-SUBSCRIPTION_EMAIL = os.environ.get("SUBSCRIPTION_EMAIL", DEFAULT_FROM_EMAIL)
+_SMTP = parse_smtp_url(os.environ.get("SMTP_URL"))
+EMAIL_BACKEND = _SMTP["EMAIL_BACKEND"]
+EMAIL_HOST = _SMTP["EMAIL_HOST"]
+EMAIL_PORT = _SMTP["EMAIL_PORT"]
+EMAIL_HOST_USER = _SMTP["EMAIL_HOST_USER"]
+EMAIL_HOST_PASSWORD = _SMTP["EMAIL_HOST_PASSWORD"]
+EMAIL_USE_TLS = _SMTP["EMAIL_USE_TLS"]
+EMAIL_USE_SSL = _SMTP["EMAIL_USE_SSL"]
+# Seconds each SMTP step may take (``?timeout=``, default 10). Django's default is None -
+# block forever - and the notices go out inside the billing pass, which holds the scheduler
+# lock while it waits.
+EMAIL_TIMEOUT = _SMTP["EMAIL_TIMEOUT"]
+DEFAULT_FROM_EMAIL = os.environ.get("MAIL_FROM") or "noreply@example.com"
+SUBSCRIPTION_EMAIL = os.environ.get("SUBSCRIPTION_EMAIL") or DEFAULT_FROM_EMAIL
 # The "finish setting up your company" reminder's sender (notify.onboarding_sender).
-ONBOARDING_EMAIL = os.environ.get("ONBOARDING_EMAIL", DEFAULT_FROM_EMAIL)
+ONBOARDING_EMAIL = os.environ.get("ONBOARDING_EMAIL") or DEFAULT_FROM_EMAIL
 
 # ---------------------------------------------------------------------------
 # Logging - core + API formatters (same shape as the other two Django services so the

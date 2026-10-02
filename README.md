@@ -1,13 +1,13 @@
-# minty-billing-api
+# minty-subscription-api
 
 Minty's subscription engine and payer-portal API — Django 5.2 + django-ninja on Python 3.13,
-port **8004**. Part 2 of `Minty/docs/modernisation/modernisation_plan.md` moves the whole
+port **8000**. Part 2 of `Minty/docs/modernisation/modernisation_plan.md` moves the whole
 subscription domain out of the Flask app into this service: the `/api/me/*` portal routes
 (Flask's fifteen paths, plus `transfer/seen` and the four `billing/accounts` routes this service
 added), the module settings page's model and its ten actions, the dashboard notice, the
 wizard's card and billing-account routes, the daily pass, the notification emails and the
 Stripe writer. Flask keeps identity and the company until Part 3 and reads five subscription
-facts through a read-only module; onboarding-backend proxies its money routes here.
+facts through a read-only module; minty-onboarding-api proxies its money routes here.
 
 **Status: Part 2 step 3 done (2026-09-22) — the engine is ported and every router is live.**
 Step 2 (2026-09-21) put the whole engine in `billing/services/`; step 3 filled the four routers
@@ -23,9 +23,9 @@ rules and the guard tests are in place. Subscriptions are always on: the dark sw
 (`SUBSCRIPTION_ENABLED`) was removed 2026-10-01, once the service ran on a test site. Skeleton verified 2026-09-21 on this
 workstation (Python 3.13.15
 via `uv`, PostgreSQL 18): `pytest` 35 passed on SQLite (00:02) and on the Postgres built from
-`01_schema_rebased.sql` (00:04); `ruff check .` clean; the `MINTY_DB_SCHEMA=pettycash_alt` guard
+`01_schema_rebased.sql` (00:04); `ruff check .` clean; the `?schema=pettycash_alt` guard
 passes; Minty's `audit_models.py` reports 0 for this repo (a planted bogus column is found);
-`runserver 8004` against the dev DB — `/healthz` 200, `/api/me/subscriptions` 401 without a
+`runserver 8000` against the dev DB — `/healthz` 200, `/api/me/subscriptions` 401 without a
 token, `plans list` reads the catalog; `pytest e2e` passed (the identity-dependent ones with a
 real dev-DB user).
 
@@ -36,7 +36,7 @@ real dev-DB user).
    no refresh endpoint: a lapsed token goes back through Flask's login-gated
    `GET /handoff/minty-web?next=…`. `core/auth.py`.
 2. **No migrations, `managed = False` everywhere.** Alembic in Minty owns the schema
-   (`MINTY_DB_SCHEMA`, default `pettycashv3`); this repo has no `migrations/` directory and
+   (`?schema=` on `DATABASE_URL`, default `pettycashv3`); this repo has no `migrations/` directory and
    `docker/entrypoint.sh` runs no `migrate`. A needed column is a Minty revision *and* a plan
    amendment. `shared_models/models.py`, pinned by `billing/tests/test_models_guard.py` and
    Minty's `docs/schema/generators/audit_models.py`.
@@ -85,15 +85,25 @@ the pass does not care who calls it.
 uv venv .venv --python 3.13                             # uv fetches CPython 3.13 if only 3.11 is installed
 uv pip install --python .venv\Scripts\python.exe -r requirements.txt
 .venv\Scripts\activate                                  # (or python -m venv with a 3.13 on PATH, then pip)
-copy .env.example .env                                  # SECRET_KEY = Minty's; POSTGRES_* = the dev DB
-python manage.py runserver 8004
-curl http://localhost:8004/healthz                      # {"status":"ok","service":"minty-billing-api"}
-curl -i http://localhost:8004/api/me/subscriptions      # 401 without a token
+copy .env.example .env                                  # SECRET_KEY = Minty's; DATABASE_URL = the dev DB
+python manage.py runserver 8000
+curl http://localhost:8000/healthz                      # {"status":"ok","service":"minty-subscription-api"}
+curl -i http://localhost:8000/api/me/subscriptions      # 401 without a token
 python manage.py plans list                             # the catalog - proves DB + schema
 python manage.py export_openapi                         # rewrite docs/openapi.json (--check in CI)
 ```
 
-In the docker stack (`Minty/docker/stack`) it is the `billing-api` service on host port 8004.
+In the docker stack (`Minty/docker/stack`) it is the `subscription-api` service on port 8000.
+A host that injects `PORT` (Render) is honoured: the image runs gunicorn on `${PORT:-8000}`.
+
+The environment (`.env.example` is the full list): `APP_ENV` (`development` | `production`, the
+default; `DEBUG` follows it), `SECRET_KEY`, `ALLOWED_HOSTS`, `DATABASE_URL` (`?schema=`, default
+`pettycashv3`; `config/dburl.py`), `SMTP_URL` (`smtp://` STARTTLS / `smtps://` SSL, `?timeout=`;
+unset = console backend; `config/smtpurl.py`), `MAIL_FROM`, `SUBSCRIPTION_EMAIL` /
+`ONBOARDING_EMAIL` (optional, default `MAIL_FROM`), `STRIPE_SECRET_KEY`,
+`STRIPE_PUBLISHABLE_KEY`, `PETTY_CASH_URL`, `PETTY_CASH_PUBLIC_URL` (optional, default
+`PETTY_CASH_URL`), `MINTY_WEB_URL`, `PAYMENT_REQUEST_WEB_URL`, `CORS_ALLOWED_ORIGINS` (optional,
+default those three origins), `SUBSCRIPTION_SCHEDULER_*`, `LOG_LEVEL` (optional).
 
 ## Test it
 
@@ -103,7 +113,7 @@ pytest                                        # unit suite on SQLite (tables fro
 set MINTY_TEST_PG_URI=postgresql://postgres:***@localhost:5432/postgres
 set MINTY_REPO=C:\Github\Minty
 pytest                                        # the same suite on a Postgres built from 01_schema_rebased.sql; 00:10
-set MINTY_DB_SCHEMA=pettycash_alt && pytest billing/tests/test_schema_name.py   # the name is a setting
+set DATABASE_URL=postgresql://postgres@localhost:5432/postgres?schema=pettycash_alt && pytest billing/tests/test_schema_name.py   # the name is a setting
 ruff check .
 pytest e2e                                    # HTTP smoke against a RUNNING service - e2e/README.md
 ```
@@ -138,8 +148,8 @@ docs/openapi.json  the committed contract (= /api/openapi.json; manage.py export
 `MINTY_TEST_PG_URI= pytest` green on SQLite (1122 passed, 2 Postgres-only lock tests skipped,
 00:09); `MINTY_TEST_PG_URI=… MINTY_REPO=C:\Github\Minty pytest` green (1124 passed, 00:14; the
 harness builds `01_schema_rebased.sql`; a mirror column the schema lacks fails on the SELECT);
-`MINTY_DB_SCHEMA=pettycash_alt pytest billing/tests/test_schema_name.py` passes; `ruff check .`
-clean; `manage.py runserver 8004` → `/healthz` 200 and `/api/me/subscriptions` 401 without a
+`DATABASE_URL=…?schema=pettycash_alt pytest billing/tests/test_schema_name.py` passes; `ruff check .`
+clean; `manage.py runserver 8000` → `/healthz` 200 and `/api/me/subscriptions` 401 without a
 token; `python Minty/docs/schema/generators/audit_models.py` reports 0
 for all four repos. Against the dev database:
 `manage.py subscriptions revoke-ungranted` (dry) and `run-renewals` (dry) answer the same as
@@ -176,7 +186,7 @@ replay is skipped (console backend) unless `--notify-to` names a recipient.
 1. `SECRET_KEY` identical across every Python service; Flask is the only minter — this service verifies only.
 2. `Minty/migrations` is the only DDL owner until Part 3's `minty-db`; no service declares a managed model for a `pettycashv3` table.
 3. Outbound calls to another service go through one client module per service (`core/flask_client.py`).
-4. The schema name is a setting (`MINTY_DB_SCHEMA`), never a literal; `billing/tests/test_schema_name.py` fails on any other spelling.
-6. Ports: `800d` for the `-api`, `300d` for the `-web` — billing is `d = 4`: this service 8004, its pages in `minty-web` 3002.
+4. The schema name is a setting (`?schema=` on `DATABASE_URL` → `settings.DB_SCHEMA`), never a literal; `billing/tests/test_schema_name.py` fails on any other spelling.
+6. Ports: `80N0` for the `-api`, `30N0` for the `-web` — subscriptions are slot `N = 0`: this service 8000, its pages in `minty-web` 3000.
 8. `MAINTENANCE_MODE` will be honoured from Part 3 step 2 (the shared packages).
 9. Only this service holds the Stripe keys.

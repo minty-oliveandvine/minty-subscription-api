@@ -1,5 +1,5 @@
-"""The schema name is a setting: ``config.settings.DB_SCHEMA`` (env ``MINTY_DB_SCHEMA``, the
-same variable Minty reads). No application string may carry it; ``search_path`` and the raw
+"""The schema name is a setting: ``config.settings.DB_SCHEMA`` (``?schema=`` on ``DATABASE_URL``,
+the same URL Minty reads; config/dburl.py). No application string may carry it; ``search_path`` and the raw
 queries read the setting. Comments and docstrings are free to say it."""
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from django.conf import settings
 
 ROOT = Path(__file__).resolve().parents[2]
 NAME = "pettycashv3"
-ALLOWED = {"config/settings.py"}
+ALLOWED = {"config/settings.py", "config/dburl.py"}
 SKIP = ("tests/", "billing/tests/", "e2e/", "migrations/")
 
 

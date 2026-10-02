@@ -110,7 +110,7 @@ def mail(settings, monkeypatch):
 
     monkeypatch.setattr(locmem.EmailBackend, "send_messages", send_messages)
     settings.EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"
-    settings.MINTY_PUBLIC_URL = "https://app.minty.test"
+    settings.PETTY_CASH_PUBLIC_URL = "https://app.minty.test"
     settings.DEFAULT_FROM_EMAIL = "noreply@minty.test"
     settings.SUBSCRIPTION_EMAIL = None
     django_mail.outbox = []
@@ -219,7 +219,7 @@ def test_a_dead_mail_server_does_not_raise(app, db_session, mail):
 
 def test_no_mail_configured_does_not_raise(app, db_session, settings):
     """Flask's "no mail extension" is Django's console backend - the settings' own default
-    when EMAIL_HOST is unset. Skipped, not spent: no dedupe row is written, so the notice
+    when SMTP_URL is unset. Skipped, not spent: no dedupe row is written, so the notice
     still goes out on the first run that has a mail host."""
     from billing.services import notify
     from shared_models.models import SubscriptionEmailLog
@@ -472,7 +472,7 @@ def test_links_are_dropped_rather_than_pointed_at_localhost(app, db_session, mai
 
     with app.app_context():
         payer = _make_payer(db_session)
-        settings.MINTY_PUBLIC_URL = None
+        settings.PETTY_CASH_PUBLIC_URL = None
         notify.notify(payer, notify.TRIAL_ENDING, dedupe_key="k", context={
             "entity_id": _company(db_session, "e1"), "entity_name": "Olive Ltd",
             "codes": ["PAYMENT_REQUEST"], "trial_end": datetime(2026, 9, 1, tzinfo=UTC),
@@ -488,10 +488,10 @@ def test_links_are_dropped_rather_than_pointed_at_localhost(app, db_session, mai
 
 def test_the_images_travel_with_the_message_not_over_http(app, db_session, mail):
     """A remote <img> is a broken grey box whenever the client blocks images — which
-    Gmail and Outlook both do by default — or whenever PUBLIC_URL isn't publicly
-    reachable. The first live send went out with a logo pointing at localhost:5001.
+    Gmail and Outlook both do by default — or whenever PETTY_CASH_PUBLIC_URL isn't publicly
+    reachable. The first live send went out with a logo pointing at localhost:8010.
 
-    Attached, they render offline, behind image blocking, and whatever PUBLIC_URL says.
+    Attached, they render offline, behind image blocking, and whatever PETTY_CASH_PUBLIC_URL says.
     Both parts get the same treatment: the masthead logo and the event's illustration.
     """
     from billing.services import notify
@@ -631,7 +631,7 @@ def test_a_real_enclosure_stays_mixed(app):
 
 
 def test_an_unreachable_public_url_is_reported_once(app, db_session, mail, monkeypatch, settings):
-    """A developer's PUBLIC_URL reaching production mail is otherwise silent: every
+    """A developer's PETTY_CASH_PUBLIC_URL reaching production mail is otherwise silent: every
     message looks perfect and every button lands on a host only the sender can resolve.
 
     Once per process, not per send — a nightly run mailing forty payers must not print
@@ -645,7 +645,7 @@ def test_an_unreachable_public_url_is_reported_once(app, db_session, mail, monke
     )
 
     with app.app_context():
-        settings.MINTY_PUBLIC_URL = "https://localhost:5001"
+        settings.PETTY_CASH_PUBLIC_URL = "https://localhost:8010"
         payer = _make_payer(db_session)
         for index in range(3):
             notify.notify(

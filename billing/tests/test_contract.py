@@ -152,12 +152,12 @@ def test_openapi_lists_every_path(client):
 def test_healthz_and_the_openapi_document_need_no_token(client):
     res = client.get("/healthz")
     assert res.status_code == 200
-    assert res.json()["service"] == "minty-billing-api"
+    assert res.json()["service"] == "minty-subscription-api"
     assert client.get("/api/openapi.json").status_code == 200
 
 
 def test_the_cors_preflight_succeeds(client):
-    origin = "http://localhost:3002"
+    origin = "http://localhost:3000"
     res = client.options(
         "/api/me/subscriptions",
         HTTP_ORIGIN=origin,

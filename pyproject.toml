@@ -1,5 +1,5 @@
 [project]
-name = "minty-billing-api"
+name = "minty-subscription-api"
 version = "0.1.0"
 description = "Minty's subscription engine and payer portal API (Django + django-ninja)."
 requires-python = ">=3.13"

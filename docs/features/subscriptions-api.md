@@ -23,11 +23,11 @@ page and this one disagree, this one is right.
   page model plus one action endpoint. No action hands the browser to a Stripe-hosted page
   (2026-10-01): cards are added only through a billing account, on `/api/me/billing/*`.
 - **The notice** a dashboard shows for a company (past due, or a paid module winding down; no
-  trial notices since 2026-10-01): one route, read by billing-frontend's landing page and by
+  trial notices since 2026-10-01): one route, read by minty-payment-request-web's landing page and by
   Flask's dashboard server-side.
 - **The wizard's money steps** (onboarding step 8/9): adding a card INTO a billing account,
   authorising billing, and — on All Set — starting the trial. Seven of Flask's nine routes proxied
-  here by onboarding-backend (its two setup-mode Checkout routes were deleted 2026-10-01) plus
+  here by minty-onboarding-api (its two setup-mode Checkout routes were deleted 2026-10-01) plus
   `POST /api/onboarding/trials/start`.
 
 **THE CARD RULE (the user's, 2026-10-01).** A payment method is only ever added through a
@@ -176,11 +176,11 @@ there makes the sort raise, which the route turns into an empty notice. The tria
 (`notify.py`, event `trial_ending`) is unchanged and is what tells a payer about their trial.
 
 **Live since step 3 slice C (2026-09-22)** — `billing/api/notice.py`. Its auth class is
-`EntityBearerAuth` plus Flask's one fallback: a token that names NO company (billing-frontend's
-refresh path mints through billing-backend and sends only the bearer, never `X-Entity-Id`) is
+`EntityBearerAuth` plus Flask's one fallback: a token that names NO company (minty-payment-request-web's
+refresh path mints through minty-payment-request-api and sends only the bearer, never `X-Entity-Id`) is
 held to the caller's membership of the company in the PATH, which is what authorises the read
 in any case. A token that names another company is 403 `entity_mismatch`; a stranger is refused
-at the door (401 where Flask said 403 `not_a_member` — billing-frontend treats every non-200 as
+at the door (401 where Flask said 403 `not_a_member` — minty-payment-request-web treats every non-200 as
 "no notice"). A builder failure is `{"items": []}` with 200: a notice never takes the landing
 page down. Stateless: the "show once per session" claim stays Flask's.
 
@@ -197,7 +197,7 @@ page down. Stateless: the "show once per session" claim stays Flask's.
 | POST | `/billing/authorize` | `onboarding_billing_authorize` |
 | POST | `/trials/start` | **new** — `{entity_id} → {trial_end}`; what finalize calls |
 
-**`trials/start` must not fail silently** (decision 2026-09-21): onboarding-backend's native
+**`trials/start` must not fail silently** (decision 2026-09-21): minty-onboarding-api's native
 `finalize` flips the company live and then calls this; a failure here fails finalize, the All
 Set screen offers *Try again*, and both halves are idempotent — a company already live stays
 live, a trial already started is returned, never duplicated.
@@ -212,7 +212,7 @@ rule and sentences); the four billing-sheet card routes act on the payer and che
 subscription are skipped) and reads `trial_end` BACK from the rows (the earliest); a
 `CheckoutError` answers with its status, anything else 502 "The trial could not be started.
 Please try again." — never swallowed, as Flask's finalize did. Flask's
-`/api/onboarding/plans` is NOT here: onboarding-backend serves the catalogue natively
+`/api/onboarding/plans` is NOT here: minty-onboarding-api serves the catalogue natively
 (`onboarding/api_reference.py`). Neither are Flask's `POST /payment-method/setup` and
 `/payment-method/complete` (a Stripe-hosted setup-mode Checkout returning to the wizard with
 `?pm_session_id=`): deleted 2026-10-01 under the card rule (§1), with the `ONBOARDING_WEB_URL`
@@ -665,11 +665,12 @@ for a handover that is over.
 - a deferred trial's module card says `trial_closing` for its first six hours
   (`TRIAL_CLOSING_WINDOW`) and trial expired after that, while its access stays on for the grace.
 
-Mail: Django `EMAIL_*` on the same Brevo SMTP Minty uses, sender `SUBSCRIPTION_EMAIL` (fallback
+Mail: `SMTP_URL` (parsed into Django's `EMAIL_*` settings by `config/smtpurl.py`) on the same
+Brevo SMTP Minty uses, sender `SUBSCRIPTION_EMAIL` (fallback `MAIL_FROM`, the setting
 `DEFAULT_FROM_EMAIL`; the setup reminder's is `ONBOARDING_EMAIL`, production
-`onboarding@dailyminty.com`, same fallback - `notify.sender_for`); each SMTP step times out after `EMAIL_TIMEOUT` seconds (10; Django's
+`onboarding@dailyminty.com`, same fallback - `notify.sender_for`); each SMTP step times out after `?timeout=` seconds (`settings.EMAIL_TIMEOUT`, default 10; Django's
 own default blocks forever, inside the pass that holds the scheduler lock). `notify.mail_configured()` is false for the console and dummy backends
-and for SMTP with no `EMAIL_HOST`, and it is checked BEFORE the dedupe claim — an unconfigured
+and for SMTP with no host (`SMTP_URL` unset), and it is checked BEFORE the dedupe claim — an unconfigured
 host skips the notice without spending it, so the first configured run still sends it (Flask's
 extension always existed, so its unconfigured case claimed and then failed to connect; same net
 effect). The template (`templates/email/subscription_notice.html`; the receipt's went with the
@@ -678,7 +679,7 @@ the same context is byte-identical (checked 2026-09-21); the ten inline images (
 `InlineImageMessage` keeps the `multipart/related; type="multipart/alternative"` wire shape
 with `Content-ID` parts; dedup stays in `subscription_email_log`. Links in emails point at
 minty-web through Flask's login-gated re-handoff (`notify.settings_url` →
-`{MINTY_PUBLIC_URL}/handoff/minty-web?next=/subscription/entities/{id}/modules&entity_id={id}`,
+`{PETTY_CASH_PUBLIC_URL}/handoff/minty-web?next=/subscription/entities/{id}/modules&entity_id={id}`,
 `notify.portal_url` → `…?next=/subscription/subscriptions[/incoming]`), so no token ever
 travels in a link from here — Flask stays the only minter. Flask's `/handoff/minty-web` exists
 and minty-web is live (2026-09-30), so those links work.
@@ -743,15 +744,17 @@ as `recipient_for`, so a replay never mails a real billing address. Pinned in
 
 ## 7. Configuration
 
-`.env.example` is the list. The two switches; `SECRET_KEY` (shared, verify only); `POSTGRES_*` /
-`DB_*` + `MINTY_DB_SCHEMA` (default `pettycashv3`, a setting never a literal —
-`billing/tests/test_schema_name.py`); `STRIPE_*`; `EMAIL_*` / `SUBSCRIPTION_EMAIL`;
-`FLASK_APP_URL` (the forwarded call); `MINTY_PUBLIC_URL` (the address a PERSON reaches Minty
-at — every link in an email; defaults to `FLASK_APP_URL`, which in the docker stack is the
-internal service name, so set it there); `MINTY_WEB_URL` / `PAYMENTS_WEB_URL` /
-`CORS_ALLOWED_ORIGINS` (the two browser origins; `x-entity-id` is allowed). `ONBOARDING_WEB_URL`
-is gone (2026-10-01): its only reader was the deleted onboarding setup Checkout. In the docker
-stack it is the `billing-api` service on 8004.
+`.env.example` is the list. `APP_ENV` (`development` | `production`, the default; `DEBUG`
+follows it); the scheduler switches; `SECRET_KEY` (shared, verify only); `DATABASE_URL` with
+`?schema=` (default `pettycashv3`, a setting never a literal — `config/dburl.py`,
+`billing/tests/test_schema_name.py`); `STRIPE_*`; `SMTP_URL` / `MAIL_FROM` /
+`SUBSCRIPTION_EMAIL` / `ONBOARDING_EMAIL`; `PETTY_CASH_URL` (the forwarded call);
+`PETTY_CASH_PUBLIC_URL` (the address a PERSON reaches Minty at — every link in an email;
+defaults to `PETTY_CASH_URL`, which in the docker stack is the internal service name, so set it
+there); `MINTY_WEB_URL` / `PAYMENT_REQUEST_WEB_URL` / `CORS_ALLOWED_ORIGINS` (the browser
+origins, default those two plus `PETTY_CASH_PUBLIC_URL`; `x-entity-id` is allowed). The
+onboarding web URL is not read (2026-10-01): its only reader was the deleted onboarding setup
+Checkout. In the docker stack it is the `subscription-api` service on 8000.
 
 ## 8. Where it is tested
 
@@ -844,8 +847,8 @@ the `_needs_stripe_clock` bug in both scripts, then with it fixed on both sides.
 kept anywhere (user's decision) - the repo records the outcome, and a run is regenerated when it
 is wanted.
 
-Regenerating a golden run (nothing is kept on disk): Flask from `C:\Github\Minty` with both
-URIs pointed at the LOCAL database and `MAIL_SERVER=` blanked unless the notices are wanted -
+Regenerating a golden run (nothing is kept on disk): Flask from `C:\Github\Minty` with
+`DATABASE_URL` pointed at the LOCAL database and `SMTP_URL=` blanked unless the notices are wanted -
 `python scripts/subscription/replay_scenarios.py --run <key> --reset --teardown --setup --replay
 --report`; Django from this repo - `python manage.py replay_scenarios --run <key> --as
 angelika.tardaguela+django-<key>@… --tag <tag of the SAME length as the run's> --reset --teardown
@@ -980,8 +983,8 @@ against the ninja routers, into `billing/tests/api/`:
 
 - `tests/test_payer_portal_api.py` (22) — **PORTED, slice A**: `billing/tests/api/test_payer_portal_api.py`, all 22 plus the empty-table 200, the not-JSON body, the read model's 500, the RFC 822 rendering and five invitation-forward tests (no Flask twin: Flask's view sent the invite in-process)
 - `tests/test_billing_payment_methods.py` (6) — **PORTED, slice A**: `billing/tests/api/test_billing_payment_methods.py`, all 6 plus the shell's 500-with-CORS
-- `tests/test_onboarding_payment_method.py` (14) — **PORTED, slice C**: `billing/tests/api/test_onboarding_payment_method.py`, 13 of the 14 (not `test_buy_now_card_routes_answer_the_onboarding_origin`: the wizard's browser never calls this API, onboarding-backend proxies server-side) plus the account routes, the wallet-described card, the setup return URLs, and six `trials/start` tests (the real trial over the seeded catalogue, idempotent, no-module null, the loud failure) — 38 tests
-- `tests/test_onboarding_plans.py` (4) — **not applicable**: `/api/onboarding/plans` is onboarding-backend's own (`onboarding/api_reference.py`, read from `billing_plan`); this API has no plans route
+- `tests/test_onboarding_payment_method.py` (14) — **PORTED, slice C**: `billing/tests/api/test_onboarding_payment_method.py`, 13 of the 14 (not `test_buy_now_card_routes_answer_the_onboarding_origin`: the wizard's browser never calls this API, minty-onboarding-api proxies server-side) plus the account routes, the wallet-described card, the setup return URLs, and six `trials/start` tests (the real trial over the seeded catalogue, idempotent, no-module null, the loud failure) — 38 tests
+- `tests/test_onboarding_plans.py` (4) — **not applicable**: `/api/onboarding/plans` is minty-onboarding-api's own (`onboarding/api_reference.py`, read from `billing_plan`); this API has no plans route
 - `tests/test_purchase_card_choice.py` (2 route tests) — **PORTED, slice B** into `billing/tests/api/test_module_settings_api.py`, together with the behaviour versions of `test_subscription_payer_permission`'s and `test_restart_billing_guard`'s route-source checks (every action as a co-admin, as a cashier who holds the card, the return leg as a co-admin; the restart route's four refusals in order) and the page model's wire shape — 84 tests
 - `tests/test_subscription_notice.py` (10) — **PORTED, slice C**: `billing/tests/api/test_subscription_notice.py`, all 10 (the stranger cases answer 401 at the door, see §2) plus the superadmin read and the real builder over an empty company — 12 tests
 - `tests/test_char_subscription.py`: the report-page gate check (Flask's gate); the rest is `billing/tests/engine/test_char_subscription.py` through the services
@@ -1024,5 +1027,5 @@ happening.**
 | 2 | DONE 2026-09-21: `billing/services/` — the 1:1 port of all 24 modules of `blueprints/subscription/services/` plus `entity_modules.py` (from `entity/services/modules.py`), `_context.py` (the request scope that replaced `flask.g`) and `_log.py`; the templates and images; 51 ported test files; the job bodies behind `manage.py subscriptions`; the scoped scheduler pass; `manage.py replay_scenarios` + `scripts/replay_diff.py`, the eight Angelika runs identical on both sides |
 | 3 | DONE 2026-09-22: all four routers filled from Flask's views — `me` (`billing/api/me.py`, `_json.py` = `jsonify`; the invitation forwarded with the caller's bearer), `modules` (the page model minty-web renders + the 19 actions behind one gate), `notice` (`NoticeBearerAuth`, Flask's claimless fallback), `onboarding` (the nine + `trials/start`, which fails loudly); `docs/openapi.json` committed and held current by `test_contract.py` / `manage.py export_openapi`; 173 route tests in `billing/tests/api/` (32 portal + 7 wallet, 84 module page, 12 notice, 38 onboarding); e2e smoke asserts the live shapes |
 | 4c+ | DONE 2026-09-25: **billing accounts in the portal** — `GET /billing/accounts` (`portal.build_billing_accounts`), `update` / `default-card` / `move` (`billing/services/billing_accounts.py`), the account fields on `confirm`, `account` on `invoices` and `remove`, `next_billing` on `subscriptions`. Five silent failures fixed on the way: the landing's "Next Billing Date" was the anchor (the FIRST charge); the removal guard stopped at the first account on a shared card; card-keyed nomination raised on a shared card (`_group_for_card`, oldest wins); a company moved onto an emptied account lost access (`_carry_paid_days`' idle branch); a blanked address field was dropped by the SDK instead of cleared. Flask not mirrored (dark there; Django replaces it). **Same day, later: `next_bill` per account** (08-B's "Amount (estimated)") - `portal.next_bill_for_account` prices the account's next renewal with `renewals.build_renewal(..., converting_by=period.start)`: the runner's own invoice for the period starting on the next billing date, plus the trials that will have converted by then (`renewals._trial_converts` - the trial-end job's conjunction of customer, card for the company and consent, read from the database alone, never Stripe). `converting_by` is the forecast's only; the runner never passes it, so what it bills is unchanged. A figure that cannot be priced is null and logged, never a failed page. **Later still: schema item 23** - `subscription_invoice_line` records what each line PAID FOR (`period_start` / `period_end` / `unit_amount`), written by BOTH engines at issue: `billing.Line` carries them from whatever priced the line (`paid_from` holds a mid-period start to the period as `prorate` does), and an extension's come from `checkout.pending_extension_terms` - the paid-through date to the access end, and the rate only when re-deriving it piece by piece (`_extension_pieces`, which `_segmented_extension` now sums) reproduces the billed amount at ONE rate; never a blend, never a failed renewal. The breakdown reads them first. Minty migration `x1a01_invoice_line_span` ALTERs a database already up; both local ones have it, Supabase does not yet. **And 08-C's address became Stripe's own form** (the user's call): `?countries=1` also answers `publishable_key`, `update` takes `cardholder` (written with the address in one `billing_details` update, the account's card required as for the address), and every field is held to 255 characters. **2026-09-28: 08-K** - `POST /invoices/{invoice_id}/retry` and `retryable` on the invoice rows (above); `retry_now` gained `group_id` / `expect_invoice` in BOTH engines. And the engine now recognises a REPLAY-SCOPED renewal key (`dunning._names_period`: `<key>` or `<key>-<suffix>` - `replay_scenarios` scopes every key it issues so same-day runs do not collide at Stripe) where it picks the current period's invoice and where it settles one, so the dev database's lived past-due accounts can be retried and settle; production keys are never scoped. NOT covered: the renewal runner's duplicate guard (`_already_invoiced`) still matches keys exactly, so the live scheduler re-bills a replay-lived period (seen 2026-09-28 07:00 UTC on the catalogue's two 'Failed' accounts). **2026-09-29: the invoice PDF (Figma 09-A)** - `GET /invoices/{invoice_id}/pdf` and `has_pdf` on the invoice rows (above; Django only, Flask never had the portal's invoice actions); and in BOTH engines, a declined reinstatement voids the invoice it left open, and every Stripe item carries its own line's days (§6) |
-| 5 | Flask's copies deleted; onboarding-backend proxies here; the Stripe keys leave Flask |
+| 5 | Flask's copies deleted; minty-onboarding-api proxies here; the Stripe keys leave Flask |
 | 7 | deployed beside the phase-C builds (on a test site since before 2026-10-01; the dark switch the plan's step 7/8b relied on was removed that day) |

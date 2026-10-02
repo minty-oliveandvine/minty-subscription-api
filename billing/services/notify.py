@@ -63,7 +63,7 @@ refused and the next sweep cuts access, so a customer who pays at any time on th
 day is in time.
 
 ONE EMAIL HERE IS NOT ABOUT MONEY: ``onboarding_reminder`` (2026-10-01, Figma frame
-2969:1368 on page 573:990, minty-billing-api only - Flask never had it). It nudges the
+2969:1368 on page 573:990, minty-subscription-api only - Flask never had it). It nudges the
 person who started setting up a company and stopped, lists the wizard steps still to do
 (``ONBOARDING_STEPS``) and comes from its own sender (``onboarding_sender``). It lives here
 for the template, the send-once log and the daily pass; ``onboarding_reminders`` decides
@@ -74,7 +74,7 @@ PORTED FROM FLASK (Part 2 step 2). The copy, the builders and the three rules ar
 layer underneath them - Flask-Mail became Django's mail framework (``InlineImageMessage``
 keeps the ``multipart/related`` wire shape), ``render_template`` became the Jinja2
 template backend rendering the SAME template (``templates/email/``), ``PUBLIC_URL``
-became ``MINTY_PUBLIC_URL``, and the links a person receives go to minty-web through
+became ``PETTY_CASH_PUBLIC_URL``, and the links a person receives go to minty-web through
 Flask's re-handoff (``settings_url`` / ``portal_url``) instead of to Flask's own pages.
 """
 from __future__ import annotations
@@ -312,9 +312,9 @@ def _module_name(code: str) -> str:
 def base_url() -> str:
     """Public origin for links, WITHOUT a request to derive it from.
 
-    ``MINTY_PUBLIC_URL`` — Flask's ``PUBLIC_URL``, the address a PERSON reaches Minty at.
-    Distinct from ``FLASK_APP_URL``, which in the docker stack is the internal service
-    name (``http://minty:5001``) and would ship a button nobody outside the network can
+    ``PETTY_CASH_PUBLIC_URL`` — the address a PERSON reaches Minty at. Distinct from
+    ``PETTY_CASH_URL``, which in the docker stack is the internal service
+    name (``http://minty:8010``) and would ship a button nobody outside the network can
     press. One setting for every link a customer receives, so a domain change has one
     place to land.
 
@@ -322,7 +322,7 @@ def base_url() -> str:
     is no request to build an absolute URL from. An unset value drops the button rather
     than shipping a dead one.
     """
-    value = (getattr(settings, "MINTY_PUBLIC_URL", "") or "").rstrip("/")
+    value = (getattr(settings, "PETTY_CASH_PUBLIC_URL", "") or "").rstrip("/")
     _warn_once_if_unreachable(value)
     return value
 
@@ -334,7 +334,7 @@ _warned_unreachable = False
 def _warn_once_if_unreachable(value: str) -> None:
     """Say something when the buttons in these emails cannot possibly work.
 
-    A developer's ``MINTY_PUBLIC_URL`` reaching production mail is a silent failure otherwise:
+    A developer's ``PETTY_CASH_PUBLIC_URL`` reaching production mail is a silent failure otherwise:
     every message goes out looking perfect and every button lands on a host only the
     sender can resolve. Cheap to detect, and worth one loud line per process — the alert
     emails are the ones whose whole purpose is getting somebody to click through.
@@ -349,13 +349,13 @@ def _warn_once_if_unreachable(value: str) -> None:
     if not value:
         _warned_unreachable = True
         logger.warning(
-            "notify: MINTY_PUBLIC_URL is unset — billing emails will go out with no "
+            "notify: PETTY_CASH_PUBLIC_URL is unset — billing emails will go out with no "
             "action buttons at all."
         )
     elif any(host in lowered for host in _LOCAL_HOSTS):
         _warned_unreachable = True
         logger.warning(
-            "notify: MINTY_PUBLIC_URL is {!r}, which no recipient can reach. Billing emails "
+            "notify: PETTY_CASH_PUBLIC_URL is {!r}, which no recipient can reach. Billing emails "
             "will ship buttons that go nowhere.", value,
         )
 
@@ -363,8 +363,8 @@ def _warn_once_if_unreachable(value: str) -> None:
 def billing_sender() -> str | None:
     """The From address for billing mail.
 
-    Its own address rather than the account-wide sender (Flask's ``BREVO_EMAIL``, here
-    ``DEFAULT_FROM_EMAIL``): an invitation comes from a colleague, a dunning notice comes
+    Its own address rather than the account-wide sender (``MAIL_FROM``, here
+    ``settings.DEFAULT_FROM_EMAIL``): an invitation comes from a colleague, a dunning notice comes
     from the company about to switch your access off. Recipients filter and search on the
     sender, so those should not share one.
 
@@ -427,7 +427,7 @@ def handoff_path(next_path: str, *, entity_id=None) -> str:
 
 
 def handoff_url(next_path: str, *, entity_id=None) -> str:
-    """``{MINTY_PUBLIC_URL}`` + ``handoff_path`` — a link into minty-web that Flask
+    """``{PETTY_CASH_PUBLIC_URL}`` + ``handoff_path`` — a link into minty-web that Flask
     authenticates on the way through. Empty when there is no public origin, like every
     other link here."""
     root = base_url()
@@ -451,13 +451,13 @@ def portal_url(next_path: str = "/subscription/subscriptions") -> str:
 #
 #   1. most clients — Gmail and Outlook included — block remote images by default until
 #      the reader clicks "show images", so the masthead is a grey box on first open;
-#   2. the host has to be publicly reachable. ``MINTY_PUBLIC_URL`` is a developer's
-#      ``https://localhost:5001`` far more often than anyone intends, and mail sent that
+#   2. the host has to be publicly reachable. ``PETTY_CASH_PUBLIC_URL`` is a developer's
+#      ``https://localhost:8010`` far more often than anyone intends, and mail sent that
 #      way carries a logo nobody outside that machine can load. That is exactly what the
 #      first live send did.
 #
 # A CID attachment is part of the message, so it renders offline, behind image blocking,
-# and whatever ``MINTY_PUBLIC_URL`` says. The cost is ~14KB per email, which is nothing next to
+# and whatever ``PETTY_CASH_PUBLIC_URL`` says. The cost is ~14KB per email, which is nothing next to
 # a masthead that is broken by default.
 
 LOGO_CID = "minty-logo"
@@ -955,7 +955,7 @@ def mail_configured() -> bool:
     """Whether a send from here can reach anybody.
 
     False for the console and dummy backends and for an SMTP backend with no host - the
-    settings' own default when ``EMAIL_HOST`` is unset. Checked BEFORE the claim, so an
+    settings' own default when ``SMTP_URL`` is unset. Checked BEFORE the claim, so an
     unconfigured host writes no dedupe row and the notice is not spent: the next run with
     mail configured still sends it. (Flask's ``mail`` extension was always registered, so
     its unconfigured case CLAIMED and then failed to connect; the row stayed ``failed`` and
