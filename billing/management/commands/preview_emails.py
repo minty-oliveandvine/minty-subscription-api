@@ -102,7 +102,7 @@ class Command(BaseCommand):
         from billing.services import notify
 
         if not notify.mail_configured():
-            raise CommandError("Mail is not configured (EMAIL_HOST unset) - nothing was sent.")
+            raise CommandError("Mail is not configured (SMTP_URL unset) - nothing was sent.")
         if "locmem" in (getattr(settings, "EMAIL_BACKEND", "") or ""):
             raise CommandError("EMAIL_BACKEND is the in-memory one - nothing would leave.")
         failures = 0

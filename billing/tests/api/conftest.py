@@ -25,7 +25,7 @@ import pytest
 from billing.services import _context
 from billing.tests.conftest import make_token
 
-ORIGIN = "http://localhost:3002"
+ORIGIN = "http://localhost:3000"
 
 
 class _AppShim:

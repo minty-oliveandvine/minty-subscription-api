@@ -40,7 +40,7 @@ UNREACHABLE = HOUSE_FALLBACK
 
 
 def _url(path: str) -> str:
-    return f"{settings.FLASK_APP_URL}/{path.lstrip('/')}"
+    return f"{settings.PETTY_CASH_URL}/{path.lstrip('/')}"
 
 
 def bearer_from(request) -> str:

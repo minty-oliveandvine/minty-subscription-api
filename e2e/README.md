@@ -1,18 +1,18 @@
-# minty-billing-api smoke tests
+# minty-subscription-api smoke tests
 
 ```bash
 pytest e2e                       # against a service that is already running
 ```
 
 HTTP level, no browser, **nothing is started here**: the service under test is already up
-(`manage.py runserver 8004`, the docker stack, or a deployment). Every test skips with a
+(`manage.py runserver 8000`, the docker stack, or a deployment). Every test skips with a
 reason when it is not answering, and the token tests skip without the credentials.
 
 | Variable | What |
 |---|---|
-| `E2E_BASE_URL` | default `http://127.0.0.1:8004` (not `localhost`: Windows resolves it to `::1` first and every request stalls ~2 s); a Render URL for a run against a deployment |
-| `E2E_WEB_ORIGIN` | the minty-web origin the CORS assertions use, default `http://localhost:3002` |
-| `E2E_PAYMENTS_ORIGIN` | the payment-request UI's origin (the notice's caller), default `http://localhost:3000` |
+| `E2E_BASE_URL` | default `http://127.0.0.1:8000` (not `localhost`: Windows resolves it to `::1` first and every request stalls ~2 s); a Render URL for a run against a deployment |
+| `E2E_MINTY_WEB_URL` | the minty-web origin the CORS assertions use, default `http://localhost:3000` |
+| `E2E_PAYMENT_REQUEST_WEB_URL` | the payment-request UI's origin (minty-payment-request-web, the notice's caller), default `http://localhost:3020` |
 | `E2E_JWT_SECRET` | the `SECRET_KEY` shared with Minty; the tests mint the same token Flask does |
 | `E2E_MINTY_USER` / `E2E_MINTY_ENTITY` | the identity `Minty/scripts/e2e_seed.py --print` creates |
 

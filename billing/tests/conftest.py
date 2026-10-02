@@ -121,7 +121,7 @@ def auth_scoped(user, entity):
 # NO NETWORK. Every outbound call in this service goes through ``requests`` (the Flask
 # forward in core/flask_client.py) or the Stripe SDK (billing/services/stripe_client.py,
 # step 2), and none of it may reach a real host from a test. A test whose result depends on
-# what is listening on localhost:5001, or on a live Stripe account, is not a test. Tests
+# what is listening on localhost:8010, or on a live Stripe account, is not a test. Tests
 # that need a response stub ``requests.request`` (or the Stripe client) themselves.
 # ---------------------------------------------------------------------------------------
 

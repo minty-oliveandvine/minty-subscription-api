@@ -21,7 +21,7 @@ from django.core.management import call_command
 @pytest.fixture
 def mail(settings):
     settings.EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"
-    settings.MINTY_PUBLIC_URL = "https://app.minty.test"
+    settings.PETTY_CASH_PUBLIC_URL = "https://app.minty.test"
     settings.DEFAULT_FROM_EMAIL = "noreply@minty.test"
     settings.ONBOARDING_EMAIL = "onboarding@minty.test"
     django_mail.outbox = []

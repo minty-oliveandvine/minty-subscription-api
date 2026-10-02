@@ -62,7 +62,7 @@ def healthz(request):
     database and the schema before starting, so a health endpoint that also queried would
     report unhealthy for a transient database blip and get the container killed mid-request.
     """
-    return JsonResponse({"status": "ok", "service": "minty-billing-api"})
+    return JsonResponse({"status": "ok", "service": "minty-subscription-api"})
 
 
 urlpatterns = [

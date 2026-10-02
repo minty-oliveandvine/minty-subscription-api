@@ -23,8 +23,9 @@ RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh && \
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-EXPOSE 8004
+EXPOSE 8000
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 # Two workers, two schedulers: the pass's advisory lock lets one run (billing/scheduler.py).
-CMD ["gunicorn", "-w", "2", "-b", "0.0.0.0:8004", "config.wsgi:application"]
+# Shell form so a host-injected PORT is honoured; exec keeps gunicorn as the signalled process.
+CMD exec gunicorn -w 2 -b "0.0.0.0:${PORT:-8000}" config.wsgi:application

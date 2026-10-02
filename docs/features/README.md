@@ -1,10 +1,10 @@
 # Features — the subscription engine's API
 
-`minty-billing-api` is the Django (Ninja) service that owns Minty's subscriptions from Part 2
+`minty-subscription-api` is the Django (Ninja) service that owns Minty's subscriptions from Part 2
 of the modernisation plan on: the payer portal (`/api/me/*`), the module settings page
 (`/api/entities/{id}/modules`), the dashboard notice, the wizard's card routes, the daily
 pass and the notification emails. It verifies the token Minty minted, reads and writes the
-thirteen subscription tables in the shared schema (`MINTY_DB_SCHEMA`, default `pettycashv3`,
+thirteen subscription tables in the shared schema (`?schema=` on `DATABASE_URL`, default `pettycashv3`,
 every model `managed = False`), writes the `entity_function_map.is_enabled` projection Flask's
 module gate reads, and is the only holder of the Stripe keys. Written for someone new to the
 codebase; the plan and Minty's own `docs/features/` are linked, not repeated.
@@ -16,8 +16,8 @@ codebase; the plan and Minty's own `docs/features/` are linked, not repeated.
 
 The three rules the service is built on (verifies never mints · no migrations, `managed =
 False` · single Stripe writer) and the in-process scheduler's known costs
-are in the repo `README.md`; read it first. Running it: `manage.py runserver 8004` with `.env`
-(`SECRET_KEY` shared with Minty, `POSTGRES_*`, `MINTY_DB_SCHEMA`, the scheduler's
+are in the repo `README.md`; read it first. Running it: `manage.py runserver 8000` with `.env`
+(`APP_ENV`, `SECRET_KEY` shared with Minty, `DATABASE_URL` with its `?schema=`, the scheduler's
 `SUBSCRIPTION_SCHEDULER_*` settings, the Stripe keys); tests `pytest` (SQLite, 35 on 2026-09-21) and `MINTY_TEST_PG_URI=…
 MINTY_REPO=… pytest` (Postgres from the schema file); `pytest e2e` against a running service
 (`e2e/README.md`).

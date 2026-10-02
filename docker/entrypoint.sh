@@ -1,8 +1,8 @@
 #!/usr/bin/env sh
-# Container entrypoint for minty-billing-api.
+# Container entrypoint for minty-subscription-api.
 #
 # This service is a TENANT of the schema Flask owns: settings.py pins search_path to
-# MINTY_DB_SCHEMA (default pettycashv3), and shared_models maps tables Flask's Alembic
+# the ``?schema=`` on DATABASE_URL (default pettycashv3, config/dburl.py), and shared_models maps tables Flask's Alembic
 # migrations create. So wait for both the database and that schema rather than creating
 # anything ourselves.
 #
@@ -19,12 +19,11 @@ import time
 
 import psycopg
 
-host = os.environ.get("DB_HOST", "localhost")
-port = os.environ.get("DB_PORT", "5432")
-dbname = os.environ.get("POSTGRES_DB", "postgres")
-user = os.environ.get("POSTGRES_USER", "postgres")
-password = os.environ.get("POSTGRES_PASSWORD", "")
-schema = os.environ.get("MINTY_DB_SCHEMA", "pettycashv3")
+from config.dburl import database_url, parse_database_url
+
+db, schema = parse_database_url(database_url())
+# Every query parameter but search_path (sslmode, ...) goes to the driver as Django's does.
+params = {k: v for k, v in db["OPTIONS"].items() if k != "options"}
 
 # Seconds, not attempts: the schema arrives only once Flask has finished its own
 # migrations, which on a cold volume takes a while.
@@ -34,7 +33,12 @@ last_error = None
 while time.monotonic() < deadline:
     try:
         with psycopg.connect(
-            host=host, port=port, dbname=dbname, user=user, password=password, connect_timeout=5
+            host=db["HOST"],
+            port=db["PORT"],
+            dbname=db["NAME"],
+            user=db["USER"],
+            password=db["PASSWORD"],
+            **{"connect_timeout": 5, **params},
         ) as conn:
             row = conn.execute(
                 "SELECT 1 FROM information_schema.schemata WHERE schema_name = %s", [schema]

@@ -1,6 +1,11 @@
 import os
 
-from config.settings import *  # noqa: F401, F403
+# The placeholder SECRET_KEY refuses to boot outside development; the real test key is set
+# below, after the import that would otherwise trip the guard.
+os.environ.setdefault("APP_ENV", "development")
+
+from config.dburl import parse_database_url  # noqa: E402
+from config.settings import *  # noqa: E402, F401, F403
 
 # A fixed key so tests can mint a JWT the service will accept. Nothing about the value
 # matters except that signing and verifying use the same one - which is the whole contract
@@ -21,23 +26,19 @@ SUBSCRIPTION_SCHEDULER_ENABLED = False
 #             MINTY_TEST_PG_KEEP=1, PG_BIN, MINTY_REPO (C:\Github\Minty).
 _PG_URI = os.environ.get("MINTY_TEST_PG_URI")
 if _PG_URI:
+    from urllib.parse import parse_qs as _parse_qs
     from urllib.parse import urlsplit as _urlsplit
 
-    _u = _urlsplit(_PG_URI)
-    DATABASES = {
-        "default": {
-            "ENGINE": "django.db.backends.postgresql",
-            "NAME": os.environ.get("MINTY_TEST_PG_DBNAME", "minty_test"),
-            "USER": _u.username or "postgres",
-            "PASSWORD": _u.password or "",
-            "HOST": _u.hostname or "localhost",
-            "PORT": str(_u.port or 5432),
-            "OPTIONS": {"options": f"-c search_path={DB_SCHEMA},public"},  # noqa: F405
-            # Never let pytest-django create/destroy a database of its own here; the root
-            # conftest overrides django_db_setup and hands it the harness's build.
-            "TEST": {"NAME": os.environ.get("MINTY_TEST_PG_DBNAME", "minty_test")},
-        }
-    }
+    _db, _schema = parse_database_url(_PG_URI)
+    # ``?schema=`` on the test URI wins; without one the schema is DATABASE_URL's.
+    if "schema" in _parse_qs(_urlsplit(_PG_URI).query):
+        DB_SCHEMA = _schema
+    _db["OPTIONS"]["options"] = f"-c search_path={DB_SCHEMA},public"  # noqa: F405
+    _db["NAME"] = os.environ.get("MINTY_TEST_PG_DBNAME", "minty_test")
+    # Never let pytest-django create/destroy a database of its own here; the root
+    # conftest overrides django_db_setup and hands it the harness's build.
+    _db["TEST"] = {"NAME": _db["NAME"]}
+    DATABASES = {"default": _db}
 else:
     DATABASES = {
         "default": {
@@ -55,7 +56,8 @@ SHARED_MODELS_MANAGED_FOR_TESTING = not _PG_URI  # tables come from the schema f
 # No test may reach the real Flask app or Stripe. billing/tests/conftest.py blocks the
 # transport; these values exist so an un-stubbed call fails fast against an obviously fake
 # host instead of quietly hitting a developer localhost or a live account.
-FLASK_APP_URL = "http://flask.invalid"
+PETTY_CASH_URL = "http://flask.invalid"
+PETTY_CASH_PUBLIC_URL = PETTY_CASH_URL
 STRIPE_SECRET_KEY = ""  # empty, like Flask's test env: an unstubbed get_stripe() raises
 STRIPE_PUBLISHABLE_KEY = ""
 EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"
