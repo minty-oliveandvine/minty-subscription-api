@@ -413,7 +413,15 @@ def settings_url(entity_id) -> str:
     root = base_url()
     if not root or not entity_id:
         return root
-    return handoff_url(f"/subscription/entities/{entity_id}/modules", entity_id=entity_id)
+    return handoff_url(module_page_path(entity_id), entity_id=entity_id)
+
+
+def module_page_path(entity_id) -> str:
+    """minty-web's Module page of a company: the Module tab among its settings,
+    ``/entities/<id>/company/settings/modules`` (phase 2, 2026-10-05). This service does
+    not know the company's short id and name, so the full id goes with a placeholder name
+    and minty-web puts the real ones in the address bar."""
+    return f"/entities/{entity_id}/company/settings/modules"
 
 
 def handoff_path(next_path: str, *, entity_id=None) -> str:

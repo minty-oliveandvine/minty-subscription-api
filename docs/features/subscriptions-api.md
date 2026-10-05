@@ -17,7 +17,7 @@ page and this one disagree, this one is right.
   invoice itself as a PDF drawn to Figma 09-A. Twenty-three `/api/me/*` paths (twenty-four
   operations): Flask's fifteen, plus `transfer/seen`, the four `billing/accounts` routes and an
   invoice's `breakdown`, `retry` and `pdf`.
-- **A company's module settings page** (`minty-web`, `/subscription/entities/{id}/modules`):
+- **A company's module settings page** (`minty-web`, `/entities/{shortid}/{name}/settings/modules`):
   the two module cards (Petty Cash, Payment Request) with their state, and the ten actions —
   start a trial, authorise billing, restart, cancel, renew, retry a payment, and the previews. One
   page model plus one action endpoint. No action hands the browser to a Stripe-hosted page
@@ -161,8 +161,9 @@ answer went with the hosted routes on 2026-10-01).
 `GET /{entity_id}/subscription-notice` — Flask's `/api/entity/<id>/subscription-notice`
 (`entity/routes/modules.py`), the plural being the one path change; keeps `settings_path`, which
 is now Flask's hand-over to minty-web's module page, a relative path:
-`/handoff/minty-web?next=/subscription/entities/{id}/modules&entity_id={id}` (url-encoded,
-`notify.handoff_path`; Flask's own notice points at the same destination). It was
+`/handoff/minty-web?next=/entities/{id}/company/settings/modules&entity_id={id}` (url-encoded,
+`notify.handoff_path` + `notify.module_page_path` - the full id and a placeholder name, which
+minty-web corrects; `/subscription/entities/{id}/modules` until phase 2, 2026-10-05; Flask's own notice points at the same destination). It was
 `/entity/settings/module/{id}`, Flask's retired settings page.
 
 **Two kinds, no trial notices (the user's decision, 2026-10-01).** `billing/services/notices.py`
@@ -680,7 +681,7 @@ the same context is byte-identical (checked 2026-09-21); the ten inline images (
 `InlineImageMessage` keeps the `multipart/related; type="multipart/alternative"` wire shape
 with `Content-ID` parts; dedup stays in `subscription_email_log`. Links in emails point at
 minty-web through Flask's login-gated re-handoff (`notify.settings_url` →
-`{PETTY_CASH_PUBLIC_URL}/handoff/minty-web?next=/subscription/entities/{id}/modules&entity_id={id}`,
+`{PETTY_CASH_PUBLIC_URL}/handoff/minty-web?next=/entities/{id}/company/settings/modules&entity_id={id}`,
 `notify.portal_url` → `…?next=/subscription/subscriptions[/incoming]`), so no token ever
 travels in a link from here — Flask stays the only minter. Flask's `/handoff/minty-web` exists
 and minty-web is live (2026-09-30), so those links work.

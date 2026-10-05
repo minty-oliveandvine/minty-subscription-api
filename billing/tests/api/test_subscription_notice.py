@@ -147,8 +147,8 @@ def test_notice_api_returns_the_items_and_a_minty_settings_path(client, user, en
     # Flask session. A bare origin would land on the login form instead. The path is
     # Flask's hand-over to minty-web's module page for this company.
     assert body["settings_path"] == (
-        "/handoff/minty-web?next=%2Fsubscription%2Fentities%2F"
-        f"{entity.id}%2Fmodules&entity_id={entity.id}"
+        "/handoff/minty-web?next=%2Fentities%2F"
+        f"{entity.id}%2Fcompany%2Fsettings%2Fmodules&entity_id={entity.id}"
     )
     assert res["Access-Control-Allow-Origin"] == ORIGIN
 

@@ -76,9 +76,7 @@ def subscription_notice(request, entity_id: str):
     # A Minty PATH, not a URL: the frontend's buildMintyEnterUrl() hands its token back for
     # a session. Returning a bare origin here would land on the login form. The path is
     # Flask's hand-over to minty-web, which lands on this company's module page.
-    from billing.services.notify import handoff_path
+    from billing.services.notify import handoff_path, module_page_path
 
-    notice["settings_path"] = handoff_path(
-        f"/subscription/entities/{entity_id}/modules", entity_id=entity_id
-    )
+    notice["settings_path"] = handoff_path(module_page_path(entity_id), entity_id=entity_id)
     return respond(notice)
