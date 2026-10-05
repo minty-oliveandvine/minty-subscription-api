@@ -58,6 +58,12 @@ SHARED_MODELS_MANAGED_FOR_TESTING = not _PG_URI  # tables come from the schema f
 # host instead of quietly hitting a developer localhost or a live account.
 PETTY_CASH_URL = "http://flask.invalid"
 PETTY_CASH_PUBLIC_URL = PETTY_CASH_URL
+# The browser origins too, rebuilt from fixed values: settings.py derived them from the
+# developer's .env (Flask is :5001 on one machine, :8010 on another), so a CORS test passed
+# or failed depending on whose .env ran it.
+MINTY_WEB_URL = "http://localhost:3000"
+PAYMENT_REQUEST_WEB_URL = "http://localhost:3020"
+CORS_ALLOWED_ORIGINS = [MINTY_WEB_URL, PAYMENT_REQUEST_WEB_URL, PETTY_CASH_PUBLIC_URL]
 STRIPE_SECRET_KEY = ""  # empty, like Flask's test env: an unstubbed get_stripe() raises
 STRIPE_PUBLISHABLE_KEY = ""
 EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"

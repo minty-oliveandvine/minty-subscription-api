@@ -89,10 +89,10 @@ def test_preflight_answers_without_a_token(client):
     assert response["Access-Control-Allow-Origin"] == ORIGIN
 
 
-@pytest.mark.parametrize("origin", ["http://localhost:3020", "http://localhost:8010"])
+@pytest.mark.parametrize("origin", ["http://localhost:3020", "http://flask.invalid"])
 def test_the_other_apps_with_the_sidebar_read_it_too(client, user, origin):
-    """minty-payment-request-web (:3020) and Flask's own pages (:8010,
-    ``PETTY_CASH_PUBLIC_URL``) carry the sidebar since 2026-09-30, and its My Profile shows the Subscriptions Overview from this
+    """minty-payment-request-web (:3020) and Flask's own pages (``PETTY_CASH_PUBLIC_URL``,
+    pinned to ``http://flask.invalid`` by the test settings) carry the sidebar since 2026-09-30, and its My Profile shows the Subscriptions Overview from this
     list - read from the browser, so each origin is named."""
     response = client.get(PORTAL, HTTP_ORIGIN=origin, **bearer(user))
     assert response.status_code == 200
