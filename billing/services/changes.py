@@ -71,6 +71,15 @@ def attempt_key(base: str, number: int) -> str:
 IN_FLIGHT = timedelta(minutes=10)
 
 
+def _in_flight(record) -> bool:
+    """Whether ``record``, a reservation the processor has not confirmed, is young enough to
+    be another request's charge still on its way (``IN_FLIGHT``)."""
+    made = record.created_at
+    if made is not None and made.tzinfo is None:
+        made = made.replace(tzinfo=UTC)
+    return made is not None and datetime.now(UTC) - made < IN_FLIGHT
+
+
 def _attempt_number(key: str, base: str) -> int | None:
     """Which attempt ``key`` is at the charge keyed ``base``, or None if it is none of them."""
     if key == base:
@@ -121,10 +130,7 @@ def _next_attempt(customer_id: str, payer_user_id, base: str) -> tuple[str, dict
                 # A draft deleted by hand at the processor: that attempt is over.
                 return attempt_key(base, number + 1), None
         else:
-            made = latest.created_at
-            if made is not None and made.tzinfo is None:
-                made = made.replace(tzinfo=UTC)
-            if made is not None and datetime.now(UTC) - made < IN_FLIGHT:
+            if _in_flight(latest):
                 # Another press is raising THIS attempt right now: its create has not answered
                 # yet, so the processor cannot show it. Discarding it and raising the next
                 # attempt charged the customer twice the moment the first one landed.
@@ -160,6 +166,49 @@ def _next_attempt(customer_id: str, payer_user_id, base: str) -> tuple[str, dict
         )
         return latest.idempotency_key, found
     return attempt_key(base, number + 1), None
+
+
+def _invoiced_under(customer_id: str, key: str) -> dict | None:
+    """The processor's invoice already raised under ``key``, or None if there is none.
+
+    From OUR row first - ``store.invoice_for_key``, one indexed lookup, as renewals do
+    (``renewals._already_invoiced``). This used to LIST every invoice the customer ever had
+    and scan their metadata, on every change. The row is claimed before the charge under a
+    UNIQUE index (``billing_gateway.issue_invoice``), so no row means nothing was raised, and
+    a change never raised before costs no processor call at all.
+
+    * A row the processor confirmed is read back by its id (``recheck``): its status NOW,
+      which the caller decides on.
+    * A row it never confirmed is the one case the row cannot answer, so the processor is
+      asked by metadata - but not while it may be ANOTHER press's charge still on its way
+      (``IN_FLIGHT``): that is refused as claimed, never discarded. Found, it is recorded;
+      never there, the reservation is discarded, or it would hold this change for good.
+
+    Raises ``billing_gateway.BillingError`` when the processor cannot be read - nothing may
+    be charged on a guess about whether it already was.
+    """
+    from billing.services import billing_gateway
+
+    record = store.invoice_for_key(key)
+    if record is None:
+        return None
+    if record.external_id:
+        return billing_gateway.recheck(record)
+    if _in_flight(record):
+        raise billing_gateway.BillingError(
+            f"change {key} is still in flight", retryable=True, claimed=True
+        )
+    try:
+        found = billing_gateway.find_invoice_by_metadata(customer_id, "change_key", key)
+    except Exception as exc:
+        raise billing_gateway.BillingError(
+            f"could not look for change {key}", retryable=billing_gateway.retryable(exc)
+        ) from exc
+    if found is None:
+        store.discard_invoice(record.id)               # it never reached the processor
+        return None
+    billing_gateway.record_found_invoice(record, found)
+    return found
 
 
 def build_change(entity_id, entity_name: str, before_codes, after_codes,
@@ -280,7 +329,7 @@ def issue_change(customer_id: str, entity_id, entity_name: str, before_codes,
         key, paid = _next_attempt(customer_id, attempts_of, key)
         if paid is not None:
             return paid
-    existing = billing_gateway.find_invoice_by_metadata(customer_id, "change_key", key)
+    existing = _invoiced_under(customer_id, key)
     # A VOIDED invoice is not evidence of a charge — it is evidence of one withdrawn.
     # A failed conversion voids its invoice (see ``_bill_module_change_in_house``), and
     # treating that as "already invoiced" would make the next genuine attempt at the same
@@ -299,10 +348,8 @@ def issue_change(customer_id: str, entity_id, entity_name: str, before_codes,
             key,
             existing.get("id"),
         )
-        # The attempt that raised it died before recording it, so its reservation still
-        # says whatever it said then: bring it up to date, or the list shows that invoice
-        # with no paid date or link for good.
-        billing_gateway.record_found_invoice(store.invoice_for_key(key), existing)
+        # (Its row is already brought up to date - ``_invoiced_under`` records what it
+        # finds, or the list would show that invoice with no paid date or link for good.)
         if existing.get("status") == "draft":
             # Never finalized, so never charged. Every caller refuses anything unpaid and
             # withdraws it, but that it happened at all has to be said.

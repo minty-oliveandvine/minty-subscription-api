@@ -93,9 +93,8 @@ def find_invoice_by_metadata(customer_id: str, key: str, value: str, *,
     It survives for the one case a local row cannot answer: a reservation whose
     ``external_id`` is still NULL, meaning we claimed the key and then never heard back.
     Only the processor knows whether that invoice exists, and metadata is how to ask —
-    Stripe expires idempotency keys after 24 hours, metadata never.
-
-    Still the guard for ``changes.issue_change``, which has not been moved over.
+    Stripe expires idempotency keys after 24 hours, metadata never. (``changes.issue_change``
+    moved over 2026-10-05: ``changes._invoiced_under``.)
     """
     # ``auto_paging_iter``, not the first page: ``limit`` is a PAGE SIZE, so a bare
     # list() stops at 100 and quietly reports "no such invoice" for a long-lived payer —

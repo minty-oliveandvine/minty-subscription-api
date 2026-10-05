@@ -625,6 +625,17 @@ never reached Stripe. A new attempt never reuses a key (Stripe replays a keyed e
 hours). A press racing another answers 409, the processor failing 503, and only a real decline
 402 (§2). Jammed rows heal themselves: their key is void, so the next press is `~2`.
 
+**A change asks our row first, not Stripe (2026-10-05).** `issue_change` used to LIST every
+invoice the customer ever had at Stripe and scan their metadata for the change's key, on every
+change - the last path still doing it after renewals moved to the table. Now
+`changes._invoiced_under(customer_id, key)` reads `store.invoice_for_key` (one indexed lookup,
+like `renewals._already_invoiced`): no row → nothing was raised, no Stripe call; a confirmed row →
+`billing_gateway.recheck` by its id; a row Stripe never confirmed → `IN_FLIGHT` refused as claimed,
+otherwise looked up by metadata and recorded, or discarded if it never got there (it used to stay
+claimed and refuse the change for good). The double-charge guard is unchanged - the reservation's
+UNIQUE key in `issue_invoice`. Tests: `test_change_billing.py` (no call for a new change, read by
+id, discard and charge, in flight refused).
+
 **A handover onto a card that has never collected.** `_bill_transfer_in_house` set the card's
 `paid_through` only on the PAYER's first charge — so a retried first charge (the anchor is
 written before the charge), an already-paying payer's new card, a zero-total or an adopted charge

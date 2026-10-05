@@ -158,7 +158,9 @@ def _wire_found(monkeypatch, found):
     from billing.services import billing_gateway, store
 
     calls = {"issued": [], "recorded": [], "keys": []}
-    reserved = object()     # the row that attempt reserved under the change's key
+    # The row that attempt reserved under the change's key: never confirmed (no processor
+    # id), and long past IN_FLIGHT, so the processor is asked by metadata.
+    reserved = _Reservation(external_id=None, created_at=datetime(2026, 1, 1, tzinfo=UTC))
     monkeypatch.setattr(billing_gateway, "find_invoice_by_metadata",
                         lambda cid, k, v: found)
     monkeypatch.setattr(billing_gateway, "issue_invoice",
@@ -212,6 +214,99 @@ def test_a_draft_an_earlier_attempt_left_is_reported_as_stranded(monkeypatch, ca
                 if r.levelname == "ERROR" and "STRANDED DRAFT in_draft" in r.getMessage()]
     assert len(stranded) == 1
     assert "withdrawn" in stranded[0].getMessage()
+
+
+# --- "was this change already raised?" reads OUR row first ----------------------
+#
+# It used to LIST every invoice the customer ever had at the processor, on every change.
+# The reservation row (claimed before the charge, UNIQUE) answers it in one lookup; the
+# processor is asked only about a row it never confirmed.
+
+
+class _Reservation:
+    def __init__(self, external_id, created_at, id="row1"):
+        self.id = id
+        self.external_id = external_id
+        self.created_at = created_at
+
+
+_PERIOD = Period(datetime(2026, 11, 8, 13, tzinfo=UTC), datetime(2026, 12, 8, 13, tzinfo=UTC))
+_AT = datetime(2026, 11, 10, 13, tzinfo=UTC)
+
+
+def _wire_lookup(monkeypatch, record):
+    """``record`` is the row under the change's key (None: never claimed). Asking the
+    processor by metadata fails the test unless a test allows it."""
+    from billing.services import billing_gateway, store
+
+    calls = {"issued": [], "discarded": [], "searched": [], "rechecked": []}
+    monkeypatch.setattr(store, "invoice_for_key", lambda key: record)
+    monkeypatch.setattr(store, "discard_invoice", lambda rid: calls["discarded"].append(rid))
+    monkeypatch.setattr(
+        billing_gateway, "find_invoice_by_metadata",
+        lambda cid, k, v: calls["searched"].append(v) or None,
+    )
+    monkeypatch.setattr(billing_gateway, "issue_invoice",
+                        lambda *a, **k: calls["issued"].append(a) or {"id": "in_new"})
+    return calls
+
+
+def test_a_change_never_raised_costs_no_processor_call(monkeypatch):
+    changes = _wire(monkeypatch)
+    calls = _wire_lookup(monkeypatch, None)
+
+    result = changes.issue_change("cus_1", "e2", "Beta Co", [], ["PETTY_CASH"], _PERIOD, _AT)
+
+    assert result == {"id": "in_new"}
+    assert calls["searched"] == []        # no LIST of the customer's invoices
+    assert len(calls["issued"]) == 1
+
+
+def test_a_confirmed_row_is_read_back_by_its_id_not_searched_for(monkeypatch):
+    from billing.services import billing_gateway
+
+    changes = _wire(monkeypatch)
+    record = _Reservation(external_id="in_old", created_at=_AT)
+    calls = _wire_lookup(monkeypatch, record)
+    monkeypatch.setattr(
+        billing_gateway, "recheck",
+        lambda rec: calls["rechecked"].append(rec) or {"id": "in_old", "status": "paid"},
+    )
+
+    result = changes.issue_change("cus_1", "e2", "Beta Co", [], ["PETTY_CASH"], _PERIOD, _AT)
+
+    assert result["id"] == "in_old"
+    assert calls["rechecked"] == [record]
+    assert calls["searched"] == [] and calls["issued"] == []
+
+
+def test_a_reservation_the_processor_never_got_is_discarded_and_the_change_charged(monkeypatch):
+    """Left in place, the claimed key would refuse this change for good."""
+    changes = _wire(monkeypatch)
+    record = _Reservation(external_id=None, created_at=datetime(2026, 1, 1, tzinfo=UTC))
+    calls = _wire_lookup(monkeypatch, record)
+
+    changes.issue_change("cus_1", "e2", "Beta Co", [], ["PETTY_CASH"], _PERIOD, _AT)
+
+    assert calls["searched"] == [changes.change_key("e2", _AT, ["PETTY_CASH"])]
+    assert calls["discarded"] == ["row1"]
+    assert len(calls["issued"]) == 1
+
+
+def test_a_reservation_still_in_flight_is_refused_as_claimed_never_discarded(monkeypatch):
+    """Another press's charge whose create has not answered yet: discarding its row and
+    charging again would bill the customer twice the moment the first one lands."""
+    from billing.services import billing_gateway
+
+    changes = _wire(monkeypatch)
+    record = _Reservation(external_id=None, created_at=datetime.now(UTC))
+    calls = _wire_lookup(monkeypatch, record)
+
+    with pytest.raises(billing_gateway.BillingError) as raised:
+        changes.issue_change("cus_1", "e2", "Beta Co", [], ["PETTY_CASH"], _PERIOD, _AT)
+
+    assert raised.value.claimed and raised.value.retryable
+    assert calls["searched"] == [] and calls["discarded"] == [] and calls["issued"] == []
 
 
 # --- where "before" comes from --------------------------------------------------
