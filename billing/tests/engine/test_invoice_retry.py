@@ -147,6 +147,24 @@ def test_a_replay_scoped_renewal_is_this_periods_and_offered(app, monkeypatch):
     assert _retryable(payer) == {"in_scoped": True}
 
 
+def test_the_period_key_resolves_to_a_replays_scoped_claim(app, monkeypatch):
+    """Dunning's "this period's invoice" (``_current_period_key``) names the row the renewal
+    run reads (``renewals.claimed_period_key``): the replay's scoped one. A voided duplicate
+    whose key was retired beside it (``store.retired_key``) is not the period's claim."""
+    from billing.services import dunning, renewals, store
+
+    payer, account = _payer(monkeypatch)
+    mapping = store.customer_mapping_for_user(payer.id)
+    scoped = f"{_key(payer, account)}-{renewals.replay_scope(mapping.stripe_customer_id)}"
+    _invoice(payer, account, external="in_scoped", key=scoped, age_days=2)
+    _invoice(payer, account, external="in_dup", status="void",
+             key=store.retired_key(_key(payer, account), "in_dup"))
+
+    group = store.billing_group(account.id)
+    assert dunning._current_period_key(mapping, group) == scoped
+    assert store.invoice_for_key(scoped).external_id == "in_scoped"
+
+
 def test_a_card_whose_access_ran_out_offers_nothing_even_without_a_dunning_stamp(
     app, monkeypatch
 ):

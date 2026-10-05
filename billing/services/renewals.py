@@ -424,6 +424,32 @@ def period_key(user_id, period: Period, group_id=None) -> str:
     return f"{stem}-{group_id}" if group_id else stem
 
 
+def replay_scope(customer_id) -> str:
+    """The suffix a REPLAY (``replay_scenarios``) joins to every key it issues: the customer's
+    last 12 characters. A spent test clock mints a fresh customer, so it names the run attempt
+    and keeps same-day replays off each other's Stripe idempotency keys."""
+    return str(customer_id)[-12:]
+
+
+def claimed_period_key(key, customer_id) -> str:
+    """``key``, or the replay-scoped ``<key>-<replay_scope>`` when only THAT one is claimed.
+
+    Exact in production, where ``period_key`` is never rewritten: the first lookup answers.
+    A replay's lived data stays on the dev database and is then read by an engine whose keys
+    are plain, so the period's invoice sits under the scoped key. Asked by the plain key alone,
+    the renewal run found nothing and raised the period a SECOND time (three payers, 28-29 Sep
+    2026). Every reader of "this period's invoice" resolves through here so they all name the
+    same document; ``dunning._names_period`` is the same tolerance for Stripe's metadata.
+
+    Two exact indexed lookups, never a prefix scan. A RETIRED key (``store.retired_key``,
+    ``<key>~<id>``) is not matched: it has handed its period over.
+    """
+    if not key or store.invoice_for_key(key) is not None or not customer_id:
+        return key
+    scoped = f"{key}-{replay_scope(customer_id)}"
+    return scoped if store.invoice_for_key(scoped) is not None else key
+
+
 #: ``_already_invoiced``'s "the row has not been read yet" - None is a real answer (no row).
 _UNREAD = object()
 
@@ -716,7 +742,9 @@ def _renew_one_group(account, group, paid_through, now, issue) -> dict[str, list
         out["planned"].append(entry)
         return out
 
-    key = period_key(user_id, period, group.id)
+    key = claimed_period_key(
+        period_key(user_id, period, group.id), account.stripe_customer_id
+    )
     # Captured BEFORE issuing, so the rows closed out afterwards are exactly the ones
     # whose lines rode this invoice. Re-querying after would also catch anything
     # cancelled while the charge was in flight and mark it paid for free.

@@ -434,7 +434,8 @@ def test_nothing_open_while_the_periods_invoice_is_a_stranded_draft_is_not_recov
 
     result = dunning.collect_due(day(1))
 
-    assert asked["keys"] == ["renewal-u1-20270308-g1"]     # the period it is behind on
+    # The period it is behind on - resolved (``claimed_period_key``), then read.
+    assert set(asked["keys"]) == {"renewal-u1-20270308-g1"}
     assert calls["ended"] == []
     assert result["recovered"] == []
     assert calls["attempts"] == 0

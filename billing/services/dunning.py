@@ -353,6 +353,9 @@ def _current_period_key(account, group) -> str | None:
     also the answer to "which invoice recovers it" — there is no period to recover.
     Callers fall back to the oldest open invoice in that case; a card with no billing
     history has no stale renewal for the fallback to pick up by mistake.
+
+    A replay's scoped claim is resolved (``renewals.claimed_period_key``), so the lookups by
+    this key find the same invoice the renewal run does.
     """
     from billing.services import renewals
 
@@ -360,8 +363,11 @@ def _current_period_key(account, group) -> str | None:
     paid_through = group.paid_through
     if anchor is None or paid_through is None:
         return None
-    return renewals.period_key(
-        account.user_id, renewals.next_period(anchor, paid_through), group.id
+    return renewals.claimed_period_key(
+        renewals.period_key(
+            account.user_id, renewals.next_period(anchor, paid_through), group.id
+        ),
+        account.stripe_customer_id,
     )
 
 

@@ -1156,7 +1156,8 @@ def _patch_renewal_keys(run: dict) -> None:
     if not customer_id:
         return
     original = renewals.period_key
-    suffix = customer_id[-12:]
+    # The engine resolves this same suffix (``renewals.claimed_period_key``) - one shape.
+    suffix = renewals.replay_scope(customer_id)
 
     # ``group_id`` is part of the real key — a payer with two cards raises two invoices
     # for one period — so the wrapper has to carry it through. Taking only (user, period)
@@ -1187,13 +1188,13 @@ def _patch_change_keys(run: dict) -> None:
     Scoped to the CUSTOMER, exactly as the renewal keys are, so keys stay stable WITHIN a
     run — the crash-recovery path is still exercised — and cannot collide ACROSS one.
     """
-    from billing.services import changes, store
+    from billing.services import changes, renewals, store
 
     customer_id = store.customer_id_for_user(run["user_id"]) or ""
     if not customer_id:
         return
     original = changes.change_key
-    suffix = customer_id[-12:]
+    suffix = renewals.replay_scope(customer_id)
 
     def _scoped(entity_id, at, after_codes, **kwargs) -> str:
         return f"{original(entity_id, at, after_codes, **kwargs)}-{suffix}"

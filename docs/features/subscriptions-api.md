@@ -248,7 +248,7 @@ of `Minty/docs/schema/01_schema_rebased.sql`):
 | `entity_billing_consent` | a member's consent to be billed for a company |
 | `entity_module_subscription` | THE subscription: company × module, phase, payer, `app_access_until`, trial/billing dates |
 | `user_stripe_customer` | a person's Stripe customer, billing anchor, currency |
-| `subscription_invoice` / `_line` | invoices raised on an account and each company's share; `idempotency_key` is the double-charge guard. A RE-ISSUED invoice (§6) adds two key forms: the replacement claims `refresh-<dead id>` until it takes the period's key, and the dead row keeps `<key>~<dead id>` (`~`, not `-`: `dunning._names_period` reads `<key>-…` as the same period) |
+| `subscription_invoice` / `_line` | invoices raised on an account and each company's share; `idempotency_key` is the double-charge guard. A RE-ISSUED invoice (§6) adds two key forms: the replacement claims `refresh-<dead id>` until it takes the period's key, and the dead row keeps `<key>~<dead id>` (`~`, not `-`: `dunning._names_period` reads `<key>-…` as the same period). A REPLAY (`replay_scenarios`) claims renewals as `<key>-<customer[-12:]>` (`renewals.replay_scope`) and leaves them on the dev DB; the renewal run and dunning resolve the period's key through `renewals.claimed_period_key` (plain first, then the scoped form - two exact lookups), so a replayed period is never raised a second time |
 | `subscription_transfer` | change-of-subscriber offers and their outcome |
 | `subscription_audit_log` | every state change, before/after, actor |
 | `subscription_email_log` | the dedup ledger of the notification emails |
@@ -272,7 +272,8 @@ Read-only mirrors: `user`, `user_entity`, `entities`, `entity_function`, `countr
 decision until Part 3's Terraform. FULL pass at `SUBSCRIPTION_SCHEDULER_FULL_HOUR` (05:00
 `Asia/Hong_Kong`): close trials, raise renewals, retry dunning, notify trial-ending, sweep access
 for everyone. LIGHT pass every hour except the full one: close trials and raise renewals, sweep
-the payers touched. Gated by `SUBSCRIPTION_SCHEDULER_ENABLED` alone; started from
+the payers touched. Gated by `SUBSCRIPTION_SCHEDULER_ENABLED` alone (in dev: ON here and OFF in
+Minty's `.env` since 2026-10-05 - Flask's engine lacks this one's fixes); started from
 `billing.apps.ready()` in the web process only (never from a management command, the test
 runner or the autoreloader parent). Two gunicorn workers → two timers → the pass's advisory lock
 (`daily.daily_lock`) lets one run: `pg_try_advisory_lock` on a **dedicated raw connection**

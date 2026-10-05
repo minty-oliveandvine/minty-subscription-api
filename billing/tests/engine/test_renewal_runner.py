@@ -391,9 +391,68 @@ def test_the_guard_is_a_local_lookup_not_a_scan_of_the_processor(monkeypatch):
 
     renewals.run_renewals(NOW, scope=["u1"], issue=True)
 
-    assert calls["keys"] == ["renewal-u1-20270208-g_u1"]  # asked the index
+    # Asked the index: the plain key, a replay's scoped form of it (``claimed_period_key``),
+    # then the plain key again to charge under.
+    assert calls["keys"] == ["renewal-u1-20270208-g_u1", "renewal-u1-20270208-g_u1-cus_u1",
+                             "renewal-u1-20270208-g_u1"]
     assert calls["lookups"] == []                      # never asked Stripe
     assert calls["issued"]
+
+
+# --- a replay's scoped claim (the dev database's lived data) --------------------
+
+
+PLAIN = "renewal-u1-20270208-g_u1"
+SCOPED = f"{PLAIN}-cus_u1"          # ``replay_scope("cus_u1")`` - shorter than 12, so whole
+
+
+def _only_under(monkeypatch, calls, rows: dict):
+    """Answer ``invoice_for_key`` from ``rows`` alone - the wiring answers every key."""
+    from billing.services import store
+
+    monkeypatch.setattr(
+        store, "invoice_for_key", lambda key: calls["keys"].append(key) or rows.get(key)
+    )
+
+
+def test_a_period_claimed_only_under_a_replays_scoped_key_is_not_raised_again(monkeypatch):
+    """A replay claims the period as ``<key>-<customer[-12:]>`` and leaves it on the dev
+    database. Asked by the plain key alone the runner found nothing and raised the period a
+    SECOND time - three payers, 28-29 Sep 2026. The scoped row IS this period's invoice."""
+    renewals, calls = _wire(monkeypatch, at_processor=DECLINED, dunning_since=NOW)
+    _only_under(monkeypatch, calls, {SCOPED: _Record(status="open")})
+
+    result = renewals.run_renewals(NOW, scope=["u1"], issue=True)
+
+    assert calls["issued"] == []
+    assert result["skipped"][0]["reason"] == "already invoiced; unpaid"
+
+
+def test_the_plain_key_wins_when_both_are_claimed(monkeypatch):
+    from billing.services import renewals
+
+    _r, calls = _wire(monkeypatch)
+    _only_under(monkeypatch, calls, {PLAIN: _Record(), SCOPED: _Record()})
+
+    assert renewals.claimed_period_key(PLAIN, "cus_u1") == PLAIN
+
+
+def test_a_retired_key_is_not_this_periods_claim(monkeypatch):
+    """``store.retired_key`` (``<key>~<id>``) has handed its period over - to a refresh, or
+    out of the way of a voided duplicate. Only the replay's ``-`` form is resolved."""
+    from billing.services import renewals, store
+
+    _r, calls = _wire(monkeypatch)
+    _only_under(monkeypatch, calls, {store.retired_key(PLAIN, "in_dup"): _Record(status="void")})
+
+    assert renewals.claimed_period_key(PLAIN, "cus_u1") == PLAIN
+    assert renewals.claimed_period_key(PLAIN, None) == PLAIN
+
+
+def test_the_scope_is_the_customers_last_twelve_characters():
+    from billing.services import renewals
+
+    assert renewals.replay_scope("cus_ABCDEFGHIJKLmnopqrstuv") == "KLmnopqrstuv"
 
 
 def test_a_reservation_that_was_never_confirmed_sent_asks_the_processor(monkeypatch):
@@ -598,7 +657,9 @@ def test_an_error_before_finalizing_names_the_draft_it_left(monkeypatch, caplog)
 
     renewals, calls = _wire(monkeypatch)
     left = _Record(external_id="in_left", status="draft")
-    rows = iter([None, left])          # nothing before the issue; the draft after it
+    # Nothing before the issue (the plain key, a replay's scoped form, the charge's own read);
+    # the draft after it.
+    rows = iter([None, None, None, left])
     monkeypatch.setattr(store, "invoice_for_key", lambda key: next(rows))
 
     def _stopped(customer_id, invoice, **kw):
