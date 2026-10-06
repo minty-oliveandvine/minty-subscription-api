@@ -10,6 +10,11 @@ from shared_models.models import User, UserEntity
 
 logger = logging.getLogger("billing-api")
 
+#: Seconds of clock disagreement tolerated on ``iat`` / ``exp`` between the minting host
+#: (Flask) and this one - the same allowance minty-onboarding-api makes, so a token it
+#: accepts and forwards here is not refused for a few seconds of skew.
+CLOCK_SKEW_LEEWAY_SECONDS = 60
+
 
 def get_entity_role(user_id: str, entity_id: str) -> str | None:
     """Return the user's role for the entity, or None if no access.
@@ -95,7 +100,9 @@ class BearerAuth(HttpBearer):
                 key_hash,
                 len(token),
             )
-            payload = jwt.decode(token, key, algorithms=["HS256"])
+            payload = jwt.decode(
+                token, key, algorithms=["HS256"], leeway=CLOCK_SKEW_LEEWAY_SECONDS
+            )
             user = User.objects.get(id=payload["user_id"])
             user_id = payload["user_id"]
             token_entity_id = (payload.get("entity_id") or "").strip()

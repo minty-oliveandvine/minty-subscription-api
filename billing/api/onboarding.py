@@ -292,7 +292,7 @@ def trials_start(request):
         return error(exc.message, exc.status)
     except Exception:
         logger.exception("trials/start: failed to start trials for entity {}", entity.id)
-        return error("The trial could not be started. Please try again.", 502)
+        return error("This trial could not be started. Mind trying again?", 502)
 
     ends = [
         row.trial_end

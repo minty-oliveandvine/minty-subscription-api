@@ -18,7 +18,8 @@ Stripe-hosted page or duplicated the card routes were deleted), `notice` (with F
 claimless-token fallback) and `onboarding` (the wizard routes - seven of Flask's nine since the
 setup Checkout pair went the same day - and the new `trials/start`, which fails loudly). `docs/openapi.json` is the committed contract, held current by `test_contract.py`
 (`manage.py export_openapi` regenerates it). Next: step 4 finishes minty-web's screens against
-the live API, step 5 cuts Flask's copies. The mirrors of all 21 tables are declared; the auth
+the live API, step 5 cuts Flask's copies (Flask's engine, payer portal, CLI, scheduler and
+notice route deleted 2026-10-06). The mirrors of all 21 tables are declared; the auth
 rules and the guard tests are in place. Subscriptions are always on: the dark switch
 (`SUBSCRIPTION_ENABLED`) was removed 2026-10-01, once the service ran on a test site. Skeleton verified 2026-09-21 on this
 workstation (Python 3.13.15
@@ -42,7 +43,7 @@ real dev-DB user).
    Minty's `docs/schema/generators/audit_models.py`.
 3. **The single Stripe writer.** Only this service holds `STRIPE_SECRET_KEY` /
    `STRIPE_PUBLISHABLE_KEY`; `billing/services/stripe_client.py` is the one module that
-   imports `stripe`, `billing_gateway.py` the one that charges. Flask's copy goes in step 5.
+   imports `stripe`, `billing_gateway.py` the one that charges. Flask's copy was deleted 2026-10-06.
 
 ## Always on
 
@@ -60,8 +61,8 @@ deliberate command, dry unless `--apply`.
 |---|---|---|---|
 | `me` | `/api/me` | `SelfBearerAuth` (person; token may be unscoped) | the payer portal — subscriptions, subscriber options, invite-admin (forwarded to Flask), transfers, invoices, cards |
 | `modules` | `/api/entities/{id}/modules[/{action}]` | `EntityBearerAuth` (a company is required) + `MODULE_VIEW` / `MODULE_MANAGE` + payer rule | the module settings page model and its 19 actions |
-| `notice` | `/api/entities/{id}/subscription-notice` | `NoticeBearerAuth` (`EntityBearerAuth` plus Flask's fallback for a token that names no company) | the notice the payment module's landing page shows: `past_due` and a paid `pending_cancel` only (no trial notices since 2026-10-01); `settings_path` is Flask's `/handoff/minty-web` hand-over to the module page |
-| `onboarding` | `/api/onboarding/*` | `BearerAuth` (the wizard names its company in the body) | the wizard's 9 card/billing routes + `POST /trials/start` (finalize; must not fail silently — a failure fails finalize, the wizard offers Try again, both halves idempotent) |
+| `notice` | `/api/entities/{id}/subscription-notice` | `NoticeBearerAuth` (`EntityBearerAuth` plus Flask's fallback for a token that names no company) | the notice the payment module's landing page (minty-payment-request-web, directly) and Petty Cash's dashboard (Flask, server-side, 2026-10-06) show: `past_due` and a paid `pending_cancel` only (no trial notices since 2026-10-01); `settings_path` is Flask's `/handoff/minty-web` hand-over to the module page |
+| `onboarding` | `/api/onboarding/*` | `BearerAuth` (the wizard names its company in the body) | the wizard's 8 card/billing routes + `POST /trials/start` (called by minty-onboarding-api's `POST /finalize` on every finalize since 2026-10-06, the wizard's bearer forwarded; must not fail silently — a failure fails finalize, the wizard offers Try again, both halves idempotent) |
 
 Paths and JSON are Flask's byte for byte (`billing/tests/test_contract.py` lists them);
 bodies say `{"error": …}` with Flask's status codes (`core/exceptions.py`).
@@ -135,8 +136,8 @@ config/          settings (the scheduler switch, CORS, DB, Stripe keys, mail, lo
 core/            auth (BearerAuth, SelfBearerAuth, EntityBearerAuth) · exceptions ({"error"} shape) · middleware (service scope, request log) · policy (roles/permissions) · flask_client (the ONLY caller of Flask) · log_formatters
 shared_models/   the 21 mirrors, managed = False · enums (the Postgres enums) · fields (PgEnumField, CharNField)
 billing/         api/ (me, modules, notice, onboarding - the four routers, live; _json.py = Flask's jsonify) · services/ (THE ENGINE: the 24 modules of Minty's blueprints/subscription/services ported 1:1, plus entity_modules.py, _context.py, _log.py, and this service's own invoice_document.py + invoice_pdf.py - the invoice PDF, Figma 09-A) · static/email/ (the 9 inline images) · static/invoice/ (the PDF's Inter and Noto Sans HK fonts with their OFL licences, and 09-A's logo vector) · scheduler.py · management/commands/{subscriptions,plans,replay_scenarios,export_openapi}.py · tests/ (+ tests/engine/, the ported suite; tests/api/, the route tests)
-scripts/         replay_diff.py (Flask report vs Django report, normalised)
-templates/email/ subscription_notice.html - Minty's, verbatim (Jinja2 backend; a render from either side is byte-identical)
+scripts/         replay_diff.py (Flask report vs Django report, normalised; the Flask script was deleted 2026-10-06)
+templates/email/ subscription_notice.html - Minty's, verbatim (Jinja2 backend; a render from either side was byte-identical; Minty's copy deleted 2026-10-06)
 e2e/             HTTP smoke tests against a live service
 docker/          entrypoint (waits for DB + schema; no migrate)
 docs/features/   README · authentication.md · subscriptions-api.md (the route-by-route map and what each step fills)
@@ -153,14 +154,15 @@ clean; `manage.py runserver 8000` → `/healthz` 200 and `/api/me/subscriptions`
 token; `python Minty/docs/schema/generators/audit_models.py` reports 0
 for all four repos. Against the dev database:
 `manage.py subscriptions revoke-ungranted` (dry) and `run-renewals` (dry) answer the same as
-`flask subscriptions revoke-ungranted` / `run-renewals` on the same database.
+`flask subscriptions revoke-ungranted` / `run-renewals` on the same database (historical: that
+CLI was deleted from Minty 2026-10-06).
 
 ## The engine (Part 2 step 2)
 
 `billing/services/` is `Minty/blueprints/subscription/services/` on the Django ORM, module for
 module and function for function - same names, same signatures, same `(payload, status)`
 return shapes - so step 3 fills each router by porting its Flask view one for one and step 5
-deletes the Flask copies. The translation is mechanical and the exceptions are few:
+deletes the Flask copies (done 2026-10-06). The translation is mechanical and the exceptions are few:
 `Model.query` → `Model.objects`, `db.session.get` → `store._by_pk`, per-helper commits →
 autocommit with `transaction.atomic()` in exactly three kinds of place (`docs/features/
 subscriptions-api.md` §6 - never around a Stripe call), `flask.g` → `billing.services._context`
@@ -178,7 +180,9 @@ same-day invoices. On 2026-09-21 the eight Angelika runs were run on both sides 
 database (the Django runs cloned to fresh payers with `--as angelika.tardaguela+django-<key>@…
 --tag <a tag of the same length>`, since Stripe remembers an idempotency key for 24 h) and every report diffed
 IDENTICAL, and again after the `_needs_stripe_clock` fix in both scripts. The logs are not kept
-(by decision) - `docs/features/subscriptions-api.md` §8 says how to regenerate a run. Mail from a
+(by decision) - `docs/features/subscriptions-api.md` §8 says how to regenerate a run. Minty's
+`replay_scenarios.py` was deleted 2026-10-06, so the Flask side of that diff can no longer be
+rerun. Mail from a
 replay is skipped (console backend) unless `--notify-to` names a recipient.
 
 ## Cross-cutting rules (from the plan; every repo carries them)

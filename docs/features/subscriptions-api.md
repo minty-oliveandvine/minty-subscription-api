@@ -6,7 +6,9 @@ stands, route by route, and - since step 2 landed (2026-09-21) - the spec of its
 as a 1:1 port of the Flask original (Minty's `docs/features/modules-and-subscriptions.md`).
 Since 2026-09-30 the two differ: that day's billing fixes (§6) are in this service only,
 because Flask's subscription engine is to be deleted (the user's decision), so where the Flask
-page and this one disagree, this one is right.
+page and this one disagree, this one is right. Flask's engine was deleted 2026-10-06 (services,
+payer portal, CLI, scheduler, replay scripts, its notice route): "both engines" and "parity"
+below record what was true on the date given, and this service is now the only engine.
 
 ## 1. What a person gets
 
@@ -27,8 +29,9 @@ page and this one disagree, this one is right.
   Flask's dashboard server-side.
 - **The wizard's money steps** (onboarding step 8/9): adding a card INTO a billing account,
   authorising billing, and — on All Set — starting the trial. Seven of Flask's nine routes proxied
-  here by minty-onboarding-api (its two setup-mode Checkout routes were deleted 2026-10-01) plus
-  `POST /api/onboarding/trials/start`.
+  here by minty-onboarding-api (its two setup-mode Checkout routes were deleted 2026-10-01; it
+  proxied them to Flask until 2026-10-06) plus `POST /api/onboarding/trials/start`, which
+  minty-onboarding-api's own `POST /finalize` calls.
 
 **THE CARD RULE (the user's, 2026-10-01).** A payment method is only ever added through a
 BILLING ACCOUNT (`payer_billing_group`, cards on `billing_account_payment_method`), via the
@@ -163,7 +166,7 @@ answer went with the hosted routes on 2026-10-01).
 is now Flask's hand-over to minty-web's module page, a relative path:
 `/handoff/minty-web?next=/entities/{id}/company/settings/modules&entity_id={id}` (url-encoded,
 `notify.handoff_path` + `notify.module_page_path` - the full id and a placeholder name, which
-minty-web corrects; `/subscription/entities/{id}/modules` until phase 2, 2026-10-05; Flask's own notice points at the same destination). It was
+minty-web corrects; `/subscription/entities/{id}/modules` until phase 2, 2026-10-05). Flask's route was deleted 2026-10-06: Petty Cash's dashboard now reads this one server-side (Minty `services/subscription_api.py`, a five-minute token naming the viewer and the company), and minty-payment-request-web's landing calls it directly (`SUBSCRIPTION_API_URL`). It was
 `/entity/settings/module/{id}`, Flask's retired settings page.
 
 **Two kinds, no trial notices (the user's decision, 2026-10-01).** `billing/services/notices.py`
@@ -198,8 +201,13 @@ page down. Stateless: the "show once per session" claim stays Flask's.
 | POST | `/billing/authorize` | `onboarding_billing_authorize` |
 | POST | `/trials/start` | **new** — `{entity_id} → {trial_end}`; what finalize calls |
 
+Since 2026-10-06 minty-onboarding-api proxies the seven routes above here (not to Flask, whose
+copies are deleted), forwarding the wizard's onboarding token (`core/subscription_client.py`
+there).
+
 **`trials/start` must not fail silently** (decision 2026-09-21): minty-onboarding-api's native
-`finalize` flips the company live and then calls this; a failure here fails finalize, the All
+`finalize` (built 2026-10-06; Flask's is deleted) flips the company to `connected` /
+`disconnected` and then calls this on every finalize, retries included; a failure here fails finalize with this route's status and `error`, the All
 Set screen offers *Try again*, and both halves are idempotent — a company already live stays
 live, a trial already started is returned, never duplicated.
 
@@ -211,8 +219,8 @@ rule and sentences); the four billing-sheet card routes act on the payer and che
 `establish_payer=True` (during the wizard no company has a payer yet). `trials/start` runs
 `checkout.start_trials_for_enabled_modules` (idempotent: modules already holding a trial or a
 subscription are skipped) and reads `trial_end` BACK from the rows (the earliest); a
-`CheckoutError` answers with its status, anything else 502 "The trial could not be started.
-Please try again." — never swallowed, as Flask's finalize did. Flask's
+`CheckoutError` answers with its status, anything else 502 "This trial could not be started.
+Mind trying again?" — never swallowed, as Flask's finalize did. Flask's
 `/api/onboarding/plans` is NOT here: minty-onboarding-api serves the catalogue natively
 (`onboarding/api_reference.py`). Neither are Flask's `POST /payment-method/setup` and
 `/payment-method/complete` (a Stripe-hosted setup-mode Checkout returning to the wizard with
@@ -274,14 +282,15 @@ decision until Part 3's Terraform. FULL pass at `SUBSCRIPTION_SCHEDULER_FULL_HOU
 `Asia/Hong_Kong`): close trials, raise renewals, retry dunning, notify trial-ending, sweep access
 for everyone. LIGHT pass every hour except the full one: close trials and raise renewals, sweep
 the payers touched. Gated by `SUBSCRIPTION_SCHEDULER_ENABLED` alone (in dev: ON here and OFF in
-Minty's `.env` since 2026-10-05 - Flask's engine lacks this one's fixes); started from
+Minty's `.env` since 2026-10-05 - Flask's engine lacks this one's fixes; Flask's scheduler was
+deleted 2026-10-06, so this is the only one); started from
 `billing.apps.ready()` in the web process only (never from a management command, the test
 runner or the autoreloader parent). Two gunicorn workers → two timers → the pass's advisory lock
 (`daily.daily_lock`) lets one run: `pg_try_advisory_lock` on a **dedicated raw connection**
 (`connection.get_new_connection`), never the ORM's — the pass autocommits on that one and a
 session lock would follow it back to the pool. The key is the same sha256 of
-`minty:subscriptions:run-daily` Flask hashes, so a Flask pass and a Django pass on one database
-exclude each other during the cutover (`billing/tests/engine/test_daily_lock.py`, contention
+`minty:subscriptions:run-daily` Flask hashed, so a Flask pass and a Django pass on one database
+excluded each other during the cutover (until Flask's scheduler was deleted, 2026-10-06; `billing/tests/engine/test_daily_lock.py`, contention
 proven on Postgres). Known costs, kept on purpose: an in-memory job store, so a restart slips the
 next light pass by up to an hour and **a deploy after 05:00 HKT loses that day's full pass**; a
 paused instance runs nothing.
@@ -513,7 +522,7 @@ PDF and the CSV never read it.
 stranded drafts (above), fixed with the user's decisions of that day; a review of the fixes found
 five defects in them, fixed the same day and folded in below. Flask's engine is to be deleted
 (the user's decision), so none of this was carried back: from here the two engines differ on
-these paths.
+these paths (moot since Flask's engine was deleted, 2026-10-06).
 
 **The processor failing is not the card declining (the user's rule: "retry next hour").** Every
 failure used to read as a decline: a Stripe outage, a timeout, a rate limit or our own key
@@ -688,7 +697,8 @@ host skips the notice without spending it, so the first configured run still sen
 extension always existed, so its unconfigured case claimed and then failed to connect; same net
 effect). The template (`templates/email/subscription_notice.html`; the receipt's went with the
 receipt, 2026-09-30) is Minty's verbatim on the Jinja2 backend — a render from each backend with
-the same context is byte-identical (checked 2026-09-21); the ten inline images (the logo and nine illustrations) live in `billing/static/email/`;
+the same context is byte-identical (checked 2026-09-21; Minty's copy was deleted 2026-10-06, so
+this one is the only template); the ten inline images (the logo and nine illustrations) live in `billing/static/email/`;
 `InlineImageMessage` keeps the `multipart/related; type="multipart/alternative"` wire shape
 with `Content-ID` parts; dedup stays in `subscription_email_log`. Links in emails point at
 minty-web through Flask's login-gated re-handoff (`notify.settings_url` →
@@ -729,7 +739,8 @@ optional `steps` block, and both "Continue setup" buttons open Flask's login-gat
 (`notify.setup_url`), which sends a company in setup into the wizard at its saved step - the
 wizard's own one-hour token never goes in an email. No unsubscribe link: three emails at most,
 stopping by themselves. Review with `manage.py preview_emails [--only EVENTS] [--send ADDRESS]`
-(all nine events from fixtures, no log rows - the port of Minty's `preview_billing_emails.py`).
+(all nine events from fixtures, no log rows - the port of Minty's `preview_billing_emails.py`,
+deleted from Minty 2026-10-06).
 
 **Who a money email goes to (2026-09-30, both engines).** Every notice went to the payer's login
 address (`notify.recipient_for`), so a billing account's "Billing Email" — where the company
@@ -860,7 +871,8 @@ the `_needs_stripe_clock` bug in both scripts, then with it fixed on both sides.
 kept anywhere (user's decision) - the repo records the outcome, and a run is regenerated when it
 is wanted.
 
-Regenerating a golden run (nothing is kept on disk): Flask from `C:\Github\Minty` with
+Regenerating a golden run (nothing is kept on disk; historical since 2026-10-06 — Minty's
+`replay_scenarios.py` is deleted, so only the Django half below can still run): Flask from `C:\Github\Minty` with
 `DATABASE_URL` pointed at the LOCAL database and `SMTP_URL=` blanked unless the notices are wanted -
 `python scripts/subscription/replay_scenarios.py --run <key> --reset --teardown --setup --replay
 --report`; Django from this repo - `python manage.py replay_scenarios --run <key> --as
@@ -1040,5 +1052,5 @@ happening.**
 | 2 | DONE 2026-09-21: `billing/services/` — the 1:1 port of all 24 modules of `blueprints/subscription/services/` plus `entity_modules.py` (from `entity/services/modules.py`), `_context.py` (the request scope that replaced `flask.g`) and `_log.py`; the templates and images; 51 ported test files; the job bodies behind `manage.py subscriptions`; the scoped scheduler pass; `manage.py replay_scenarios` + `scripts/replay_diff.py`, the eight Angelika runs identical on both sides |
 | 3 | DONE 2026-09-22: all four routers filled from Flask's views — `me` (`billing/api/me.py`, `_json.py` = `jsonify`; the invitation forwarded with the caller's bearer), `modules` (the page model minty-web renders + the 19 actions behind one gate), `notice` (`NoticeBearerAuth`, Flask's claimless fallback), `onboarding` (the nine + `trials/start`, which fails loudly); `docs/openapi.json` committed and held current by `test_contract.py` / `manage.py export_openapi`; 173 route tests in `billing/tests/api/` (32 portal + 7 wallet, 84 module page, 12 notice, 38 onboarding); e2e smoke asserts the live shapes |
 | 4c+ | DONE 2026-09-25: **billing accounts in the portal** — `GET /billing/accounts` (`portal.build_billing_accounts`), `update` / `default-card` / `move` (`billing/services/billing_accounts.py`), the account fields on `confirm`, `account` on `invoices` and `remove`, `next_billing` on `subscriptions`. Five silent failures fixed on the way: the landing's "Next Billing Date" was the anchor (the FIRST charge); the removal guard stopped at the first account on a shared card; card-keyed nomination raised on a shared card (`_group_for_card`, oldest wins); a company moved onto an emptied account lost access (`_carry_paid_days`' idle branch); a blanked address field was dropped by the SDK instead of cleared. Flask not mirrored (dark there; Django replaces it). **Same day, later: `next_bill` per account** (08-B's "Amount (estimated)") - `portal.next_bill_for_account` prices the account's next renewal with `renewals.build_renewal(..., converting_by=period.start)`: the runner's own invoice for the period starting on the next billing date, plus the trials that will have converted by then (`renewals._trial_converts` - the trial-end job's conjunction of customer, card for the company and consent, read from the database alone, never Stripe). `converting_by` is the forecast's only; the runner never passes it, so what it bills is unchanged. A figure that cannot be priced is null and logged, never a failed page. **Later still: schema item 23** - `subscription_invoice_line` records what each line PAID FOR (`period_start` / `period_end` / `unit_amount`), written by BOTH engines at issue: `billing.Line` carries them from whatever priced the line (`paid_from` holds a mid-period start to the period as `prorate` does), and an extension's come from `checkout.pending_extension_terms` - the paid-through date to the access end, and the rate only when re-deriving it piece by piece (`_extension_pieces`, which `_segmented_extension` now sums) reproduces the billed amount at ONE rate; never a blend, never a failed renewal. The breakdown reads them first. Minty migration `x1a01_invoice_line_span` ALTERs a database already up; both local ones have it, Supabase does not yet. **And 08-C's address became Stripe's own form** (the user's call): `?countries=1` also answers `publishable_key`, `update` takes `cardholder` (written with the address in one `billing_details` update, the account's card required as for the address), and every field is held to 255 characters. **2026-09-28: 08-K** - `POST /invoices/{invoice_id}/retry` and `retryable` on the invoice rows (above); `retry_now` gained `group_id` / `expect_invoice` in BOTH engines. And the engine now recognises a REPLAY-SCOPED renewal key (`dunning._names_period`: `<key>` or `<key>-<suffix>` - `replay_scenarios` scopes every key it issues so same-day runs do not collide at Stripe) where it picks the current period's invoice and where it settles one, so the dev database's lived past-due accounts can be retried and settle; production keys are never scoped. NOT covered: the renewal runner's duplicate guard (`_already_invoiced`) still matches keys exactly, so the live scheduler re-bills a replay-lived period (seen 2026-09-28 07:00 UTC on the catalogue's two 'Failed' accounts). **2026-09-29: the invoice PDF (Figma 09-A)** - `GET /invoices/{invoice_id}/pdf` and `has_pdf` on the invoice rows (above; Django only, Flask never had the portal's invoice actions); and in BOTH engines, a declined reinstatement voids the invoice it left open, and every Stripe item carries its own line's days (§6) |
-| 5 | Flask's copies deleted; minty-onboarding-api proxies here; the Stripe keys leave Flask |
+| 5 | DONE in code 2026-10-06: Flask's copies deleted (engine, payer portal, CLI, scheduler, notice route; no Flask code reads the Stripe keys); minty-onboarding-api proxies its money routes here and its own `finalize` calls `trials/start`; Flask's dashboard and minty-payment-request-web read the notice from here |
 | 7 | deployed beside the phase-C builds (on a test site since before 2026-10-01; the dark switch the plan's step 7/8b relied on was removed that day) |

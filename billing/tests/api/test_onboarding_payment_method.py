@@ -484,7 +484,7 @@ def test_trials_start_fails_loudly(client, user, entity, monkeypatch):
     res = post_json(client, "/api/onboarding/trials/start", {"entity_id": str(entity.id)}, **bearer(user))
 
     assert res.status_code == 502
-    assert res.json() == {"error": "The trial could not be started. Please try again."}
+    assert res.json() == {"error": "This trial could not be started. Mind trying again?"}
 
     monkeypatch.setattr(
         checkout, "start_trials_for_enabled_modules",
@@ -493,3 +493,35 @@ def test_trials_start_fails_loudly(client, user, entity, monkeypatch):
     refused = post_json(client, "/api/onboarding/trials/start", {"entity_id": str(entity.id)}, **bearer(user))
     assert refused.status_code == 503
     assert refused.json() == {"error": "Subscriptions are temporarily unavailable."}
+
+
+def _onboarding_token(user, *, iat_offset_seconds=0):
+    """The token Flask mints for the wizard (``create.py``'s onboarding token), which
+    minty-onboarding-api forwards here verbatim: ``user_id``, ``scope``, ``exp``, ``iat`` -
+    no ``entity_id``, no role claims."""
+    from datetime import UTC, datetime, timedelta
+
+    import jwt
+    from django.conf import settings
+
+    now = datetime.now(UTC) + timedelta(seconds=iat_offset_seconds)
+    claims = {"user_id": str(user.id), "scope": "onboarding",
+              "iat": now, "exp": now + timedelta(minutes=60)}
+    return {"HTTP_AUTHORIZATION": f"Bearer {jwt.encode(claims, settings.SECRET_KEY, algorithm='HS256')}"}
+
+
+def test_the_forwarded_onboarding_token_is_accepted(client, user, entity, catalogue):
+    """minty-onboarding-api's finalize calls trials/start with the wizard's own token; it
+    carries no entity, so the request takes the unscoped path and membership is the handler's."""
+    _enable(entity, user)
+    res = post_json(client, "/api/onboarding/trials/start", {"entity_id": str(entity.id)},
+                    **_onboarding_token(user))
+    assert res.status_code == 200, res.content
+
+
+def test_an_onboarding_token_minted_a_few_seconds_ahead_is_accepted(client, user, entity, catalogue):
+    """Flask's clock running ahead of this host must not 401 a token onboarding-api accepted
+    (it allows 60 s of skew; so does this service)."""
+    res = post_json(client, "/api/onboarding/trials/start", {"entity_id": str(entity.id)},
+                    **_onboarding_token(user, iat_offset_seconds=30))
+    assert res.status_code == 200, res.content

@@ -11,7 +11,9 @@ sends it here as a bearer. The system-wide picture is `Minty/docs/features/authe
 `/api/openapi.json`. `BearerAuth` (minty-payment-request-api's, verbatim — `SelfBearerAuth` is its
 person-scoped variant):
 
-- HS256 over the **shared `SECRET_KEY`**; a malformed token, a bad signature, an expired
+- HS256 over the **shared `SECRET_KEY`**, with 60 s of leeway on `iat`/`exp` for clock skew
+  between hosts (`CLOCK_SKEW_LEEWAY_SECONDS`, 2026-10-06 — minty-onboarding-api's allowance,
+  so a token it accepts and forwards is not refused here); a malformed token, a bad signature, an expired
   one and an unknown `user_id` are all `401 {"error": "Unauthorized"}` — the body Flask's
   portal answered, so `payerPortal.ts` reads it (`core/exceptions.py` overrides ninja's
   `detail`).
@@ -32,7 +34,7 @@ person-scoped variant):
 | `me` (`/api/me/*`) | `SelfBearerAuth` | identity only. Every row is found by the caller's `user_id` — their subscriptions, invoices, cards, transfers — so a company the caller has no role on is irrelevant and the request continues without one. Flask's `routes/portal.py` applied the same rule (`_user_id_from_bearer`). |
 | `modules` | `EntityBearerAuth` | the caller must hold a `user_entity` row on the resolved company, or be a system `superadmin` (a virtual `super_admin` role, read-only through `core/policy.is_superuser_readonly`). No company anywhere (no claim, no header), or no role → 401 - minty-payment-request-api's `BearerAuth` would let a company-less token through as an unscoped person, because it has person-level routes on the same router; this service has `SelfBearerAuth` for those, so a company route with no company is refused at the door. Inside, the path's company must be the resolved one (403 otherwise). |
 | `notice` | `NoticeBearerAuth` (`billing/api/notice.py`) | `EntityBearerAuth` plus Flask's one fallback: a token that names NO company - minty-payment-request-web sends only the bearer, and its refresh through minty-payment-request-api need not preserve the claim - is held to the caller's membership of the company in the PATH, which is what authorises the read in any case. A token naming another company than the path → 403 `entity_mismatch`; a stranger → 401. |
-| `onboarding` | `BearerAuth` | the wizard's token is unscoped and names its company in the body, as with minty-onboarding-api; the handler checks membership itself. |
+| `onboarding` | `BearerAuth` | the wizard's token is unscoped and names its company in the body, as with minty-onboarding-api; the handler checks membership itself. Since 2026-10-06 it arrives forwarded by minty-onboarding-api (Flask's onboarding token: `user_id`, `scope: "onboarding"`, `iat`, `exp`, no `entity_id`); `scope` is not checked here. |
 
 Inside the door the module page applies Flask's two permissions from `core/policy.py` (a
 verbatim copy of minty-onboarding-api's port of Minty's `services/permission_policy.py`):
@@ -55,9 +57,13 @@ and lands back on the page — silent while the Flask session is alive, a login 
 
 - **Flask → this service** (the dashboard notice while Flask still renders the dashboard):
   a five-minute assertion Flask self-mints with the shared key, as it does for
-  minty-payment-request-api's internal Xero token route. Step 3.
-- **minty-onboarding-api → this service** (the wizard's card routes and `trials/start`): the
-  caller's own bearer, forwarded verbatim — no service credential to leak or scope wrongly.
+  minty-payment-request-api's internal Xero token route. Step 3. Live since 2026-10-06:
+  Petty Cash's dashboard reads `GET /api/entities/{id}/subscription-notice` server-side with a
+  token naming the viewer and the company (Minty `services/subscription_api.py`).
+  minty-payment-request-web's landing notice calls the same route directly with its own bearer.
+- **minty-onboarding-api → this service** (the wizard's card routes and `trials/start`, which
+  its `POST /finalize` calls — 2026-10-06): the caller's own bearer, forwarded verbatim
+  (`core/subscription_client.py` there) — no service credential to leak or scope wrongly.
 - **This service → Flask** (`invite-admin`): the same, through `core/flask_client.py`, the
   only module that calls Flask.
 
@@ -78,7 +84,8 @@ forwarded call) and `PETTY_CASH_PUBLIC_URL` (the re-handoff links).
 ## Tests
 
 `billing/tests/test_auth.py` (every acceptance and refusal, scoped and unscoped, the header,
-the superadmin), `test_dark.py` (404 before auth, with CORS), `test_settings_guard.py` (the
+the superadmin), `billing/tests/api/test_onboarding_payment_method.py` (the forwarded
+onboarding token, and one minted 30 s ahead, are accepted by `trials/start`), `test_dark.py` (404 before auth, with CORS), `test_settings_guard.py` (the
 placeholder key refuses to boot unless `APP_ENV=development`); `e2e/test_smoke.py` against a running
 service; in the browser `minty-web/e2e/01_landing.spec.ts` (the handoff sets the cookie; a
 missing token does not).
