@@ -9,24 +9,31 @@ history (the payer portal's Billing and Invoices tabs, dunning, the audit trail)
 nothing to read.
 
     python manage.py replay_scenarios --list
-    python manage.py replay_scenarios --run angelika --setup --replay --report
-    python manage.py replay_scenarios --run angelika-lifecycle --setup --replay --report
+    python manage.py replay_scenarios --run catalogue \
+        --as someone@oliveandvinehk.com --tag Someone --payer-id <their uuid> \
+        --setup --replay --report
 
-THIS IS THE DJANGO PORT of Minty's ``scripts/subscription/replay_scenarios.py`` (Part 2 step 2,
-slice E), the second golden of the port: the same runs, driven through ``billing.services``
-against the same database and the same Stripe test account, must produce the same report as the
-Flask script. Read the Flask original for the reasoning; the differences are mechanical:
-``app.app_context()`` is ``billing.services._context.scope()``, the SQLAlchemy reads are the
-ORM, and mail goes to the CONSOLE backend (skipped, not spent - ``notify.mail_configured``) unless
+A SHAPE AND A PAYER. ``--run`` picks the shape; ``--as``, ``--tag`` and (for a login that
+already exists) ``--payer-id`` say who it is for. Nothing in this file names a person: it held
+one entry per payer per shape until 2026-10-07, and the register of which payer id already
+carries which seeded data is ``docs/features/subscriptions-api.md`` §8.
+
+This was the Django half of a port that no longer has another half — Minty's
+``scripts/subscription/replay_scenarios.py`` and the Flask engine were deleted on 2026-10-06, so
+``scripts/replay_diff.py`` has nothing left to compare. What survives of that lineage is the
+behaviour: everything runs through ``billing.services`` against the same Stripe test account, and
+mail goes to the CONSOLE backend (skipped, not spent - ``notify.mail_configured``) unless
 ``--notify-to`` names a recipient, so a replay never mails the payer's real address by accident.
-The payer it creates gets a werkzeug-compatible ``pbkdf2:sha256`` password hash, so the same
-login works in Flask. Run it against the DEV database and clone to a fresh payer (``--as … --tag
-…``) when the Flask script has run the same shape today: Stripe remembers an idempotency key for
-24 hours and the keys are per payer.
+A payer it CREATES gets a werkzeug-compatible ``pbkdf2:sha256`` password hash, so the login
+works; a payer that already exists is adopted untouched, password and name and role included.
+Same-day re-runs are safe — ``_patch_renewal_keys`` scopes every idempotency key to the run's
+Stripe customer, and a spent clock mints a new one — but seeding one DATABASE after another needs
+``--no-prune``; see ``prune_orphans``.
 
-NINE SHAPES, and a payer for each person who needs to see one. ``RUNS`` is that pairing
-and nothing more — the shapes themselves are the lists below. Three of them carry the
-bulk of the work:
+NINE SHAPES, and nothing about who sees them. ``SCRIPTS`` is the shapes and only the shapes;
+the payer comes from the command line (``--as`` / ``--tag`` / ``--payer-id``), and
+``docs/features/subscriptions-api.md`` §8 registers which payer id holds which seeded data.
+Three of the shapes carry the bulk of the work:
 
   the catalogue   Figma 05·A — one company per module-status combination the Subscription
                   Summary draws (38 of its 48 frames; ``UNREACHABLE_05A`` says why the
@@ -49,12 +56,12 @@ one. The ANCHOR is payer-scoped — every card the payer holds renews on it — 
 shape's first charge would move the renewal day every catalogue offset is chosen around;
 and the invoices, the portal and its payment-failed banner are all read per payer.
 
-A NEW payer for an existing shape needs no entry here — see ``clone_run``:
+Every payer is given at the command line — see ``clone_run``:
 
-    ... --run angelika --as someone@oliveandvinehk.com --tag Zed --setup --replay
+    ... --run catalogue --as someone@oliveandvinehk.com --tag Zed --setup --replay
 
-The entries that remain are the ones whose payer id is already IN a database, or whose
-reason for existing is not derivable from an address.
+Each needs a tag of its own, because the tag is what tells one payer's copy of a shape from
+another's: it is the prefix of every entity name the run creates (``_check_tag_owner``).
 
 DATES ARE RELATIVE, always. A replay runs from its origin to NOW, so every scenario is
 really a statement about how long ago something happened — and the catalogue scenarios are
@@ -92,7 +99,8 @@ re-sends last run's key against a different customer, which Stripe rejects outri
 twelve failures in a row, every one of them reading like a declined card. `--teardown`
 rotates the ids, and with them the keys.
 
-    python scripts/subscription/replay_scenarios.py --run angelika --reset --teardown --setup --replay
+    python manage.py replay_scenarios --run catalogue --as … --tag … --payer-id … \
+        --reset --teardown --setup --replay
 
 `--setup` then PRUNES the Stripe customer it has just orphaned — see ``prune_orphans``.
 A spent test clock cannot be rewound, so each re-run mints a new clock and customer and
@@ -757,31 +765,21 @@ def retag(scenarios: list, old: str, new: str) -> list:
     ]
 
 
-def lifecycle_edge(tag: str, scenarios: list) -> list:
-    """An edge scenario list re-tagged for a different payer. Every edge shape is
-    anchored on its own tag, which is the first token of every name in it."""
-    return retag(scenarios, scenarios[0][0].split(" ", 1)[0], tag)
-
-
-def lifecycle_as(tag: str) -> list:
-    """The lifecycle four under a tag of their own."""
-    return retag(LIFECYCLE, "S1", tag)
-
-
 def clone_run(base: dict, tag: str, email: str, *, user_id: str | None = None,
               name: tuple | None = None, notify_to: str | None = None) -> dict:
-    """One shape, a different payer — the whole of what the entries in ``RUNS`` vary.
+    """A shape plus a payer: the run the rest of this file works on.
 
-    Every run below is one of NINE shapes (the catalogue, the lifecycle, the split, and
-    the six edges) pointed at a payer. Nothing else differs, so a new payer for an
-    existing shape does not need a new entry: ``--as`` and ``--tag`` build it at the
-    command line.
+    There is no other kind of run. ``SCRIPTS`` holds nine shapes (the catalogue, the
+    lifecycle, the split and the six edges) and no identity at all, so every invocation
+    builds its run here from ``--as`` / ``--tag`` / ``--payer-id``.
 
-    The payer id is DERIVED from the email by default — `uuid5`, so the same address
-    always resolves to the same payer and a second `--setup` finds the run it seeded last
-    time rather than minting a stranger. The entries in ``RUNS`` keep their hand-written
-    ids instead: those are already in the database, on rows that would be orphaned by a
-    derivation that disagreed with them. Pass ``--payer-id`` to adopt one of those.
+    The payer id is DERIVED from the email when none is given — `uuid5`, so the same
+    address always resolves to the same payer and a second `--setup` finds what it seeded
+    last time rather than minting a stranger. A derivation is only safe for an address the
+    database does not have yet, because it would disagree with the id a real login already
+    has and `setup` would then insert a second row on its UNIQUE username; `_resolve_payer`
+    is what refuses that, and ``--payer-id`` is what answers it. The register of ids already
+    carrying seeded data is ``docs/features/subscriptions-api.md`` §8.
     """
     inherited = {k: v for k, v in base.items() if k != "notify_to"}
     return {
@@ -797,169 +795,173 @@ def clone_run(base: dict, tag: str, email: str, *, user_id: str | None = None,
         "scenarios": retag(base["scenarios"], base["tag"], tag),
     }
 
-RUNS = {
-    # HANDED OVER. These two payer rows were renamed in the database to the
-    # digitalisation addresses, so the same entities, invoices and history now sign in
-    # under the new login. The `email` here is what `--setup` would recreate the row
-    # with if it were ever deleted, so it has to match the database rather than the
-    # address the run was originally seeded under.
+
+def _resolve_payer(email: str, payer_id: str | None) -> str:
+    """The payer uuid this run operates on, and a refusal where guessing would corrupt.
+
+    Everything downstream filters on ``payer_user_id``, so the id IS the run. Given one, it
+    is taken as given. Given none, it is derived from the email — right for a throwaway
+    address, wrong for a login that already exists, because the derived id is NOT the id
+    that login has: ``setup`` would insert a second user row carrying the same address, and
+    ``user.username`` is unique, so the run dies on its first write. Succeeding would be
+    worse — a payer holding the companies that nobody can sign in as.
+
+    So an address the database already knows has to name its id out loud.
+    """
+    from django.db.models import Q
+    from shared_models.models import User
+
+    if payer_id:
+        row = User.objects.filter(pk=payer_id).first()
+        if row is not None and (row.username or "").lower() != email.lower():
+            # Not fatal: with the row adopted, ``email`` is never written. Loud, because the
+            # notices and the report will say one address while the login is another.
+            print(f"!! payer {payer_id} signs in as {row.username!r}, not {email!r}")
+        return str(payer_id)
+
+    taken = User.objects.filter(Q(username__iexact=email) | Q(email__iexact=email)).first()
+    if taken is not None:
+        raise SystemExit(
+            f"{email} already exists as payer {taken.id} — pass --payer-id {taken.id} to seed "
+            f"onto that login. A derived id would be a second row on the same username."
+        )
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"minty-replay:{email}"))
+
+
+def _check_tag_owner(run: dict) -> None:
+    """Refuse a tag whose companies belong to somebody else.
+
+    ``_entities`` matches entity NAMES, not payers, so a tag already seeded under another
+    payer makes this run adopt that payer's companies: ``--setup`` creates nothing,
+    ``--replay`` bills their rows and ``--teardown`` deletes them, and all of it reads as a
+    run that worked. This file has warned about it in prose since the first tag rename. This
+    is the check.
+    """
+    from shared_models.models import EntityModuleSubscription
+
+    found = _entities(run)
+    if not found:
+        return
+    ours = str(run["user_id"])
+    strangers = sorted(
+        {
+            str(payer)
+            for payer in EntityModuleSubscription.objects.filter(
+                entity_id__in=[str(e.id) for e in found.values()]
+            ).values_list("payer_user_id", flat=True)
+            if payer and str(payer) != ours
+        }
+    )
+    if strangers:
+        raise SystemExit(
+            f"!! tag {run['tag']!r} is already seeded for payer(s) {', '.join(strangers)}: "
+            f"{len(found)} of the companies it names are theirs, not {ours}'s. Pick another "
+            f"--tag, or --payer-id the payer that owns them."
+        )
+
+
+SCRIPTS = {
+    # NINE shapes, and not one fact about a person. Identity comes from the command line:
+    # ``--as <email> --tag <tag> --payer-id <uuid>``.
     #
-    # A TAG IS ONLY FREE TO CHANGE WHILE NOTHING IS SEEDED UNDER IT. It is baked into
-    # every entity NAME that a run has already created ("Ang - M44 Nexora Health Limited",
-    # "A1 Steady Co") and `_entities` matches on name, so renaming one against live data
-    # renames nothing — the run stops seeing its own entities and seeds a second set
-    # beside them. This one went "Ang" -> "Digitalisation" on 2026-08-17, checked first
-    # and safe only because neither database held a single entity or payer row for it.
-    # Check the same way before touching "A1" below, or any other.
-    "digitalisation": {
-        "label": "The 05·A catalogue, handed to digitalisation (entities tagged Digitalisation)",
-        "user_id": "44444444-5555-6666-7777-888888888888",
-        "email": "digitalisation+catalogue@oliveandvinehk.com",
-        # The data is digitalisation's; the NOTICES go to Angelika — the same split as
-        # the lifecycle run below, and a distinct alias from it so the two runs' mail
-        # stays tellable apart in one inbox.
-        "notify_to": "angelika.tardaguela+digitalisation-catalogue@oliveandvinehk.com",
-        "name": ("Digitalisation", "Scenarios"),
-        "tag": "Digitalisation",
+    # Until 2026-10-07 each shape was repeated here once per payer, with the email, display
+    # name and payer uuid written in — eleven entries over these nine, two of them differing
+    # from their twin by identity alone. ``docs/features/subscriptions-api.md`` §8 holds the
+    # register of which payer id already carries which seeded data, and is where
+    # ``--payer-id`` comes from. An id that lives only in git history strands its companies:
+    # ``_entities`` finds them by their tag-prefixed NAME and every other read filters on
+    # ``payer_user_id``.
+    #
+    # ``tag`` HERE IS THE SHAPE'S OWN NAME PREFIX — the token baked into the names in its
+    # scenario list ("S1 Steady Co", "L1 Doomed Co") — and ``--tag`` retags from it
+    # (``retag``). It is not a payer's tag. The catalogue's names carry none of their own,
+    # because they start with their 05·A frame code, so its prefix is empty and
+    # ``_clone_name`` prefixes whatever ``--tag`` gives it.
+    #
+    # A TAG IS ONLY FREE TO USE WHILE NOTHING IS SEEDED UNDER IT. It is baked into every
+    # entity NAME a run has already created ("Digitalisation - M44 Nexora Health Limited",
+    # "A1 Steady Co"), and ``_entities`` matches on name, NOT on payer — so a tag already in
+    # use makes a run ADOPT the other payer's companies and seed nothing, which looks exactly
+    # like a run that worked until ``--teardown`` deletes them. ``_check_tag_owner`` refuses
+    # that at runtime now. Before it, this comment was the only guard.
+    "catalogue": {
+        "label": "The 05·A catalogue — one company per module-status combination",
+        "tag": "",
         "scenarios": CATALOGUE,
     },
-    "digitalisation-lifecycle": {
-        "label": "Scenario 1, handed to digitalisation (entities tagged A1)",
-        "user_id": "55555555-6666-7777-8888-999999999999",
-        "email": "digitalisation+lifecycle@oliveandvinehk.com",
-        # The data is digitalisation's; the NOTICES go to Angelika. A distinguishable
-        # alias rather than her plain `+lifecycle@`, which already receives the A3 run's
-        # notices — same inbox either way, but these stay tellable apart from her own.
-        "notify_to": "angelika.tardaguela+digi-lifecycle@oliveandvinehk.com",
-        "name": ("Digitalisation", "Lifecycle"),
-        "tag": "A1",
-        "scenarios": lifecycle_as("A1"),
+    "lifecycle": {
+        "label": "Scenario 1 — four companies living four months on one account",
+        "tag": "S1",
+        "scenarios": LIFECYCLE,
     },
-    # FRESH pair on the angelika addresses, kept for validating fixes. Their own payer
-    # ids, because reusing digitalisation's would overwrite the handed-over data rather
-    # than sit beside it. This one took the tag "Ang" back on 2026-08-17, once
-    # digitalisation's rename freed it; it was "Ang2" for as long as the two collided.
-    "angelika": {
-        "label": "The 05·A catalogue for Angelika — fix validation",
-        "user_id": "88888888-9999-0000-1111-222222222222",
-        "email": "angelika.tardaguela+catalogue@oliveandvinehk.com",
-        "name": ("Angelika", "Scenarios"),
-        "tag": "Ang",
-        "scenarios": CATALOGUE,
-    },
-    # A THIRD payer id on the same address, because a same-day re-run cannot reuse the
-    # second one. `renewals.period_key` is `renewal-{user_id}-{period_start}`: it is keyed
-    # on the PAYER and the period, not on the run, and Stripe remembers an idempotency key
-    # for 24 hours. `--teardown` rotates entity ids and so rotates the checkout keys, but
-    # the payer id is what setup preserves — so every renewal in a same-day replay of the
-    # same payer collides with the previous attempt and comes back as a decline. The
-    # A2 run died that way from its first renewal onward.
-    #
-    # The previous payer keeps the data under a parked "+lifecycle-spent" address; this
-    # one takes the real address over. Rotating the payer is the only way to get clean
-    # renewals today without waiting out Stripe's 24-hour window.
-    "angelika-lifecycle": {
-        "label": "Scenario 1 for Angelika — fix validation",
-        "user_id": "a3a3a3a3-0000-1111-2222-333333333333",
-        "email": "angelika.tardaguela+lifecycle@oliveandvinehk.com",
-        "name": ("Angelika", "Lifecycle"),
-        "tag": "A3",
-        "scenarios": lifecycle_as("A3"),
-    },
-    "angelika-split": {
-        # Scenario 1B — the same four months on TWO cards. Its own payer, and for a
-        # sharper reason than the usual one: this run's whole subject is that a decline
-        # stops at the card that declined, and sharing an account with scenario 1 would
-        # put both stories on one dunning history where neither could be read.
-        #
-        # Run it alongside `angelika-lifecycle` and read the two Invoices tabs side by
-        # side: same companies, same money, one invoice a month against two.
-        "label": "Scenario 1B — the lifecycle split across two cards",
-        "user_id": "a4a4a4a4-0000-1111-2222-333333333333",
-        "email": "angelika.tardaguela+split@oliveandvinehk.com",
-        "name": ("Angelika", "Split"),
+    "split": {
+        # Its own payer for a sharper reason than the rest: this shape's whole subject is
+        # that a decline stops at the card that declined, and sharing an account with the
+        # lifecycle would put both stories on one dunning history where neither reads.
+        "label": "Scenario 1B — the lifecycle's four months split across two cards",
         "tag": "S1B",
         "scenarios": LIFECYCLE_SPLIT,
     },
-    # The edge set. Six payers on Angelika's address family — one per account-level
-    # outcome, since a give-up, a clean renewal and a 31st anchor cannot coexist on one
-    # account. Same password as the rest.
+    # THE EDGE SET. One shape per account-level outcome, and they cannot be merged onto one
+    # payer: a dunning that gives up, a clean renewal and a 31st anchor are three different
+    # answers to the same month and cannot coexist on one account.
     "L1": {
         "label": "Dunning that gives up, + a trial ending mid-arrears",
-        "user_id": "b1b1b1b1-0000-1111-2222-333333333333",
-        "email": "angelika.tardaguela+l1@oliveandvinehk.com",
-        "name": ("Angelika", "GiveUp"),
         "tag": "L1",
         "scenarios": L1_GIVES_UP,
     },
     "L2": {
         "label": "A card fixed after Stripe gave up on the invoice - collected by re-issuing it",
-        "user_id": "b2b2b2b2-0000-1111-2222-333333333333",
-        "email": "angelika.tardaguela+l2@oliveandvinehk.com",
-        "name": ("Angelika", "Refresh"),
         "tag": "L2",
         "scenarios": L2_REFRESHED,
     },
     "C1": {
         "label": "Two conversions on the anchor day beside a plain renewer",
-        "user_id": "c1c1c1c1-0000-1111-2222-333333333333",
-        "email": "angelika.tardaguela+c1@oliveandvinehk.com",
-        "name": ("Angelika", "Conversions"),
         "tag": "C1",
         "scenarios": C1_CONVERSIONS,
     },
     "R1": {
         "label": "Un-cancel on both sides of the extension being invoiced",
-        "user_id": "d1d1d1d1-0000-1111-2222-333333333333",
-        "email": "angelika.tardaguela+r1@oliveandvinehk.com",
-        "name": ("Angelika", "Uncancel"),
         "tag": "R1",
         "scenarios": R1_UNCANCEL,
     },
     "X1": {
         "label": "The last entity leaves, and still owes an extension",
-        "user_id": "e1e1e1e1-0000-1111-2222-333333333333",
-        "email": "angelika.tardaguela+x1@oliveandvinehk.com",
-        "name": ("Angelika", "LastOut"),
         "tag": "X1",
         "scenarios": X1_LAST_ONE_OUT,
     },
     "E1": {
         "label": "Anchored on the 31st — month-length clamping",
-        "user_id": "f1f1f1f1-0000-1111-2222-333333333333",
-        "email": "angelika.tardaguela+e1@oliveandvinehk.com",
-        "name": ("Angelika", "MonthEnd"),
         "tag": "E1",
         "scenarios": E1_MONTH_END,
     },
 }
 
-def _check_runs_are_distinct() -> None:
-    """Three fields no two runs may share. Checked at import, because each collision is
-    silent at the point it is made and expensive at the point it is noticed.
+def _check_scripts_are_distinct() -> None:
+    """No two shapes may own the same name prefix. Checked at import, because the collision
+    is silent where it is made and expensive where it is noticed.
 
-    A shared TAG is the dangerous one: `_entities` matches on name and is not
-    payer-scoped, so the second run adopts the first's entities and seeds nothing —
-    which looks exactly like a run that worked. It is also the field most likely to
-    collide, because tags get renamed and freed (see "Ang" above), and a rename that
-    lands on a tag still in use is one keystroke away from a rename that frees it.
+    ``_entities`` matches on NAME and is not payer-scoped, so two shapes sharing a prefix
+    would read each other's companies as their own. The empty prefix is the catalogue's,
+    whose names carry their 05·A frame code instead, and only it may repeat — there is one
+    catalogue.
 
-    EMAIL and USER_ID collide harder but louder: `user.email` and `user.username` are
-    unique in the schema, so the second `--setup` raises on the insert rather than
-    corrupting anything.
+    The payer fields this used to guard (email, user_id) are no longer in the file; the
+    runtime equivalents are ``_resolve_payer`` and ``_check_tag_owner``.
     """
-    for field in ("tag", "email", "user_id"):
-        seen: dict = {}
-        for key, run in RUNS.items():
-            if run[field] in seen:
-                raise SystemExit(
-                    f"RUNS is broken: {key!r} and {seen[run[field]]!r} share "
-                    f"{field}={run[field]!r}"
-                )
-            seen[run[field]] = key
+    seen: dict = {}
+    for key, script in SCRIPTS.items():
+        prefix = script["tag"]
+        if not prefix:
+            continue
+        if prefix in seen:
+            raise SystemExit(
+                f"SCRIPTS is broken: {key!r} and {seen[prefix]!r} share tag={prefix!r}"
+            )
+        seen[prefix] = key
 
 
-_check_runs_are_distinct()
+_check_scripts_are_distinct()
 
 
 def _check_script(label: str, scenarios: list) -> None:
@@ -1066,8 +1068,8 @@ def _check_catalogue(catalogue: list, unreachable: dict) -> None:
 
 
 def _check_scripts() -> None:
-    for key, run in RUNS.items():
-        _check_script(key, run["scenarios"])
+    for key, script in SCRIPTS.items():
+        _check_script(key, script["scenarios"])
     _check_catalogue(CATALOGUE, UNREACHABLE_05A)
     # L2 is a card fixed AFTER Stripe gave up on the invoice and BEFORE dunning does: the
     # renewal plus nine retries are the ten declines, and the last retry is day 13 after it.
@@ -1487,13 +1489,23 @@ def _survey(stripe, cutoff: datetime) -> tuple[list, list]:
     return deletable_clocks, orphans
 
 
-def prune_orphans() -> None:
+def prune_orphans(run: dict) -> None:
     """Delete the Stripe objects `--setup` just orphaned. Runs straight after it.
 
     AFTER setup, not before, and the ordering is the whole trick. A spent clock cannot be
     rewound, so setup mints a new clock and customer and re-points the payer's mapping at
     them — which is the instant the PREVIOUS customer becomes unreferenced. Pruning
     beforehand would find it still named by the mapping, judge it in use, and leave it.
+
+    SCOPED TO THIS RUN'S PAYER for the database half. It used to sweep the audit rows of
+    every payer in ``RUNS``, which was only ever safe because those ids were hard-coded;
+    with identity coming from the command line there is no such list, and sweeping on a
+    guess would delete another payer's history.
+
+    The Stripe half is judged against THIS DATABASE (``_survey``), so a clock whose
+    customers no mapping here names is an orphan — true of the clocks of any OTHER database
+    that shares this Stripe test account. Run with ``--no-prune`` when seeding one database
+    after another, or the second run deletes the first's clock and every invoice on it.
 
     NEVER FATAL. This is housekeeping and the replay is the job.
     """
@@ -1504,10 +1516,10 @@ def prune_orphans() -> None:
     # `--setup` recreates them, and `subscription_audit_log` is the one table with no
     # foreign key to follow them down. Replay payers only.
     try:
-        payers = [run["user_id"] for run in RUNS.values()]
         alive = set(Entity.objects.values_list("id", flat=True))
         dangling = [
-            row.id for row in SubscriptionAuditLog.objects.filter(payer_user_id__in=payers)
+            row.id
+            for row in SubscriptionAuditLog.objects.filter(payer_user_id=run["user_id"])
             if str(row.entity_id) not in alive
         ]
         if dangling:
@@ -2192,20 +2204,21 @@ class Command(BaseCommand):
     help = __doc__.split("\n")[0]
 
     def add_arguments(self, parser):
-        parser.add_argument("--list", action="store_true", help="show the runs")
-        parser.add_argument("--run", choices=sorted(RUNS), help="which run to act on")
+        parser.add_argument("--list", action="store_true", help="show the shapes")
+        parser.add_argument("--run", choices=sorted(SCRIPTS), help="which shape to act on")
         parser.add_argument("--plan", action="store_true", help="print the timeline only")
         parser.add_argument("--setup", action="store_true")
         parser.add_argument("--replay", action="store_true")
         parser.add_argument("--report", action="store_true")
         parser.add_argument("--reset", action="store_true")
         parser.add_argument("--teardown", action="store_true")
-        # Point an existing SHAPE at a new payer, instead of adding an entry to RUNS for it.
+        # WHO the shape is seeded for. Required: the file holds no identity of its own.
         parser.add_argument("--as", dest="payer_email", metavar="EMAIL",
-                            help="run the chosen shape as this payer (requires --tag)")
-        parser.add_argument("--tag", help="entity name prefix for the new payer's own copies")
+                            help="the payer to seed this shape for (requires --tag)")
+        parser.add_argument("--tag", help="entity name prefix for this payer's own copies")
         parser.add_argument("--payer-id", dest="payer_id",
-                            help="adopt an existing payer id instead of deriving one from the email")
+                            help="the payer's existing id; required for a login that already "
+                                 "exists, and listed in docs/features/subscriptions-api.md §8")
         parser.add_argument("--notify-to", dest="notify_to", metavar="EMAIL",
                             help="send this run's mail somewhere other than the payer (mail is "
                                  "otherwise skipped: console backend)")
@@ -2230,29 +2243,30 @@ class Command(BaseCommand):
 def _main(args) -> None:
         if args.list or not args.run:
             end = _end_of_run()
-            for key, run in sorted(RUNS.items()):
-                origin = _origin(run, end)
-                print(f"  {key:<10} {run['label']}")
-                print(f"             payer {run['email']}, {origin:%d %b %Y} -> "
-                      f"{end:%d %b %Y} ({(end - origin).days + 1} days), "
-                      f"{len(run['scenarios'])} entries")
+            for key, script in sorted(SCRIPTS.items()):
+                origin = _origin(script, end)
+                print(f"  {key:<10} {script['label']}")
+                print(f"             {origin:%d %b %Y} -> {end:%d %b %Y} "
+                      f"({(end - origin).days + 1} days), {len(script['scenarios'])} entries")
             if not args.run:
                 return
 
-        selected = RUNS[args.run]
-        if args.payer_email or args.tag:
-            # Both, always. A new payer on an existing tag would seed nothing and quietly
-            # adopt the other payer's entities; a new tag on an existing payer would seed a
-            # second set of companies onto an account that already has one.
-            if not (args.payer_email and args.tag):
-                raise SystemExit("--as and --tag go together")
-            if args.tag in {run["tag"] for run in RUNS.values()}:
-                raise SystemExit(f"tag {args.tag!r} already belongs to a run in RUNS — pick "
-                                 f"another, or use --run for that one")
-            selected = clone_run(selected, args.tag, args.payer_email,
-                                 user_id=args.payer_id, notify_to=args.notify_to)
-            print(f"{selected['label']}\n  payer {selected['email']} "
-                  f"({selected['user_id']}), entities tagged {selected['tag']}\n")
+        # WHO is not in this file. A shape alone cannot be run: there is no payer to run it
+        # for, and guessing one is how a run ends up seeding a stranger.
+        if not (args.payer_email and args.tag):
+            raise SystemExit(
+                "--as EMAIL and --tag TAG are required: SCRIPTS holds shapes, not payers. "
+                "Add --payer-id for a login that already exists "
+                "(docs/features/subscriptions-api.md §8)."
+            )
+        with _context.scope():
+            payer_id = _resolve_payer(args.payer_email, args.payer_id)
+        selected = clone_run(SCRIPTS[args.run], args.tag, args.payer_email,
+                             user_id=payer_id, notify_to=args.notify_to)
+        print(f"{selected['label']}\n  payer {selected['email']} "
+              f"({selected['user_id']}), entities tagged {selected['tag']}\n")
+        with _context.scope():
+            _check_tag_owner(selected)
 
         # Order matters: teardown before setup so a re-seed gets fresh entity ids (and so
         # fresh Stripe idempotency keys), and reset before replay.
@@ -2265,7 +2279,7 @@ def _main(args) -> None:
             # Immediately after, while the customer it just replaced is unreferenced and
             # before the replay spends any time. See `prune_orphans`.
             if not args.no_prune:
-                prune_orphans()
+                prune_orphans(selected)
         if args.plan:
             replay(selected, dry=True)
         if args.replay:

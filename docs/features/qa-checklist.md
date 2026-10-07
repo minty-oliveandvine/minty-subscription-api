@@ -6,7 +6,7 @@ tested` in [subscriptions-api.md](subscriptions-api.md)). This is not a replacem
 it exists for exercising the service by hand (Postman, curl, or through `minty-web` /
 `minty-payment-request-web` / the onboarding wizard) before a release, and for checking the money
 and idempotency traps the docs call out explicitly. Run it against a dev DB or a replay-seeded
-entity (`manage.py replay_scenarios`, the `angelika` catalogue) — never a real payer or a real
+entity (`manage.py replay_scenarios --run catalogue`) — never a real payer or a real
 Stripe card.
 
 ## Auth (`BearerAuth` / `SelfBearerAuth` / `EntityBearerAuth` / `NoticeBearerAuth`, [authentication.md](authentication.md))

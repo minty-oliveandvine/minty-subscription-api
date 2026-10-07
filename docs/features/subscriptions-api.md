@@ -881,16 +881,71 @@ angelika.tardaguela+django-<key>@… --tag <tag of the SAME length as the run's>
 keys are per payer; the same length because the report truncates names to fixed widths); then
 `python scripts/replay_diff.py <flask log> <django log> --tags <run tag>=<clone tag>` — IDENTICAL is
 the only acceptable answer where a run stays off the paths §6's fixes of 2026-09-30 changed; the
-Flask engine (to be deleted) does not have them. Keys: `X1 C1 L1 L2 R1 E1 angelika angelika-lifecycle angelika-split`.
+Flask engine (to be deleted) does not have them. Keys: `X1 C1 L1 L2 R1 E1 angelika angelika-lifecycle angelika-split`
+— the per-person keys of the time. Since 2026-10-07 `--run` names a SHAPE (`catalogue`, `lifecycle`,
+`split`, `L1`, `L2`, `C1`, `R1`, `X1`, `E1`) and the payer is given with `--as` / `--tag` / `--payer-id`,
+so these command lines no longer run as written.
 **L2** (2026-09-28) is the re-issue's live proof: the card dies before the day-30 renewal and is
 fixed on day 42, after Stripe gave up on the invoice (day 40: `dunning REFRESHED in_… -> in_…`,
 then the replacement declines; day 41 declines; day 42 `dunning retry -> paid`, `RECOVERED`). The
 day-30 invoice ends `void`, a day-40 one for the same period and lines `paid`. L1 (never fixed)
 shows the same REFRESHED on day 40 and then declines on the replacement until the give-up.
 
+### Who a run is seeded for — the payer registry
+
+`replay_scenarios.py` holds **scenarios only**. A run's identity comes from the terminal:
+
+```
+python manage.py replay_scenarios --run <script> \
+  --as <email> --tag <tag> --payer-id <uuid> --setup --replay --report
+```
+
+All three are required. `--payer-id` especially: without it the payer id is
+`uuid5("minty-replay:" + email)`, and `setup` would try to create a second user row with
+`username=<email>` against the UNIQUE `user_username_key`. Pass the id of the login you mean.
+
+So this table is the record of which payer already holds seeded data. An id that survives only
+in git history strands its companies: `--teardown` finds entities by their tag-prefixed NAME,
+and every other read filters on `payer_user_id`. Add a row here when you seed a new payer.
+
+Verified 2026-10-07 against local `postgres` and the 2026-10-07 Supabase dump.
+
+| Script | Tag | Payer id | Login | Seeded |
+|---|---|---|---|---|
+| `CATALOGUE` | `Digitalisation` | `44444444-5555-6666-7777-888888888888` | `digitalisation+catalogue@oliveandvinehk.com` | dev **and** Supabase, 38 companies each |
+| `CATALOGUE` | `Ang` | `88888888-9999-0000-1111-222222222222` | `angelika.tardaguela+catalogue@oliveandvinehk.com` | dev only, 38. On Supabase that address is a **different**, UI-made user (`1f619de1-…`) that never held a catalogue |
+| `LIFECYCLE` | `A3` | `a3a3a3a3-0000-1111-2222-333333333333` | `angelika.tardaguela+lifecycle@oliveandvinehk.com` | dev only, 4 |
+| `LIFECYCLE` | `A1` | `55555555-6666-7777-8888-999999999999` | `digitalisation+lifecycle@oliveandvinehk.com` | **never seeded** in either database |
+| `LIFECYCLE_SPLIT` | `S1B` | `a4a4a4a4-0000-1111-2222-333333333333` | `angelika.tardaguela+split@oliveandvinehk.com` | dev only, 4 |
+| `L1_GIVES_UP` | `L1` | `b1b1b1b1-0000-1111-2222-333333333333` | `angelika.tardaguela+l1@oliveandvinehk.com` | dev only, 3 |
+| `L2_REFRESHED` | `L2` | `b2b2b2b2-0000-1111-2222-333333333333` | `angelika.tardaguela+l2@oliveandvinehk.com` | dev only, 2 |
+| `C1_CONVERSIONS` | `C1` | `c1c1c1c1-0000-1111-2222-333333333333` | `angelika.tardaguela+c1@oliveandvinehk.com` | dev only, 4 |
+| `R1_UNCANCEL` | `R1` | `d1d1d1d1-0000-1111-2222-333333333333` | `angelika.tardaguela+r1@oliveandvinehk.com` | dev only, 4 |
+| `X1_LAST_ONE_OUT` | `X1` | `e1e1e1e1-0000-1111-2222-333333333333` | `angelika.tardaguela+x1@oliveandvinehk.com` | dev only, 1 |
+| `E1_MONTH_END` | `E1` | `f1f1f1f1-0000-1111-2222-333333333333` | `angelika.tardaguela+e1@oliveandvinehk.com` | dev only, 2 |
+| `CATALOGUE` | `Angelika` | *per database* — ask the command | `angelika.tardaguela@oliveandvinehk.com` | rehearsed 2026-10-07 in `pettycashv3_rehearsal_1007` (38 companies beside her own 3 trials, which survive because no `--reset`); **not yet on Supabase** |
+| `CATALOGUE` | `Alyanna` | *per database* — ask the command | `alyanna.geonanga@oliveandvinehk.com` | rehearsed 2026-10-07 in `pettycashv3_rehearsal_1007` (38 companies, clean payer); **not yet on Supabase** |
+
+**A real login's payer id is per database.** The ids above were minted by the harness, so they
+are the same everywhere they were seeded. An id belonging to a login a *person* registered is
+not: `angelika.tardaguela@oliveandvinehk.com` is `f998c2e2-1514-4098-bd3c-17ab2edee7b2` in local
+`postgres` and `d27d3d3a-62ee-4814-94b5-29579e63e78b` on Supabase, and
+`alyanna.geonanga@oliveandvinehk.com` was `3733b72f-…` in the 2026-10-06 Supabase dump and
+`bed48c0d-9814-4419-8eb3-c34be659dd93` in the 2026-10-07 one — the row was replaced between them.
+
+So do not copy such an id out of a dump or out of this file. Run the command **without**
+`--payer-id`: `_resolve_payer` looks the address up in the database it is actually connected to
+and refuses with the id it found. Use that.
+
+The ids were hard-coded in `RUNS` until 2026-10-07, one run per person per script — which is why
+two scripts carry two tags apiece. A tag is baked into every entity name a run has created, so
+**a tag is only free to change while nothing is seeded under it**, and reusing one makes a run
+adopt another payer's same-named companies. `_check_tag_owner` now refuses that at runtime
+instead of leaving it to this paragraph.
+
 ### The replay catalogue — Figma 05·A
 
-The `angelika` and `digitalisation` runs share one shape, `CATALOGUE`. It is Figma
+`CATALOGUE` is the shape every catalogue run shares. It is Figma
 section **05·A** "Subscription Summary — all 36 module-status combinations" (file
 `43YI3MYtTfX5Xzz6dRoRuT`, node `1521:1292`). Down is Petty Cash and across is Payment Request, over
 1 NOT_STARTED, 2 TRIAL, 3 TRIAL_EXPIRED, 4 ACTIVE, 5 CANCELLATION_PENDING and 6 SUSPENDED:
@@ -988,7 +1043,7 @@ refuses a rename that comes before its company's last move.
 
 **Shelf life.** About eight days. SUSPENDED lapses at R+15 (+8 to +11); trials end at +14 and
 turn red from +7; cancellations end at +15. Re-run to refresh:
-`--run angelika --reset --teardown --setup --replay --report`.
+`--run catalogue --as <email> --tag <tag> --payer-id <uuid> --reset --teardown --setup --replay --report`.
 
 `replay()` refuses a payer that still holds an anchor (run `--reset`). `reset()` deletes the payer's
 nominations *by payer*: a company nominated onto one of its cards by hand once blocked the group
