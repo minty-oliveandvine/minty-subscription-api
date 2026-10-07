@@ -19,7 +19,7 @@ below record what was true on the date given, and this service is now the only e
   invoice itself as a PDF drawn to Figma 09-A. Twenty-three `/api/me/*` paths (twenty-four
   operations): Flask's fifteen, plus `transfer/seen`, the four `billing/accounts` routes and an
   invoice's `breakdown`, `retry` and `pdf`.
-- **A company's module settings page** (`minty-web`, `/entities/{shortid}/{name}/settings/modules`):
+- **A company's module settings page** (`minty-web`, `/entity/{shortid}/{name}/settings/modules`):
   the two module cards (Petty Cash, Payment Request) with their state, and the ten actions —
   start a trial, authorise billing, restart, cancel, renew, retry a payment, and the previews. One
   page model plus one action endpoint. No action hands the browser to a Stripe-hosted page

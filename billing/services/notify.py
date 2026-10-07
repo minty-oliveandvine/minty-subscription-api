@@ -418,10 +418,11 @@ def settings_url(entity_id) -> str:
 
 def module_page_path(entity_id) -> str:
     """minty-web's Module page of a company: the Module tab among its settings,
-    ``/entities/<id>/company/settings/modules`` (phase 2, 2026-10-05). This service does
+    ``/entity/<id>/company/settings/modules`` (phase 2, 2026-10-05; singular - the address names
+    one company). This service does
     not know the company's short id and name, so the full id goes with a placeholder name
     and minty-web puts the real ones in the address bar."""
-    return f"/entities/{entity_id}/company/settings/modules"
+    return f"/entity/{entity_id}/company/settings/modules"
 
 
 def handoff_path(next_path: str, *, entity_id=None) -> str:
