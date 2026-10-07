@@ -351,7 +351,7 @@ def test_a_trial_that_needs_action_says_what_to_do_and_by_when(app, db_session, 
         # ``notify.settings_url``); the ampersand is HTML-escaped by the template.
         eid = _company(db_session, "e1")
         assert (
-            f"https://app.minty.test/handoff/minty-web?next=%2Fentities%2F{eid}"
+            f"https://app.minty.test/handoff/minty-web?next=%2Fentity%2F{eid}"
             f"%2Fcompany%2Fsettings%2Fmodules&amp;entity_id={eid}"
         ) in message.html
 
