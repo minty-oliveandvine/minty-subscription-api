@@ -212,7 +212,9 @@ def test_the_module_card_starts_a_trial_that_switches_the_module_on(shop):
     assert module_on(entity.id) is True
     row = module_row(entity.id)
     assert row is not None and str(row.phase) == "trial"
-    assert str(row.payer_user_id) == owner.id
+    # NO SUBSCRIBER. Starting a trial is free and commits nobody, so the company gets a payer
+    # only when someone confirms billing on a billing account (the user, 2026-10-08).
+    assert row.payer_user_id is None
     assert row.trial_end is not None and row.trial_end > datetime.now(UTC)
     # once per module: a second trial is refused, the card offers paid checkout instead
     again, status = start_trial(owner, entity)
@@ -246,12 +248,20 @@ def test_a_trial_that_ends_without_a_card_expires_and_lapses(shop, monkeypatch):
 
 def _payer_with_a_card(owner, entity):
     """The payer's Stripe customer, a billing account on a card with this company on it,
-    and the company's billing consent - what a conversion needs."""
+    the company's billing consent, AND the payer established on its module rows - what a
+    conversion needs.
+
+    The last one is the act "Activate Subscription" makes (``checkout.activate_entity_billing``
+    → ``store.establish_entity_payer``): a trial establishes no subscriber, so without it the
+    conversion has nobody to charge and the trial expires instead. That is the behaviour the
+    `..._expires_...` tests above pin; this is its other half.
+    """
     from billing.services import store
 
     store.upsert_customer_mapping(owner.id, "cus_test")
     store.nominate_card_for_entity(entity.id, owner.id, "pm_card", source="chosen")
     store.record_billing_consent(entity.id, owner.id, source="module_card")
+    store.establish_entity_payer(entity.id, owner.id)
 
 
 def test_a_trial_that_ends_with_a_card_converts_to_an_exact_in_house_invoice(shop, monkeypatch):

@@ -405,6 +405,56 @@ def _person(user, user_id=None) -> dict:
     }
 
 
+def _unactivated_for_admin(user_id) -> dict[str, dict]:
+    """``{entity_id: {code: row}}`` for the companies this user administers that have
+    module rows and NO subscriber.
+
+    Scoped twice, in this order, because the second check is the expensive one: the
+    viewer's own APPROVED memberships bound the query, then ``MODULE_MANAGE`` is asked
+    per company — a cashier on a company nobody pays for is not offered its bill.
+
+    Advisory, like the handover reads further down: a failure here answers {} and the
+    payer's own companies still render. The list losing a row is worth less than the page
+    going down, and it is logged.
+    """
+    from core.policy import Permission, has_permission
+    from shared_models.models import UserEntity
+
+    from billing.services import store as sub_store
+
+    try:
+        member_of = list(
+            UserEntity.objects.filter(user_id=str(user_id), approved=True)
+            .values_list("entity_id", flat=True)
+        )
+        if not member_of:
+            return {}
+        rows = sub_store.module_rows_without_payer(member_of)
+        if not rows:
+            return {}
+        user = _by_pk(User, user_id)
+        if user is None:
+            return {}
+        allowed: dict[str, bool] = {}
+        found: dict[str, dict] = {}
+        for row in rows:
+            entity_id = str(row.entity_id)
+            if entity_id not in allowed:
+                allowed[entity_id] = has_permission(
+                    user, Permission.MODULE_MANAGE, entity_id
+                )
+            if not allowed[entity_id]:
+                continue
+            found.setdefault(entity_id, {})[(row.function_code or "").upper()] = row
+        return found
+    except Exception:
+        logger.exception(
+            "portal: could not read the companies %s administers but nobody pays for",
+            user_id,
+        )
+        return {}
+
+
 def build_payer_subscriptions(
     user_id,
     *,
@@ -414,16 +464,27 @@ def build_payer_subscriptions(
     page: int = 1,
     per_page: int = DEFAULT_PER_PAGE,
 ) -> dict:
-    """Every entity ``user_id`` is the payer for, with each module's status and date.
+    """Every entity ``user_id`` is the payer for, plus the ones nobody pays for yet that
+    they administer, with each module's status and date.
 
-    Membership is not the test here — being the PAYER is. An admin of ten companies who
-    pays for none of them gets an empty list, which is correct: this screen is the
+    Being the PAYER is the test for a company that HAS one. An admin of ten companies
+    somebody else pays for gets none of them, which is correct: this screen is the
     billing relationship, and the entity's own settings page is where a non-payer admin
     reads the same state (and is told who to ask).
 
-    That also makes the endpoint above safe by construction. It filters on
-    ``payer_user_id``, so there is no entity id to tamper with and no way to widen the
-    result to somebody else's companies.
+    A company with NO subscriber is the exception, and it has to be. A trial is started
+    by any admin and establishes no payer (``checkout.start_module_trial``), so a company
+    you trialled belongs to nobody's list — it would simply vanish from this screen the
+    moment it was created, and the one place that answers "what am I running?" would stop
+    answering. Those rows are added here, scoped to the viewer's own approved
+    ``MODULE_MANAGE`` memberships, with ``subscriber`` null and ``has_subscriber`` false,
+    and the row offers Activate Subscription. Pressing it is what makes the viewer the
+    payer, after which the ordinary rule above carries it.
+
+    That also keeps the endpoint above safe by construction. One half filters on
+    ``payer_user_id``; the other starts from the viewer's own memberships and re-checks
+    the permission per company. There is no entity id to tamper with in either, and no
+    way to widen the result to somebody else's companies.
 
     Searching, sorting and paging are done in Python rather than SQL. The set is one
     payer's entities — tens, not thousands — and the sort keys ("worst status first",
@@ -445,6 +506,16 @@ def build_payer_subscriptions(
         by_entity.setdefault(str(row.entity_id), {})[
             (row.function_code or "").upper()
         ] = row
+
+    # The companies nobody pays for yet. Added AFTER the payer's own, and never over
+    # them: an entity that reaches both halves is one being billed, and the payer's row
+    # is the true one.
+    unactivated: set[str] = set()
+    for entity_id, module_rows in _unactivated_for_admin(user_id).items():
+        if entity_id in by_entity:
+            continue
+        by_entity[entity_id] = module_rows
+        unactivated.add(entity_id)
 
     entities = list(Entity.objects.filter(id__in=list(by_entity))) if by_entity else []
     countries = _country_names(getattr(e, "country_code", None) for e in entities)
@@ -499,7 +570,12 @@ def build_payer_subscriptions(
                     getattr(entity, "country_code", None) or "",
                     getattr(entity, "country_code", None) or "",
                 ),
-                "subscriber": subscriber,
+                # Null for a company nobody pays for: the viewer administers it, they do
+                # not carry its bill. The row's CTA is Activate Subscription, and this is
+                # the field that says so (``payer`` on the module page does the same job
+                # the other way round).
+                "subscriber": None if str(entity.id) in unactivated else subscriber,
+                "has_subscriber": str(entity.id) not in unactivated,
                 "modules": modules,
                 # A Minty PATH, not a URL. The frontend hands its token back through
                 # ``buildMintyEnterUrl`` to get a session; a bare origin would land the

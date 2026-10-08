@@ -1,4 +1,4 @@
-"""The module settings page: one page model and ten actions per company.
+"""The module settings page: one page model and eleven actions per company.
 
 Company-scoped (``EntityBearerAuth``): the caller must hold a role on the entity, resolved
 from the token's ``entity_id`` or the ``X-Entity-Id`` header (the page reached from the
@@ -41,11 +41,14 @@ from shared_models.models import Entity, User
 
 modules_router = Router(auth=EntityBearerAuth())
 
-#: The ten action names, Flask's spelling. ``POST /api/entities/{id}/modules/{action}`` with
-#: any other word is a 404. ``restart-quote`` also answers GET, as Flask served it
-#: (``?codes=A,B``).
+#: The eleven action names, Flask's spelling. ``POST
+#: /api/entities/{id}/modules/{action}`` with any other word is a 404. ``restart-quote``
+#: also answers GET, as Flask served it (``?codes=A,B``). ``activate-subscription`` is the
+#: one Flask never had: it establishes the company's SUBSCRIBER, because a trial no longer
+#: does.
 ACTIONS = (
     "authorize-billing",
+    "activate-subscription",
     "restart-quote",
     "restart-billing",
     "start-trial",
@@ -152,7 +155,12 @@ def module_page(request, entity_id: str):
     summary and panel, the date on the card at the top (READ OFF THE PANEL rather than
     computed beside it - the two were once two answers to one question), whether the
     viewer may act (admin AND payer, or no payer yet), who pays when it is somebody else,
-    and the lapsed-trial restart screen when there is one."""
+    and the lapsed-trial restart screen when there is one.
+
+    Plus ``has_subscriber``: whether the company has a payer AT ALL. A trial establishes
+    none, so a running trial on false offers Activate Subscription where a confirmed one
+    offers Manage Subscription - and ``payer`` cannot answer it, being null both when nobody
+    pays and when the viewer is the one who does."""
     from billing.services import entity_modules
     from billing.services import store as sub_store
 
@@ -203,6 +211,13 @@ def module_page(request, entity_id: str):
             "panel": subscription_panel,
             "next_payment_date": next_payment_date,
             "can_manage_modules": can_manage_modules,
+            # Whether the company has a SUBSCRIBER at all. ``payer`` cannot answer it: it
+            # is deliberately null both when nobody pays and when the viewer is the one
+            # who does. The cards need the difference, because a running trial with no
+            # subscriber offers "Activate Subscription" where a confirmed one offers
+            # "Manage Subscription", and ``needs_card`` conflates it with "the payer has
+            # no card".
+            "has_subscriber": payer_id is not None,
             "payer": payer,
             "viewer": _viewer(user),
             "consent_takeover": consent_takeover,
@@ -246,6 +261,101 @@ def _authorize_billing(request, entity, user, payload):
         logger.exception("module billing authorization failed for {}", entity.id)
         return error("Could not confirm billing. Please try again.", 500)
     return _respond({"ok": True})
+
+
+def _activate_subscription(request, entity, user, payload):
+    """Confirm a started trial: THE COMPANY GETS A SUBSCRIBER. Body:
+    ``{"account"?, "payment_method"?, "codes"?}``.
+
+    A trial is free and commits nobody, so starting one establishes no payer
+    (``checkout.start_module_trial``). This is the act that does, and it is the only one
+    besides onboarding's ``/billing/authorize``: the company is put on a billing account,
+    consent is recorded, and every module row is stamped with the caller
+    (``store.establish_entity_payer``).
+
+    TWO OUTCOMES, chosen from the company's own state and never from the body - the client
+    cannot ask to be charged:
+
+    * a trial still RUNNING -> payer established, account recorded, consent written, and
+      NOTHING CHARGED. It has paid days left and converts at term end, which is what
+      confirming a running trial means;
+    * a trial already OVER, and ``codes`` naming which modules to buy back -> the same, and
+      then those modules are BOUGHT BACK, because free days nobody paid for cannot be
+      resumed. Priced server-side from the codes ``consent.codes_for_restart`` resolves,
+      through the same ``_restart_state_and_codes`` both restart routes share, so the quote
+      the payer was shown and the charge they get resolve the SET identically.
+
+    NO ``codes`` MEANS NO CHARGE, whatever the company's state. A company can have one
+    module still trialling and another already lapsed, and the button on the running
+    trial's card confirms that trial - it must not quietly buy back the other one. So the
+    charge needs the modules named, and the server still decides whether they may be
+    restarted at all (422 if not). The client can ask WHICH, never WHETHER.
+
+    ``account`` places the company on one of the caller's billing accounts first - the
+    picker's own move, made in THIS request, so a chosen account and the payer it was
+    chosen for can never be left half-written. ``payment_method`` is the card-keyed twin,
+    kept for parity with ``authorize-billing``. With neither, on a company that is on no
+    account: 402 "Choose a billing account for this company." and nothing is recorded.
+
+    402 choose an account / choose a card · 409 nothing to activate, or somebody else got
+    there first · 422 codes that cannot be restarted · 500 otherwise.
+    """
+    from billing.services import billing_accounts, consent, payment_methods
+    from billing.services.checkout import (
+        CheckoutError,
+        activate_entity_billing,
+        confirm_modules_checkout,
+    )
+
+    account_id = str(payload.get("account") or "").strip()
+    pm_id = str(payload.get("payment_method") or "").strip()
+    try:
+        # establish_payer, because a card-free trial has no subscriber yet and this
+        # request is what gives it one. Both halves land in this request.
+        if account_id:
+            billing_accounts.move_company(str(user.id), str(entity.id), account_id)
+        elif pm_id:
+            payment_methods.set_for_entity(
+                str(user.id), str(entity.id), pm_id, establish_payer=True
+            )
+    except payment_methods.PaymentMethodError as exc:
+        return error(exc.message, exc.status)
+    except NotFoundError as exc:
+        return error(str(exc) or "That billing account couldn't be found.", 404)
+
+    # Running trial or lapsed one? Asked of the COMPANY, before anything is written, so
+    # activation cannot change its own answer. The codes gate it: with none named this is
+    # a confirm and only a confirm (see the docstring).
+    requested = _codes(payload)
+    lapsed = bool(requested) and bool(
+        consent.lapsed_trial_for_entity(str(entity.id), str(user.id)).get("mode")
+    )
+
+    try:
+        activate_entity_billing(entity, user)
+    except CheckoutError as exc:
+        return error(exc.message, exc.status)
+    except Exception:
+        logger.exception("activate subscription failed for {}", entity.id)
+        return error("Could not activate the subscription. Please try again.", 500)
+
+    if not lapsed:
+        return _respond({"ok": True, "charged": False})
+
+    # The lapsed half, through the SAME front end the quote uses.
+    _state, codes, refused = _restart_state_and_codes(entity, user, requested)
+    if refused:
+        return refused
+    if not _entity_has_card(entity.id):
+        return error("Choose a card before restarting billing.", 402)
+    try:
+        bought = confirm_modules_checkout(entity, user, requested_codes=codes)
+    except CheckoutError as exc:
+        return error(exc.message, exc.status)
+    except Exception:
+        logger.exception("activate subscription: restart billing failed for {}", entity.id)
+        return error("Could not restart billing. Please try again.", 500)
+    return _respond({"ok": True, "charged": True, "restarted": bought.get("created", codes)})
 
 
 def _restart_state_and_codes(entity, user, requested):
@@ -486,6 +596,7 @@ def _renew(request, entity, user, payload):
 
 HANDLERS = {
     "authorize-billing": _authorize_billing,
+    "activate-subscription": _activate_subscription,
     "restart-quote": _restart_quote,
     "restart-billing": _restart_billing,
     "start-trial": _start_trial,

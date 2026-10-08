@@ -41,6 +41,7 @@ pytestmark = pytest.mark.django_db
 # the two previews, which carried the same guard. There is no unguarded action any more.
 MONEY_ACTIONS = (
     "authorize-billing",
+    "activate-subscription",
     "restart-quote",
     "restart-billing",
     "start-trial",
@@ -107,7 +108,14 @@ def services(monkeypatch):
     """Every service an action calls, replaced by a recorder. ``calls`` lists ``(name, args,
     kwargs)`` in order; ``answers`` sets what a name returns (a callable is called, an
     exception instance is raised)."""
-    from billing.services import checkout, consent, dunning, entity_modules, payment_methods
+    from billing.services import (
+        billing_accounts,
+        checkout,
+        consent,
+        dunning,
+        entity_modules,
+        payment_methods,
+    )
     from billing.services import store as sub_store
 
     calls: list = []
@@ -127,6 +135,7 @@ def services(monkeypatch):
             "start_modules_checkout": {"created": ["PETTY_CASH"]},
             "confirm_modules_checkout": {"created": ["PETTY_CASH"]},
             "authorize_entity_billing": {"ok": True},
+            "activate_entity_billing": {"ok": True, "payer_user_id": "u1"},
             "start_module_trials": ["PETTY_CASH"],
             "preview_subscribe_modules": {"total_formatted": "HK$68.00"},
             "preview_reinstate_modules": {"amount_formatted": "0.00"},
@@ -139,6 +148,10 @@ def services(monkeypatch):
             # No module action may reach these any more; recorded so a regression shows.
             "start_setup": {"client_secret": "seti_secret"},
             "confirm_setup": {"methods": []},
+        },
+        billing_accounts: {
+            # The picker's own move, made in the activation request.
+            "move_company": {"moved": {"from_account": None}},
         },
         consent: {
             "lapsed_trial_for_entity": {"mode": None, "lapsed": []},
@@ -201,7 +214,7 @@ def test_every_action_requires_the_permission_even_for_the_payer(
 
 
 def test_an_entity_with_no_payer_is_open_to_any_admin(client, entity, co_admin, payer_is, services):
-    """Nobody is being billed yet, and starting the first trial is what MAKES the payer.
+    """Nobody is being billed yet, so any admin may start a free trial - it commits nobody.
     Refusing here would leave an entity that no one could ever subscribe."""
     payer_is(None)
 
@@ -209,6 +222,45 @@ def test_an_entity_with_no_payer_is_open_to_any_admin(client, entity, co_admin, 
 
     assert response.status_code == 200
     assert response.json() == {"modules": {"PETTY_CASH": True}}
+
+
+def test_any_admin_may_activate_a_company_nobody_pays_for(client, entity, co_admin, payer_is, services):
+    """ACTIVATION is the act that makes the payer (the user, 2026-10-08), so it has to be open
+    to the same people starting a trial is. The company is placed on the account named, and
+    then billing is confirmed - in this one request, so the two cannot be left disagreeing."""
+    payer_is(None)
+
+    response = _act(client, co_admin, entity, "activate-subscription", {"account": "acc_1"})
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "charged": False}
+    assert "activate_entity_billing" in _names(services)
+
+
+def test_activating_without_codes_never_charges(client, entity, co_admin, payer_is, services):
+    """A company can have one module trialling and another lapsed. Confirming the first must
+    not quietly buy back the second, so the charge needs the modules NAMED - and the server
+    still decides whether they may be restarted at all."""
+    payer_is(None)
+    services["answers"]["lapsed_trial_for_entity"] = {"mode": "takeover", "lapsed": []}
+
+    response = _act(client, co_admin, entity, "activate-subscription", {"account": "acc_1"})
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "charged": False}
+    assert "confirm_modules_checkout" not in _names(services)
+
+
+def test_activating_a_company_somebody_else_pays_for_is_refused(
+    client, user, entity, co_admin, payer_is, services
+):
+    """Once it HAS a subscriber the ordinary rule carries it: only they may act."""
+    payer_is(user.id)
+
+    response = _act(client, co_admin, entity, "activate-subscription", {"account": "acc_1"})
+
+    assert response.status_code == 403
+    assert services["calls"] == []
 
 
 def test_the_page_needs_only_module_view(client, entity, cashier, payer_is):

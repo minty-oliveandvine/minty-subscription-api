@@ -40,10 +40,18 @@ Inside the door the module page applies Flask's two permissions from `core/polic
 verbatim copy of minty-onboarding-api's port of Minty's `services/permission_policy.py`):
 `MODULE_VIEW` (cashier and up) to read the page model, `MODULE_MANAGE` (admin and up) for
 every action — **and** the subscription's own rule, `store.may_manage_subscription` (the
-`@require_subscription_payer` port, step 2): only the payer, or a member with billing consent
-on a company that has no payer yet, may act. A role is not enough to touch somebody else's
-card. Every action carries the payer rule; the one exception, Stripe's return leg
-`checkout-complete`, was deleted with the other hosted-Stripe actions on 2026-10-01.
+`@require_subscription_payer` port, step 2): only the payer, or any admin of a company that has
+no payer yet, may act. A role is not enough to touch somebody else's card. Every action carries
+the payer rule; the one exception, Stripe's return leg `checkout-complete`, was deleted with the
+other hosted-Stripe actions on 2026-10-01.
+
+Since 2026-10-08 "no payer yet" is the ordinary state of a company running a free trial, not a
+brief moment during onboarding: starting a trial is free and establishes no subscriber
+(`payer_user_id` is NULL), so until someone confirms billing EVERY admin may act — including
+`activate-subscription`, the act that establishes the payer. That act is a compare-and-set
+(`store.establish_entity_payer`, `payer_user_id IS NULL` in the WHERE), so two admins racing
+cannot both win: the loser is refused 409 rather than told it worked. Afterwards the ordinary
+rule carries it, and nobody but the payer may act.
 
 ## Refresh
 

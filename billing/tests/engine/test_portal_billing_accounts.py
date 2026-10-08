@@ -821,6 +821,48 @@ def test_a_company_on_no_account_is_placed_and_nothing_else_is_written(app, wall
     assert not SubscriptionInvoice.objects.exists()
 
 
+def test_a_company_with_no_subscriber_at_all_is_placed_too(app, wallet):  # noqa: F811
+    """THE REAL card-free trial, since 2026-10-08: it has no payer either, because starting a
+    trial establishes none. ``_payer_of`` would answer 409 "no subscription to bill yet" and
+    the placement above would be unreachable, so ``move_company`` asks with
+    ``establish_payer=True`` - it only answers when the answer is "nobody", and still 404s the
+    moment somebody else pays.
+
+    It writes the NOMINATION only. The module rows are stamped by the confirm that follows in
+    the same request (``modules._activate_subscription``), which is why nothing here claims the
+    company has a subscriber yet."""
+    from billing.services import billing_accounts, store
+
+    payer, _acme, beta, _moving = _two_accounts(wallet)
+    loose = _entity(None, "Nobody's Co")
+    store.upsert_module_row(loose.id, "PETTY_CASH", phase="trial")
+    assert store.payer_for_entity(loose.id) is None
+
+    result = billing_accounts.move_company(payer.id, loose.id, beta.id)
+
+    assert result["moved"]["from_account"] is None
+    nomination = store.nomination_for_entity(loose.id, payer.id)
+    assert str(nomination.billing_group_id) == str(beta.id)
+    # Still no subscriber: placing is not confirming.
+    assert store.payer_for_entity(loose.id) is None
+
+
+def test_placing_a_company_somebody_else_pays_for_is_still_refused(app, wallet):  # noqa: F811
+    """``establish_payer`` is not a way past the check and cannot become one."""
+    from billing.services import billing_accounts, store
+    from billing.services.payment_methods import PaymentMethodError
+
+    payer, _acme, beta, _moving = _two_accounts(wallet)
+    stranger = _user(None, "stranger@accounts.test")
+    theirs = _entity(None, "Theirs Co")
+    store.upsert_module_row(theirs.id, "PETTY_CASH", stranger.id, phase="active")
+
+    with pytest.raises(PaymentMethodError) as caught:
+        billing_accounts.move_company(payer.id, theirs.id, beta.id)
+
+    assert caught.value.status == 404
+
+
 @pytest.mark.parametrize("target_state", ["in_dunning", "card_gone"])
 def test_a_first_placement_meets_the_same_target_refusals(app, wallet, target_state):  # noqa: F811
     from billing.services import billing_accounts, store

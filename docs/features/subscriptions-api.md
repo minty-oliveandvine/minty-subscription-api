@@ -20,8 +20,9 @@ below record what was true on the date given, and this service is now the only e
   operations): Flask's fifteen, plus `transfer/seen`, the four `billing/accounts` routes and an
   invoice's `breakdown`, `retry` and `pdf`.
 - **A company's module settings page** (`minty-web`, `/entity/{shortid}/{name}/settings/modules`):
-  the two module cards (Petty Cash, Payment Request) with their state, and the ten actions —
-  start a trial, authorise billing, restart, cancel, renew, retry a payment, and the previews. One
+  the two module cards (Petty Cash, Payment Request) with their state, and the eleven actions —
+  start a trial, ACTIVATE THE SUBSCRIPTION (confirm billing, which is what makes the company's
+  subscriber), authorise billing, restart, cancel, renew, retry a payment, and the previews. One
   page model plus one action endpoint. No action hands the browser to a Stripe-hosted page
   (2026-10-01): cards are added only through a billing account, on `/api/me/billing/*`.
 - **The notice** a dashboard shows for a company (past due, or a paid module winding down; no
@@ -45,6 +46,32 @@ a company on NO billing account, with no `payment_method`, is refused 402 "Choos
 account for this company." and records no consent - the screen opens the Billing Accounts
 picker on it. The old backstop `checkout._ensure_nominated`, which put such a company on the
 Stripe customer's DEFAULT card, is deleted (2026-10-01).
+
+**AND IT IS THE ONLY THING THAT MAKES A SUBSCRIBER (the user's, 2026-10-08).** A company's
+payer is established by exactly one act: putting it on a billing account and confirming
+billing. Two doors onto that act, and no others — the wizard's `POST
+/api/onboarding/billing/authorize`, and in-app `POST .../modules/activate-subscription`
+("Activate Subscription"). Both run `store.establish_entity_payer`, one UPDATE with
+`payer_user_id IS NULL` in the WHERE, so two admins pressing at once cannot open two billing
+relationships (the loser gets 409 `SOMEONE_ELSE_ACTIVATED`, never a silent success).
+
+**Starting a trial establishes nothing.** It is free and commits nobody, so
+`entity_module_subscription.payer_user_id` is NULL until billing is confirmed (the column was
+made nullable by Minty's `x2a01_ems_payer_nullable`; `payer_for_entity` answers from any row
+that HAS a payer and never from an unordered `.first()`). While it is NULL any admin holding
+`MODULE_MANAGE` may act — `store.may_manage_subscription` already said so — and the trial
+EXPIRES at term end rather than converting, because there is nobody to charge. Existing
+companies are untouched: every stored row already had a payer.
+
+**One wrinkle, and it is load-bearing: in the wizard the confirm comes FIRST.** The billing
+sheet is step 2 and the module rows are created at step 9, so somebody can have confirmed
+billing before there was anything to stamp. `start_trials_for_enabled_modules` therefore asks
+`store.confirmed_payer_for_entity` — who holds both a nomination for the company AND its consent
+— and lands that stamp once the rows exist. Asked by ENTITY, not by the acting user, so a wizard
+finished by a different member still credits the person who agreed to pay (the old step-2/step-9
+mismatch, closed). Skip the sheet and nothing is stamped, which is the point. Without this a
+company that *did* add a card would hold one nobody could see: every money read resolves the
+payer from those rows, and its trial would expire having been told it would convert.
 - **The daily pass**: trials close, renewals are raised, failed payments retried, access swept,
   trial-ending notices sent. Nobody calls it; the in-process scheduler does.
 
@@ -69,7 +96,7 @@ anything is written or attached). Stored rows are not rewritten.
 
 | Method | Path | Flask origin (`routes/portal.py`) | Answers |
 |---|---|---|---|
-| GET | `/subscriptions` | `my_subscriptions_api` | the payer, their billing anchor/paid-through and **`next_billing` / `next_billing_iso`** (2026-09-25: the end of the anchor period now is in — the anchor is the FIRST charge and never moves, and the landing printed it as the next billing date), a page of companies with module status per company; `q`, `sort`, `direction`, `page`, `per_page`. **Plus `transfer_outcomes`** — how the caller's OWN offers ended (declined / expired / accepted) where they have not been shown yet, the only read of a finished transfer in the engine; `cancelled` is excluded (their own withdrawal, already answered by 07-K). Read advisorily, so a failure leaves it empty rather than taking the page down |
+| GET | `/subscriptions` | `my_subscriptions_api` | the payer, their billing anchor/paid-through and **`next_billing` / `next_billing_iso`** (2026-09-25: the end of the anchor period now is in — the anchor is the FIRST charge and never moves, and the landing printed it as the next billing date), a page of companies with module status per company; `q`, `sort`, `direction`, `page`, `per_page`. **Since 2026-10-08 it also lists the companies NOBODY pays for yet** that the caller is an approved `MODULE_MANAGE` admin of, with `subscriber` null and `has_subscriber` false, and the row offers Activate Subscription in its OPEN state (the user, 2026-10-08: in Confirm Subscription Change's place, never on the closed row): a trial establishes no payer, so a company you just trialled would otherwise vanish from the one screen that answers "what am I running?". Scoped twice - the caller's own memberships bound the query, then the permission is asked per company - so there is still no entity id to tamper with. Read advisorily: a failure there leaves those rows out rather than taking the page down. **Plus `transfer_outcomes`** — how the caller's OWN offers ended (declined / expired / accepted) where they have not been shown yet, the only read of a finished transfer in the engine; `cancelled` is excluded (their own withdrawal, already answered by 07-K). Read advisorily, so a failure leaves it empty rather than taking the page down |
 | GET | `/subscriptions/subscriber-options` | `my_subscriber_options_api` | who a company's bill could move to (admins), each with a quote and inherited trials; blockers; the pending transfer; and `paid_through`, what the COMPANY is paid up until (the screen's footer needs it whether or not there is a candidate to quote) |
 | POST | `/subscriptions/invite-admin` | `my_invite_admin_api` | **forwarded to Flask** `POST /api/onboarding/invite` (the invitation is Flask's), once the address passes the email rule above (422 otherwise) |
 | POST | `/subscriptions/transfer` | `my_transfer_initiate_api` | offer a company's billing to another admin — **any** admin, with a saved card or without: being asked is not being charged, so the card is required at the accept, not here (the offer-time refusal was dropped 2026-09-24) |
@@ -91,7 +118,7 @@ anything is written or attached). Stored rows are not rewritten.
 | GET | `/billing/accounts` | — (**new**) | my billing accounts, oldest first (the first is the one 08-A shows by default): each with `name` (the company it bills under, else me), `billing_company` / `billing_email` raw, **`bill_to_email`** (2026-09-30, what 08-B's "Bill to" prints: `store.account_email` — the billing email, else the business email every company on it shares — else my email; the money emails and the invoice PDF use the same rule), `card` (the one it CHARGES, null when Stripe no longer holds it), `cards` (its shelf, `is_default` = THIS account's card), `address` (the charged card's Stripe billing address — accounts hold none), `companies` (`entity_id`, `entity_name`, `past_due`), `in_dunning`, `past_due`, and **`next_bill`** (2026-09-25, 08-B's "Amount (estimated)": `{amount, amount_minor, currency}` or null - what its next renewal will charge, priced by the renewal runner's own `build_renewal` for the period starting on the next billing date, with the trials that will have converted by then; `portal.next_bill_for_account`); plus the payer, ONE `next_billing` / `next_billing_iso` (every account renews on the payer's anchor), the flat wallet, and `countries` and **`publishable_key`** only with `?countries=1` (08-C, whose address form is Stripe's own `AddressElement`: the registry limits its countries, the key mounts it - null where this environment has no Stripe) |
 | POST | `/billing/accounts/update` | — (**new**) | `{account, billing_company?, billing_email?, address?, cardholder?}` — 08-C. Validated first (company not blank, email shaped and English only, each at most 255 characters; address needs line 1 and a registered country; `cardholder` - the name Stripe's address form asks for with it - at most 255), then the address and cardholder to the charged card at Stripe in ONE `billing_details` write, then the name — Stripe first because it is the write that fails |
 | POST | `/billing/accounts/default-card` | — (**new**) | `{account, payment_method}` — the card the account CHARGES (08-B "Set as default", 08-N): both halves of the pair, and the Stripe customer default untouched |
-| POST | `/billing/accounts/move` | — (**new**) | `{entity, account}` — "Change billing account": the company moves to another of my accounts; nothing is charged and its paid days travel (`store.nominate_group_for_entity`, source `moved`). **Since 2026-09-29 also the FIRST placement** of a company on no account yet (a card-free trial; source `chosen`, `moved.from_account` null): Manage Subscriptions' confirm asks which account bills a change before applying it; no consent is written (the confirm's seam does that), nothing is charged, no days to carry. Refused (409): a PAST-DUE company (its debt, its retries and "Pay now" follow the account it is on), a target in dunning, a target whose card is gone. Answers the accounts plus `moved` (null when it was already there) |
+| POST | `/billing/accounts/move` | — (**new**) | `{entity, account}` — "Change billing account": the company moves to another of my accounts; nothing is charged and its paid days travel (`store.nominate_group_for_entity`, source `moved`). **Since 2026-09-29 also the FIRST placement** of a company on no account yet (a card-free trial; source `chosen`, `moved.from_account` null; asked with `establish_payer=True` since 2026-10-08, because such a company has no payer either - it only answers when the answer is "nobody", and still 404s when somebody else pays): Manage Subscriptions' confirm asks which account bills a change before applying it; no consent is written (the confirm's seam does that), nothing is charged, no days to carry. Refused (409): a PAST-DUE company (its debt, its retries and "Pay now" follow the account it is on), a target in dunning, a target whose card is gone. Answers the accounts plus `moved` (null when it was already there) |
 
 **Live since step 3 slice A (2026-09-21)** — `billing/api/me.py`, each view the port of its Flask
 twin. What the views keep is Flask's shell: `400 {"error": "<field> is required"}` for a missing
@@ -115,11 +142,11 @@ bearer, Flask's non-2xx sentence back as the 422, Flask unreachable as the route
 | Method | Path | Flask origin | Answers |
 |---|---|---|---|
 | GET | `/{entity_id}/modules` | the Jinja page (`templates/entity/partials/module_*.html`) | the page model: cards with state, summary, panel, next payment, `can_manage_modules`, payer, consent-takeover prompt |
-| POST | `/{entity_id}/modules/{action}` | `POST /entity/settings/module/<org_id>/<action>` (`entity/routes/settings.py` 1419–2431) | one of the ten actions below, JSON body per action |
+| POST | `/{entity_id}/modules/{action}` | `POST /entity/settings/module/<org_id>/<action>` (`entity/routes/settings.py` 1419–2431) | one of the eleven actions below, JSON body per action |
 
-Actions (`billing/api/modules.py::ACTIONS`): `authorize-billing`, `restart-quote`,
-`restart-billing`, `start-trial`, `resume-preview`, `subscribe-preview`, `cancel-preview`,
-`retry-payment`, `cancel`, `renew`. Any other word is 404 "Unknown action." — including Flask's
+Actions (`billing/api/modules.py::ACTIONS`): `authorize-billing`, `activate-subscription`,
+`restart-quote`, `restart-billing`, `start-trial`, `resume-preview`, `subscribe-preview`,
+`cancel-preview`, `retry-payment`, `cancel`, `renew`. Any other word is 404 "Unknown action." — including Flask's
 other nine, **deleted 2026-10-01** under the card rule (§1): `checkout`, `confirm-billing`,
 `checkout-complete`, `payment-method`, `manage-billing` (setup-mode Checkout and the Billing
 Portal) and `payment-methods`, `payment-methods/setup-intent`, `payment-methods/confirm`,
@@ -138,6 +165,31 @@ decline; 409 "This module is already being restored. Refresh the page in a momen
 another press's charge is in flight, and 503 "We couldn't reach the payment provider. Nothing
 was charged - please try again shortly." when the processor failed (both 2026-09-30, §6).
 
+**`activate-subscription` (2026-10-08)** — `{account?, payment_method?, codes?}`. The in-app act
+that CONFIRMS a started trial, and the only one besides onboarding's `/billing/authorize` that
+establishes the company's subscriber. It places the company on `account` first (the picker's own
+move, in this request, so a chosen account and the payer it was chosen for can never be left
+half-written), then `checkout.activate_entity_billing`: stamp the payer, require an account,
+record consent — one transaction, so a **402 "Choose a billing account for this company."**
+leaves the company exactly as subscriber-less as it was and the picker's "choose another and
+press again" loop is correct. Then:
+
+- a trial still RUNNING → `{ok: true, charged: false}`. Nothing is charged; it converts at term
+  end, exactly as `authorize-billing` describes;
+- a trial already OVER **and `codes` naming which modules to buy back** → the same, then the
+  restart path (`_restart_state_and_codes` → `confirm_modules_checkout`, the identical
+  code-resolution and pricing `restart-billing` uses) → `{ok: true, charged: true, restarted:
+  […]}`.
+
+**No `codes` means no charge**, whatever the company's state: a company can have one module
+trialling and another lapsed, and the button on the running trial's card must not quietly buy
+back the other. The client may ask WHICH, never WHETHER. Other refusals: **409** "There is no
+subscription to activate for this company." and **409** `SOMEONE_ELSE_ACTIVATED` when two admins
+press at once and this one lost (never a silent success — both would otherwise believe they are
+being charged); **422** for codes that cannot be restarted. Open to any admin while the company
+has no subscriber, and to nobody but the payer once it has (the existing `_gate` payer rule,
+unchanged).
+
 **Live since step 3 slice B (2026-09-21)** — `billing/api/modules.py`. The gate is one function
 every request runs through (`_gate`): the path's company must be the one the token was checked
 against (`X-Entity-Id`, else the claim; a mismatch is 403 "That token is for a different
@@ -154,8 +206,12 @@ dicts key for key — minty-web's `ModuleCard` type — with `period_end` ISO an
 re-shaped to `YYYY-MM-DD` because the client counts days from them; `IsoJSONEncoder` for this
 router, since Flask never served this page as JSON), `summary` and `panel` (opaque to the client
 until its screens read them), `next_payment_date` (read off the panel), `can_manage_modules`
-(admin AND payer, or no payer yet), `payer` (`{user_id, name, email}` when it is somebody
-else, else null), `viewer` (`{name, initials}`), `consent_takeover`. Dates render ISO, the one
+(admin AND payer, or no payer yet), `has_subscriber` (whether the company has a payer AT ALL —
+`payer` cannot answer it, being null both when nobody pays and when the viewer is the one who
+does; the cards need the difference, because a running trial on `false` offers *Activate
+Subscription* where a confirmed one offers *Manage Subscription*), `payer` (`{user_id, name,
+email}` when it is somebody else, else null), `viewer` (`{name, initials}`),
+`consent_takeover`. Dates render ISO, the one
 deliberate difference from Flask left (the Stripe return URLs and `checkout-complete`'s JSON
 answer went with the hosted routes on 2026-10-01).
 
@@ -199,7 +255,7 @@ page down. Stateless: the "show once per session" claim stays Flask's.
 | POST | `/billing/payment-methods/default` | `onboarding_billing_set_default` |
 | GET / POST | `/billing/accounts` | `onboarding_billing_accounts` |
 | POST | `/billing/authorize` | `onboarding_billing_authorize` |
-| POST | `/trials/start` | **new** — `{entity_id} → {trial_end}`; what finalize calls |
+| POST | `/trials/start` | **new** — `{entity_id} → {trial_end}`; what finalize calls. Establishes NO subscriber (2026-10-08) |
 
 Since 2026-10-06 minty-onboarding-api proxies the seven routes above here (not to Flask, whose
 copies are deleted), forwarding the wizard's onboarding token (`core/subscription_client.py`
@@ -216,7 +272,11 @@ The company routes read the company from the query or body and check the caller'
 (`_entity_for_member`: 400 without an id, 403 for a stranger, 404 for no such company — Flask's
 rule and sentences); the four billing-sheet card routes act on the payer and check no company.
 `/billing/authorize` nominates the card it was given BEFORE recording consent, with
-`establish_payer=True` (during the wizard no company has a payer yet). `trials/start` runs
+`establish_payer=True` — **this is the wizard's door onto establishing the SUBSCRIBER**, and
+since 2026-10-08 the only one in the wizard: `trials/start` establishes none, so a person who
+skips the billing sheet finishes onboarding with card-free trials that nobody is liable for and
+that expire rather than convert. They (or any other admin) confirm later with in-app
+*Activate Subscription*. `trials/start` runs
 `checkout.start_trials_for_enabled_modules` (idempotent: modules already holding a trial or a
 subscription are skipped) and reads `trial_end` BACK from the rows (the earliest); a
 `CheckoutError` answers with its status, anything else 502 "This trial could not be started.
@@ -255,7 +315,7 @@ of `Minty/docs/schema/01_schema_rebased.sql`):
 | `billing_account_payment_method` | the account's cards, one default |
 | `entity_billing_group` | which account pays for a company (one payer per company); `source` is how it got there — `capture`, `chosen`, `backfill`, `confirmed`, `transfer`, and `moved` for the portal's "Change billing account" |
 | `entity_billing_consent` | a member's consent to be billed for a company |
-| `entity_module_subscription` | THE subscription: company × module, phase, payer, `app_access_until`, trial/billing dates |
+| `entity_module_subscription` | THE subscription: company × module, phase, payer, `app_access_until`, trial/billing dates. `payer_user_id` is NULL until billing is confirmed — a trial has no subscriber (2026-10-08, Minty's `x2a01_ems_payer_nullable`); read it through `store.payer_for_entity`, which answers from a row that HAS one |
 | `user_stripe_customer` | a person's Stripe customer, billing anchor, currency |
 | `subscription_invoice` / `_line` | invoices raised on an account and each company's share; `idempotency_key` is the double-charge guard. A RE-ISSUED invoice (§6) adds two key forms: the replacement claims `refresh-<dead id>` until it takes the period's key, and the dead row keeps `<key>~<dead id>` (`~`, not `-`: `dunning._names_period` reads `<key>-…` as the same period). A REPLAY (`replay_scenarios`) claims renewals as `<key>-<customer[-12:]>` (`renewals.replay_scope`) and leaves them on the dev DB; the renewal run and dunning resolve the period's key through `renewals.claimed_period_key` (plain first, then the scoped form - two exact lookups), so a replayed period is never raised a second time |
 | `subscription_transfer` | change-of-subscriber offers and their outcome |

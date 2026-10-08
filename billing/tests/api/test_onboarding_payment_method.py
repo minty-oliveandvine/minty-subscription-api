@@ -448,8 +448,42 @@ def test_trials_start_opens_the_trial_and_states_its_end(client, user, entity, c
     assert res.status_code == 200, res.content
     row = EntityModuleSubscription.objects.get(entity_id=str(entity.id), function_code="PETTY_CASH")
     assert row.phase == "trial"
-    assert str(row.payer_user_id) == str(user.id)
+    # FINALIZE ESTABLISHES NO SUBSCRIBER either (the user, 2026-10-08). The wizard's door onto
+    # that is the billing sheet's `/billing/authorize`, which the person may skip; skipping it
+    # leaves a card-free trial nobody is liable for, and it expires rather than converting.
+    assert row.payer_user_id is None
     assert res.json() == {"trial_end": row.trial_end.isoformat()}
+
+
+def test_the_wizards_two_steps_in_order_leave_the_company_with_a_subscriber(
+    client, user, entity, on_account, catalogue
+):
+    """THE WIZARD'S HAPPY PATH, end to end, in the order the person walks it.
+
+    The billing sheet is step 2 and the module rows are created at step 9, so the act that
+    establishes the subscriber is made before there is anything to write it on. The stamp lands
+    at finalize (``store.confirmed_payer_for_entity`` -> ``establish_entity_payer``). Without
+    it a company that DID add a card would hold one nobody could see - every money read
+    resolves the payer from these rows - and its trial would expire at term end having been
+    told it would convert.
+    """
+    from billing.services import store
+
+    _enable(entity, user)
+
+    authorize = post_json(
+        client, "/api/onboarding/billing/authorize", {"entity_id": str(entity.id)}, **bearer(user)
+    )
+    assert authorize.status_code == 200
+    # Nothing to stamp yet: the rows do not exist.
+    assert store.payer_for_entity(str(entity.id)) is None
+
+    started = post_json(
+        client, "/api/onboarding/trials/start", {"entity_id": str(entity.id)}, **bearer(user)
+    )
+
+    assert started.status_code == 200, started.content
+    assert str(store.payer_for_entity(str(entity.id))) == str(user.id)
 
 
 def test_trials_start_is_idempotent(client, user, entity, catalogue):

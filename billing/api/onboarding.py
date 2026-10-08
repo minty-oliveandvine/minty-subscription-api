@@ -275,7 +275,12 @@ def trials_start(request):
     Set screen offers Try again. Idempotent: modules that already hold a trial or a
     subscription are skipped by the starter, and ``trial_end`` is READ BACK from the rows -
     the answer on a revisit as much as on the first call. Null is a legitimate answer (an
-    entity with no enabled module has no trial to state)."""
+    entity with no enabled module has no trial to state).
+
+    IT ESTABLISHES NO SUBSCRIBER (2026-10-08). The trials are card-free and commit nobody; the
+    wizard's door onto the billing relationship is the billing sheet's ``/billing/authorize``,
+    which the person may skip. Skipping it leaves trials nobody is liable for, which expire
+    rather than convert until an admin confirms billing in the app."""
     from billing.services import store as sub_store
     from billing.services.checkout import CheckoutError, start_trials_for_enabled_modules
 

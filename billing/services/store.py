@@ -169,15 +169,82 @@ def module_rows_for_entity(entity_id) -> list[EntityModuleSubscription]:
     return list(EntityModuleSubscription.objects.filter(entity_id=str(entity_id)))
 
 
+def module_rows_without_payer(entity_ids) -> list[EntityModuleSubscription]:
+    """Every module row of these entities that has NO subscriber yet.
+
+    The counterpart to ``module_rows_for_payer``, which filters ``payer_user_id`` by
+    equality and so can never see these rows. A company running a trial nobody has
+    confirmed belongs to no payer's list, yet its admins still have to be able to find
+    it — so Manage Subscriptions asks this, scoped to the entities the viewer is
+    actually a member of.
+    """
+    ids = [str(e) for e in (entity_ids or []) if e]
+    if not ids:
+        return []
+    return list(
+        EntityModuleSubscription.objects.filter(
+            entity_id__in=ids, payer_user_id__isnull=True
+        )
+    )
+
+
 def payer_for_entity(entity_id) -> str | None:
-    """The payer user id for an entity, from any of its mirror rows (None if the entity
-    has no subscription/trial yet). Under one-payer-per-entity these all agree, so the
-    first row suffices — an invariant ``upsert_module_row`` now enforces rather than
-    assumes. This is how ``customer_id_for_entity`` resolves entity -> payer."""
+    """The payer user id for an entity, from any of its mirror rows that HAS one.
+
+    None when the entity has no subscription or trial at all, and equally when its
+    trials have no SUBSCRIBER yet: a trial is started by any admin and commits nobody,
+    so ``payer_user_id`` is NULL until billing is confirmed
+    (``establish_entity_payer``). Under one-payer-per-entity every row that has a payer
+    agrees — an invariant ``upsert_module_row`` enforces rather than assumes — so any
+    one of them answers, but a NULL row answers nothing.
+
+    An unordered ``.first()`` would let a subscriber-less row speak for an entity that
+    HAS a subscriber, and then every money read downstream (``customer_id_for_entity``,
+    ``nomination_for_entity``, ``has_billing_consent``) would answer "nobody" for a
+    company that is being billed. This is how ``customer_id_for_entity`` resolves
+    entity -> payer."""
     if not entity_id:
         return None
-    row = EntityModuleSubscription.objects.filter(entity_id=str(entity_id)).first()
-    return row.payer_user_id if row else None
+    return next(
+        (row.payer_user_id for row in module_rows_for_entity(entity_id) if row.payer_user_id),
+        None,
+    )
+
+
+def confirmed_payer_for_entity(entity_id) -> str | None:
+    """Who has CONFIRMED billing for this company: a payer holding BOTH an account nomination
+    for it and its consent. None when nobody has.
+
+    THIS EXISTS FOR THE WIZARD, where the confirm happens before there is anything to stamp.
+    The billing sheet (``/api/onboarding/billing/authorize``) nominates an account and records
+    consent on step 2, while ``entity_module_subscription`` is still empty for the company -
+    its rows are created at finalize, because the trial clock must start at All Set. So the act
+    that establishes the subscriber has already been made, and the stamp can only land when the
+    rows appear: ``checkout.start_trials_for_enabled_modules`` asks this and stamps whoever
+    answers.
+
+    BOTH halves, deliberately. A nomination alone is a company placed on an account
+    (``billing/accounts/move`` writes no consent); consent alone cannot happen, since
+    authorising refuses 402 without an account. Requiring the pair means this answers exactly
+    the people ``activate_entity_billing`` would have made the payer.
+
+    It asks by ENTITY, not by a candidate user, so a wizard finished by a different member than
+    the one who authorised still stamps the person who actually agreed to pay - the mismatch
+    that used to leave a company holding a card nobody could see.
+    """
+    if not entity_id:
+        return None
+    consented = set(
+        EntityBillingConsent.objects.filter(entity_id=str(entity_id)).values_list(
+            "user_id", flat=True
+        )
+    )
+    if not consented:
+        return None
+    for nomination in EntityBillingGroup.objects.filter(entity_id=str(entity_id)):
+        if nomination.payer_user_id in consented:
+            return str(nomination.payer_user_id)
+    return None
 
 
 def may_manage_subscription(entity_id, user_id) -> bool:
@@ -190,10 +257,14 @@ def may_manage_subscription(entity_id, user_id) -> bool:
     a card belonging to someone who never saw the screen. The write invariant kept the
     BILLING coherent; it did nothing about who was allowed to trigger it.
 
-    Until a payer exists nobody is being billed, so any admin may start the first trial
-    or subscription — that act is precisely what establishes the payer. Entity-level
-    permission (``Permission.MODULE_MANAGE``) still applies on top of this: being the
-    payer is necessary, not sufficient.
+    Until a payer exists nobody is being billed, so any admin may start a free trial or
+    ACTIVATE the subscription — and activation is precisely the act that establishes the
+    payer (``establish_entity_payer``, reached through
+    ``checkout.activate_entity_billing`` or onboarding's ``/billing/authorize``).
+    Starting a trial deliberately does NOT: it costs nothing, so it must not make one
+    admin liable for the company or shut the others out. Entity-level permission
+    (``Permission.MODULE_MANAGE``) still applies on top of this: being the payer is
+    necessary, not sufficient.
     """
     if not entity_id or not user_id:
         return False
@@ -1330,7 +1401,7 @@ def end_group_dunning(group_id, *, status: str = "active") -> None:
 
 
 def upsert_module_row(
-    entity_id, function_code, payer_user_id, **fields
+    entity_id, function_code, payer_user_id=None, **fields
 ) -> EntityModuleSubscription:
     """Create or update the row for one entity+module, keyed on (entity, function_code).
 
@@ -1342,6 +1413,12 @@ def upsert_module_row(
     module to be paid for fixes who pays for the entity, and every later module joins
     that payer rather than opening a second billing relationship. A caller asking for a
     different payer is ignored and logged, never obeyed.
+
+    IT MAY ALSO BE OMITTED, and a row created on an entity with no established payer is
+    written NULL: a trial has no SUBSCRIBER. The payer is established later, by
+    ``establish_entity_payer``, from the one act that creates the billing relationship —
+    confirming billing on a billing account. So this function can JOIN an existing payer
+    and can write none, but it never establishes one and never clears one.
 
     Enforced at this choke point rather than per caller because the payer arrives as
     "the acting user" from two directions — ``checkout.start_module_trial`` and
@@ -1382,23 +1459,35 @@ def upsert_module_row(
             code,
         )
     effective_payer = established or payer_user_id
+    # str(None) is the literal 'None', which is not a uuid and fails fk_ems_user. A row
+    # with no subscriber yet is written NULL; an established payer still wins over a
+    # request for a different one.
+    payer_value = str(effective_payer) if effective_payer else None
 
     if row is None:
         row = EntityModuleSubscription(
             id=_uuid(),
             entity_id=str(entity_id),
             function_code=code,
-            payer_user_id=str(effective_payer),
+            payer_user_id=payer_value,
             phase=fields.pop("phase"),  # required on create
         )
         for key, value in fields.items():
             setattr(row, key, value)
         row.save(force_insert=True)
     else:
-        row.payer_user_id = str(effective_payer)
+        updates = list(fields.keys())
+        # NEVER CLEAR A PAYER HERE. Establishing one is establish_entity_payer's job and
+        # clearing one is nobody's: a row that has a subscriber keeps it, and a row that
+        # has none is only ever stamped by the two acts that may (activation, and
+        # transfer_entity_payer). An ordinary field write must not touch the column —
+        # without this guard a falsy ``effective_payer`` would wipe it.
+        if payer_value and payer_value != (row.payer_user_id or None):
+            row.payer_user_id = payer_value
+            updates.append("payer_user_id")
         for key, value in fields.items():
             setattr(row, key, value)
-        row.save(update_fields=["payer_user_id", *fields.keys()])
+        row.save(update_fields=updates)
     return row
 
 
@@ -1475,6 +1564,57 @@ def transfer_entity_payer(entity_id, new_payer_user_id, *, billed_through=None) 
         moved, entity_id, new_payer_user_id, billed_through,
     )
     return moved
+
+
+def establish_entity_payer(entity_id, payer_user_id) -> str:
+    """Stamp the entity's FIRST subscriber onto every module row that has none.
+
+    A trial starts with no payer at all (``checkout.start_module_trial``), because it
+    costs nothing and must commit nobody. This is the write that creates the billing
+    relationship, and the only one besides ``transfer_entity_payer`` that may touch an
+    established payer's column — and this one cannot: the emptiness is in the WHERE, so
+    a row that already has a subscriber is not matched.
+
+    ONE UPDATE, and that is what makes it safe under concurrency: ``payer_user_id IS
+    NULL`` is a compare-and-set. Two admins pressing Activate on the same company at the
+    same moment both run this; Postgres' row locks serialise them, the second
+    re-evaluates the predicate against the first's committed value and matches zero
+    rows, and the read-back below tells the loser who won. No advisory lock, no
+    ``SELECT … FOR UPDATE``, and no second billing relationship — the state
+    ``upsert_module_row`` exists to prevent and that nothing downstream models.
+
+    One statement over every row of the entity, never a loop, for the same reason
+    ``transfer_entity_payer`` is one: ``payer_for_entity`` answers from whichever row
+    has a payer, so a partly-stamped entity would have a nondeterministic subscriber.
+
+    Returns the entity's payer AFTER the call — the caller's own id when it established
+    one, somebody else's when it lost the race, and the caller's again on an idempotent
+    re-press. Runs inside the caller's ``transaction.atomic()``.
+    """
+    if not entity_id or not payer_user_id:
+        raise ValueError("establish_entity_payer needs an entity and a payer")
+
+    payer = str(payer_user_id)
+    stamped = EntityModuleSubscription.objects.filter(
+        entity_id=str(entity_id), payer_user_id__isnull=True
+    ).update(payer_user_id=payer, updated_at=Now())
+
+    settled = payer_for_entity(entity_id)
+    if settled and str(settled) != payer:
+        # Lost the race. Say so loudly: the caller MUST NOT report success, or two
+        # people walk away each believing they are the one being charged.
+        logger.warning(
+            "store: entity {} was established on payer {} by someone else; {} asked "
+            "and stamped {} row(s), and is not the subscriber",
+            entity_id, settled, payer, stamped,
+        )
+        return str(settled)
+
+    logger.info(
+        "store: entity {} now bills to payer {} ({} row(s) stamped)",
+        entity_id, payer, stamped,
+    )
+    return payer
 
 
 def payer_is_dunning(user_id) -> bool:

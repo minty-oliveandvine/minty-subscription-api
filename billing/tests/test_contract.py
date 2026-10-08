@@ -80,6 +80,11 @@ REMOVED_MODULE_ACTIONS = {
     "payment-methods/default",
 }
 
+#: The one action Flask never had (2026-10-08). A trial establishes no subscriber, so a company
+#: gets one by CONFIRMING billing on a billing account - which is what this does, and the only
+#: in-app way it happens.
+ADDED_MODULE_ACTIONS = {"activate-subscription"}
+
 #: The nine card / billing-account routes of Flask's entity/routes/create.py (757-1247).
 FLASK_ONBOARDING_PATHS = {
     "/payment-method", "/payment-method/setup", "/payment-method/complete",
@@ -104,8 +109,8 @@ def test_the_portal_carries_flasks_fifteen_paths():
 
 
 def test_the_module_page_carries_flasks_actions_less_the_hosted_ones():
-    assert set(ACTIONS) == FLASK_MODULE_ACTIONS - REMOVED_MODULE_ACTIONS
-    assert len(ACTIONS) == 10
+    assert set(ACTIONS) == (FLASK_MODULE_ACTIONS - REMOVED_MODULE_ACTIONS) | ADDED_MODULE_ACTIONS
+    assert len(ACTIONS) == 11
     assert not set(ACTIONS) & REMOVED_MODULE_ACTIONS
 
 

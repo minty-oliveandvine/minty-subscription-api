@@ -512,8 +512,18 @@ class EntityBillingConsent(models.Model):
 
 class EntityModuleSubscription(UpdatedAtMixin):
     """The subscription itself: one row per company per module, one payer across them
-    all. ``phase`` is the life of it (``subscription_phase``); ``app_access_until`` is
-    what the access sweep projects into ``entity_function_map.is_enabled``."""
+    all ONCE ONE EXISTS. ``phase`` is the life of it (``subscription_phase``);
+    ``app_access_until`` is what the access sweep projects into
+    ``entity_function_map.is_enabled``.
+
+    ``payer_user_id`` is NULL until the company has a SUBSCRIBER. A free trial is
+    started by any admin and commits nobody; the subscriber is established by one act
+    only - putting the company on a billing account and confirming billing
+    (``checkout.activate_entity_billing``, or onboarding's ``/billing/authorize``) -
+    which stamps every module row of the entity in one UPDATE
+    (``store.establish_entity_payer``). Read it through ``store.payer_for_entity``,
+    never off an arbitrary row: a subscriber-less row must not speak for an entity
+    that has a subscriber."""
 
     id = MintyUUIDField(primary_key=True, default=new_id)
     entity = models.ForeignKey(
@@ -521,7 +531,12 @@ class EntityModuleSubscription(UpdatedAtMixin):
     )
     function_code = PgEnumField("module_code", choices=ModuleCode.choices)
     payer_user = models.ForeignKey(
-        User, on_delete=models.CASCADE, db_column="payer_user_id", related_name="paid_subscriptions"
+        User,
+        on_delete=models.CASCADE,
+        db_column="payer_user_id",
+        related_name="paid_subscriptions",
+        null=True,
+        blank=True,
     )
     phase = PgEnumField("subscription_phase", choices=SubscriptionPhase.choices)
     app_access_until = models.DateTimeField(null=True, blank=True)

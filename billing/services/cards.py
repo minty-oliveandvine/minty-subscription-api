@@ -721,8 +721,13 @@ def _billing_consent_or_assume(entity_id, sub_store) -> bool:
         # After a handover the previous payer's consent is history and says nothing
         # about whether this one has agreed, so a card-but-no-consent entity would
         # otherwise stop showing the nudge and let its trial lapse unexplained.
-        has_billing_consent = sub_store.has_billing_consent(
-            entity_id, sub_store.payer_for_entity(entity_id)
+        #
+        # No payer at all means no consent, and says so WITHOUT asking: a company whose
+        # trial has no subscriber yet would otherwise fire store.has_billing_consent's
+        # "asked without naming a payer" warning on every render of its settings page.
+        payer_id = sub_store.payer_for_entity(entity_id)
+        has_billing_consent = bool(payer_id) and sub_store.has_billing_consent(
+            entity_id, payer_id
         )
     except Exception:
         # Best-effort: never fail the page over the nudge. Assume consent so we do not

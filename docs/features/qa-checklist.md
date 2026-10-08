@@ -53,8 +53,12 @@ Stripe card.
       line 1 + a registered country, `cardholder` ≤ 255 — every check runs BEFORE the Stripe
       write; the Stripe `billing_details` write (address + cardholder in one call) happens before
       the name is saved locally.
-- [ ] `billing/accounts/move` (including first placement of a card-free company) is refused 409
-      for: a past-due company, a target account in dunning, a target with no card.
+- [ ] `billing/accounts/move` (including first placement of a card-free company, which since
+      2026-10-08 has no payer either) is refused 409 for: a past-due company, a target account
+      in dunning, a target with no card — and 404 for a company somebody else pays for.
+- [ ] Confirming billing is the ONLY thing that makes a subscriber: there is no other route,
+      action or job that writes `entity_module_subscription.payer_user_id` from nothing
+      (`store.establish_entity_payer` and `transfer_entity_payer` are the only writers).
 - [ ] Non-ASCII email (Korean, accents) on `me`/`onboarding` `payment-methods/confirm`,
       `billing/accounts/update`, and `subscriptions/invite-admin` → 422 "Email can only contain
       English letters, numbers and symbols." — checked before anything else, before Flask is
@@ -155,6 +159,37 @@ Stripe card.
       already holds a trial or subscription is not duplicated on a repeat finalize.
 - [ ] Success shape is exactly what finalize expects (`trial_end` read back from the rows, the
       earliest when more than one module started).
+
+## A trial has no subscriber (2026-10-08)
+
+- [ ] After a trial starts — from the wizard's finalize OR from `start-trial` — every
+      `entity_module_subscription` row of the company has `payer_user_id IS NULL`. Whoever
+      pressed the button is NOT the payer.
+- [ ] While it is NULL, a SECOND admin can act on the subscription (no 403), and the module page
+      shows them the buttons. Once it is set, only the payer can.
+- [ ] `activate-subscription` with an `account`: one `entity_billing_group` row for the company,
+      an `entity_billing_consent` row, EVERY module row stamped with the caller — and no invoice
+      and no Stripe charge (`{charged: false}`).
+- [ ] The same with no account chosen and the company on none: 402 "Choose a billing account for
+      this company.", and afterwards `payer_user_id` is STILL NULL and no consent row exists —
+      the stamp rolled back, so the picker can be answered again.
+- [ ] A second admin activating a company that was just activated: 409, and the payer is
+      unchanged. Neither of them is told they succeeded.
+- [ ] A company with one module trialling and another lapsed: Activate on the trial charges
+      nothing (no `codes` sent). The lapsed module is bought back only when its code is named.
+- [ ] A trial nobody activates EXPIRES at `trial_end` — access revoked, no invoice — and the
+      trial-ending mail is skipped with `reason: "no_subscriber"` rather than sent to nobody.
+- [ ] Manage Subscriptions lists the company while it has no subscriber, with Activate
+      Subscription on the row; a cashier on the same company does not see it at all.
+- [ ] Companies that already had a payer before this shipped are untouched: same payer, same
+      list, same conversion at trial end.
+- [ ] **The wizard's happy path**: complete step 2's billing sheet, then finish. After finalize
+      every module row IS stamped with the person who confirmed (the stamp lands late, because
+      the rows did not exist on step 2), and the trial converts at term end as before. Skip the
+      sheet and the rows stay NULL.
+- [ ] Have one member confirm on step 2 and a DIFFERENT member finish the wizard: the stamp goes
+      to the one who confirmed, not the one who finished. (Keying it on the acting user was the
+      old step-2/step-9 mismatch, which left a company holding a card nobody could see.)
 
 ## The daily scheduler jobs
 

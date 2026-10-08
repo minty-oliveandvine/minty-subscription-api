@@ -103,7 +103,7 @@ def _setup(monkeypatch, *, existing_row=None, now=None, anchor=None, paid=True):
         monkeypatch.setattr(clock_mod, "now", lambda: now)
 
     calls = {"writes": [], "access": [], "anchors": [], "charged": [],
-             "paid_through": []}
+             "paid_through": [], "established": []}
     cycle = {"anchor": anchor}
 
     monkeypatch.setattr(f"{_CATALOG}.plan_for_module", lambda code: _plan(code))
@@ -135,14 +135,24 @@ def _setup(monkeypatch, *, existing_row=None, now=None, anchor=None, paid=True):
     # No earlier attempt at a conversion on record (``_resolve_prior_conversions``).
     monkeypatch.setattr(store, "invoices_with_key_prefix", lambda payer, prefix: [])
 
+    # ``payer_user_id`` is OPTIONAL on the real function, and omitting it is how a trial
+    # says it has no subscriber - so the stub must default it too, or every trial write
+    # fails with a missing argument instead of writing None.
     monkeypatch.setattr(
         store, "upsert_module_row",
-        lambda e, code, payer, **f: calls["writes"].append((e, code, payer, f))
+        lambda e, code, payer=None, **f: calls["writes"].append((e, code, payer, f))
         or _Row(code, payer, e),
     )
     # Read back when aligning the entity's other active rows; no siblings unless a test
     # says otherwise.
     monkeypatch.setattr(store, "module_rows_for_entity", lambda eid: [])
+    # Nobody confirmed billing in the wizard unless a test says so: ``start_trials_for_enabled
+    # _modules`` asks this to land the stamp step 2 earned, and these tests have no database.
+    monkeypatch.setattr(store, "confirmed_payer_for_entity", lambda eid: None)
+    monkeypatch.setattr(
+        store, "establish_entity_payer",
+        lambda eid, payer: calls["established"].append((eid, payer)) or str(payer),
+    )
 
     def _start_cycle(uid, at, currency):
         calls["anchors"].append((uid, at, currency))
@@ -174,6 +184,22 @@ def _setup(monkeypatch, *, existing_row=None, now=None, anchor=None, paid=True):
 # --- starting a trial ---------------------------------------------------------
 
 
+def test_trial_start_establishes_no_subscriber(monkeypatch):
+    """A trial is free and commits nobody, so it writes NO payer (the user, 2026-10-08).
+
+    THE RULE, pinned: whoever starts a trial does not become liable for the company and does
+    not shut the other admins out of its subscription. The subscriber is established by one
+    act only - confirming billing on a billing account - so the column stays NULL until then.
+    """
+    checkout, calls = _setup(monkeypatch, now=_NOW)
+
+    checkout.start_module_trials(_FakeEntity(), _FakeUser(), ["PAYMENT_REQUEST"])
+
+    entity_id, code, payer, _fields = calls["writes"][0]
+    assert (entity_id, code) == ("e1", "PAYMENT_REQUEST")
+    assert payer is None, "the acting user must NOT become the payer"
+
+
 def test_trial_start_bills_nothing_and_writes_the_row(monkeypatch):
     checkout, calls = _setup(monkeypatch, now=_NOW)
     from billing.services import changes
@@ -187,7 +213,8 @@ def test_trial_start_bills_nothing_and_writes_the_row(monkeypatch):
 
     assert result == ["PAYMENT_REQUEST"]
     entity_id, code, payer, fields = calls["writes"][0]
-    assert (entity_id, code, payer) == ("e1", "PAYMENT_REQUEST", "u1")  # acting user is the payer
+    # No payer: see test_trial_start_establishes_no_subscriber above.
+    assert (entity_id, code, payer) == ("e1", "PAYMENT_REQUEST", None)
     assert fields["phase"] == "trial"
     # No ``trial_used`` / ``trial_start``: both were written here and read nowhere, and
     # the schema no longer carries them. "Has this module been trialled" is answered by

@@ -615,9 +615,10 @@ def my_billing_account_default_card(request):
 @me_router.post("/billing/accounts/move", summary="Move a company to another billing account")
 def my_billing_account_move(request):
     """Body: ``{entity, account}``. Nothing is charged; the company's paid days travel with
-    it. A company on no account yet (a card-free trial) is placed on this one, with no
-    consent written. Answers the accounts plus ``moved`` (null when it was already there;
-    ``from_account`` null for a first placement)."""
+    it. A company on no account yet (a card-free trial, which since 2026-10-08 has no
+    SUBSCRIBER either) is placed on this one, with no consent written and still no payer -
+    placing is not confirming. Answers the accounts plus ``moved`` (null when it was already
+    there; ``from_account`` null for a first placement)."""
     from billing.services import billing_accounts
 
     payload = body(request)

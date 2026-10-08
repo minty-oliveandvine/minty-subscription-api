@@ -855,21 +855,26 @@ def _payer_of(user_id, entity_id, *, establish_payer: bool = False) -> str:
     for it. Being an admin of the company is not enough — an admin who does not pay could
     otherwise move someone else's billing onto a card of their choosing.
 
-    ``establish_payer`` IS FOR ONBOARDING, WHERE THERE IS NOTHING TO BE THE PAYER OF YET.
+    ``establish_payer`` IS FOR THE ACT THAT CREATES THE RELATIONSHIP, WHEREVER IT IS MADE.
 
-    The payer is read from ``entity_module_subscription``, and during the wizard that table
-    is empty for the entity: the rows are created at finalize, by
-    ``checkout.start_trials_for_enabled_modules``, because the trial clock must start at
-    All Set rather than at module selection. So the billing sheet asks to nominate a card
-    for a company that has no payer — and the request is precisely the one that
+    The payer is read from ``entity_module_subscription``, and that column is NULL until
+    the company has a subscriber: a free trial is started by any admin and commits nobody
+    (``checkout.start_module_trial``), and in the wizard the rows do not exist at all
+    until finalize. Either way the caller is asking to nominate a card, or place a
+    company, for one that has no payer — and that request is precisely the one that
     ESTABLISHES the payer, which is the same reasoning ``store.may_manage_subscription``
     already sets out: until a payer exists nobody is being billed, so the first act may
     create the relationship.
 
     IT IS NOT A WAY ROUND THE CHECK, and it cannot become one — it only applies when the
     answer is "nobody". A company that already HAS a payer still 404s for anyone else, flag
-    or no flag. The caller passing it is expected to have proved membership itself; the
-    onboarding route does, via ``_entity_for_member``, and it is the only caller.
+    or no flag. The caller passing it is expected to have proved membership itself: the
+    onboarding route does via ``_entity_for_member``, the module actions via ``_gate``.
+
+    It does not itself WRITE the payer, either — it only answers who it will be. The write
+    is ``store.establish_entity_payer``, made in the same request by
+    ``checkout.activate_entity_billing``, so a nomination keyed on this answer and the
+    module rows cannot be left disagreeing.
     """
     if not entity_id:
         raise PaymentMethodError("No company was given.", status=400)
@@ -927,11 +932,14 @@ def set_for_entity(user_id, entity_id, payment_method_id: str,
     _owned(user_id, payment_method_id)
     payer = _payer_of(user_id, entity_id, establish_payer=establish_payer)
     # THE NOMINATION NAMES THE PAYER IT WAS WRITTEN FOR, and when it established one that
-    # is the caller. Finalize later creates the module rows for whoever completes the
-    # wizard; the two agree because onboarding is one person from start to finish. Were
-    # they ever different, ``card_for_entity`` — which resolves the payer from the module
-    # rows — would not find this nomination, and the entity would hold a card nobody
-    # could see. That is the assumption, stated so it is not rediscovered.
+    # is the caller. The module rows carry no payer until billing is CONFIRMED, and the
+    # same caller's confirm is what stamps them (``store.establish_entity_payer``, via
+    # ``checkout.activate_entity_billing`` or onboarding's ``/billing/authorize``), so
+    # the two agree. Were they ever different, ``card_for_entity`` — which resolves the
+    # payer from the module rows — would not find this nomination, and the entity would
+    # hold a card nobody could see. A nomination made and then abandoned without a
+    # confirm is exactly that: harmless, because nothing bills a subscriber-less company,
+    # but it is why the route does both halves in ONE request.
     sub_store.nominate_card_for_entity(entity_id, payer, payment_method_id, source)
     # Threaded, or the read on the way out raises the 409 the write just stepped past.
     return for_entity(user_id, entity_id, establish_payer=establish_payer)

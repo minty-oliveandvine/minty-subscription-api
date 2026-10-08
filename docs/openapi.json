@@ -29,7 +29,7 @@
   "paths": {
     "/api/entities/{entity_id}/modules": {
       "get": {
-        "description": "What Flask's ``entity_settings_module`` handed its template, as JSON: the cards, the\nsummary and panel, the date on the card at the top (READ OFF THE PANEL rather than\ncomputed beside it - the two were once two answers to one question), whether the\nviewer may act (admin AND payer, or no payer yet), who pays when it is somebody else,\nand the lapsed-trial restart screen when there is one.",
+        "description": "What Flask's ``entity_settings_module`` handed its template, as JSON: the cards, the\nsummary and panel, the date on the card at the top (READ OFF THE PANEL rather than\ncomputed beside it - the two were once two answers to one question), whether the\nviewer may act (admin AND payer, or no payer yet), who pays when it is somebody else,\nand the lapsed-trial restart screen when there is one.\n\nPlus ``has_subscriber``: whether the company has a payer AT ALL. A trial establishes\nnone, so a running trial on false offers Activate Subscription where a confirmed one\noffers Manage Subscription - and ``payer`` cannot answer it, being null both when nobody\npays and when the viewer is the one who does.",
         "operationId": "billing_api_modules_module_page",
         "parameters": [
           {
@@ -230,7 +230,7 @@
     },
     "/api/me/billing/accounts/move": {
       "post": {
-        "description": "Body: ``{entity, account}``. Nothing is charged; the company's paid days travel with\nit. A company on no account yet (a card-free trial) is placed on this one, with no\nconsent written. Answers the accounts plus ``moved`` (null when it was already there;\n``from_account`` null for a first placement).",
+        "description": "Body: ``{entity, account}``. Nothing is charged; the company's paid days travel with\nit. A company on no account yet (a card-free trial, which since 2026-10-08 has no\nSUBSCRIBER either) is placed on this one, with no consent written and still no payer -\nplacing is not confirming. Answers the accounts plus ``moved`` (null when it was already\nthere; ``from_account`` null for a first placement).",
         "operationId": "billing_api_me_my_billing_account_move",
         "parameters": [],
         "responses": {
@@ -892,7 +892,7 @@
     },
     "/api/onboarding/trials/start": {
       "post": {
-        "description": "Body ``{entity_id}`` -> ``{\"trial_end\": iso8601 | null}``.\n\nWhat Flask's ``onboarding_finalize`` did inline (``start_trials_for_enabled_modules``,\nbest-effort, then the earliest ``trial_end`` read back) - except that here a failure\nFAILS: onboarding-backend's finalize has already flipped the company live when it calls\nthis, and a trial that silently did not start is a company with modules on and nothing\nbehind them. A ``CheckoutError`` answers with its own status, anything else 502; the All\nSet screen offers Try again. Idempotent: modules that already hold a trial or a\nsubscription are skipped by the starter, and ``trial_end`` is READ BACK from the rows -\nthe answer on a revisit as much as on the first call. Null is a legitimate answer (an\nentity with no enabled module has no trial to state).",
+        "description": "Body ``{entity_id}`` -> ``{\"trial_end\": iso8601 | null}``.\n\nWhat Flask's ``onboarding_finalize`` did inline (``start_trials_for_enabled_modules``,\nbest-effort, then the earliest ``trial_end`` read back) - except that here a failure\nFAILS: onboarding-backend's finalize has already flipped the company live when it calls\nthis, and a trial that silently did not start is a company with modules on and nothing\nbehind them. A ``CheckoutError`` answers with its own status, anything else 502; the All\nSet screen offers Try again. Idempotent: modules that already hold a trial or a\nsubscription are skipped by the starter, and ``trial_end`` is READ BACK from the rows -\nthe answer on a revisit as much as on the first call. Null is a legitimate answer (an\nentity with no enabled module has no trial to state).\n\nIT ESTABLISHES NO SUBSCRIBER (2026-10-08). The trials are card-free and commit nobody; the\nwizard's door onto the billing relationship is the billing sheet's ``/billing/authorize``,\nwhich the person may skip. Skipping it leaves trials nobody is liable for, which expire\nrather than convert until an admin confirms billing in the app.",
         "operationId": "billing_api_onboarding_trials_start",
         "parameters": [],
         "responses": {

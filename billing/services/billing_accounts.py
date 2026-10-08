@@ -252,6 +252,16 @@ def move_company(user_id, entity_id, account_id) -> dict:
     company with no consent is billed nothing, and its trial still only ends. There are no
     paid days to carry.
 
+    THAT COMPANY ALSO HAS NO SUBSCRIBER, since a trial establishes none, so the placement
+    is made with ``establish_payer=True`` — without it ``_payer_of`` would refuse 409 and
+    the promise above would be unreachable. It widens who may place a company, to any
+    member of one that nobody pays for, which is the same rule the rest of the
+    subscription obeys (``store.may_manage_subscription``); ``_payer_of`` still answers
+    404 the moment somebody else IS the payer, so this is never a way past one that
+    exists. Placing nominates for a payer the module rows do not yet carry: the caller
+    confirms billing in the SAME request (``modules._activate_subscription``), which
+    stamps that same user, so the two cannot be left disagreeing.
+
     Refused, each in words that name the fix:
 
     * a PAST-DUE company. Its debt is an invoice the account it is on raised: the retries,
@@ -263,7 +273,7 @@ def move_company(user_id, entity_id, account_id) -> dict:
       that has stopped, and it would join a collection already failing;
     * a target account whose card Stripe no longer holds — its next bill could not be paid.
     """
-    payer = _payer_of(user_id, entity_id)
+    payer = _payer_of(user_id, entity_id, establish_payer=True)
     target = account_of(user_id, account_id)
     nomination = sub_store.nomination_for_entity(entity_id, payer)
     company = _company_name(entity_id)

@@ -17,6 +17,8 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 
+from django.db import transaction
+
 from billing.services import access, catalog, clock, money, policy, store
 from billing.services._log import logger
 from billing.services.catalog import PlanView
@@ -68,8 +70,16 @@ TRIAL_PERIOD_DAYS = 30
 HTTP_OK = 200
 
 #: The refusal when billing is authorised for a company on no billing account. The web
-#: matches it to open the Billing Accounts picker.
+#: matches it to open the Billing Accounts picker. ``moduleChanges.ts`` classifies the
+#: 402 with /choose a (card|billing account)/i, so the wording is load-bearing.
 NO_ACCOUNT_FOR_COMPANY = "Choose a billing account for this company."
+
+#: The refusal when two admins activate one company at the same moment and this caller
+#: lost. Never a silent success: both would walk away believing they are being charged.
+SOMEONE_ELSE_ACTIVATED = (
+    "Someone else just activated this company's subscription. "
+    "Reload to see who pays for it."
+)
 
 
 class CheckoutError(Exception):
@@ -505,6 +515,48 @@ def authorize_entity_billing(entity, user) -> dict:
     return {"ok": True}
 
 
+def activate_entity_billing(entity, user) -> dict:
+    """Confirm a started trial: the company gets a SUBSCRIBER, an account and consent.
+
+    The in-app twin of onboarding's ``/billing/authorize``, and the only other act that
+    establishes a payer. A trial starts with none (``start_module_trial``), so this is
+    the moment the billing relationship is created — and all three parts of it land
+    together or not at all. A payer stamped without consent would convert a trial nobody
+    authorised; consent written against no payer would authorise nothing.
+
+    CHARGES NOTHING. A running trial has paid time left and converts at term end,
+    exactly as ``authorize_entity_billing`` describes. A trial already OVER is a
+    PURCHASE and goes through ``confirm_modules_checkout`` instead — the route decides
+    which, from ``consent.lapsed_trial_for_entity``, and never from the request body.
+
+    THE COMPANY MUST ALREADY BE ON A BILLING ACCOUNT, as above: the caller puts it there
+    first (the picker's move, or ``payment_method`` on the route) and with none this
+    refuses 402 with nothing written. The account check has to come AFTER the payer is
+    stamped, because a nomination is keyed ``(entity, payer)`` and cannot be read before
+    a payer exists — so the whole act is one transaction, and the 402 rolls the stamp
+    back. That is what makes the picker's "choose an account and press again" loop
+    correct: a refusal leaves the company exactly as subscriber-less as it was.
+    """
+    user_id = str(getattr(user, "id", None) or "")
+    if not user_id:
+        raise CheckoutError("Sign in again to activate this subscription.", status=401)
+    if not store.module_rows_for_entity(entity.id):
+        raise CheckoutError(
+            "There is no subscription to activate for this company.", status=409
+        )
+
+    with transaction.atomic():
+        payer = store.establish_entity_payer(entity.id, user_id)
+        if str(payer) != user_id:
+            raise CheckoutError(SOMEONE_ELSE_ACTIVATED, status=409)
+        if store.billing_group_for_entity(entity.id, payer) is None:
+            raise CheckoutError(NO_ACCOUNT_FOR_COMPANY, status=402)
+        store.record_billing_consent(entity.id, payer, "confirmed")
+
+    logger.info("checkout: entity {} activated; subscriber is {}", entity.id, payer)
+    return {"ok": True, "payer_user_id": payer}
+
+
 def confirm_modules_checkout(
     entity,
     user,
@@ -691,8 +743,21 @@ def start_module_trial(entity, user, plan: PlanView):
     the trial ENDS (see ``convert_or_expire_due_trials``), so a trial needs neither a
     customer nor a card — whether one exists by then decides convert vs expire.
 
-    The acting ``user`` becomes the module's payer. Returns the trial row, or None if
-    the module already has a trial or a subscription (the trial is once per module).
+    THE TRIAL HAS NO SUBSCRIBER. It is free, it needs no card and no billing account,
+    and the acting ``user`` is only who pressed the button — not who pays. Whoever
+    starts a trial does not become liable for the company and does not shut the other
+    admins out of its subscription: a payer is established by exactly one act, putting
+    the company on a billing account and confirming billing
+    (``activate_entity_billing``, or onboarding's ``/billing/authorize``). Until then
+    ``store.payer_for_entity`` answers None and any admin holding
+    ``Permission.MODULE_MANAGE`` may act (``store.may_manage_subscription``).
+
+    A trial nobody activates therefore EXPIRES at term end rather than converting —
+    ``_convert_due_trials`` has no payer to charge, which is the honest outcome and
+    already how a cardless trial ended.
+
+    Returns the trial row, or None if the module already has a trial or a subscription
+    (the trial is once per module).
     """
     code = plan.function_code.upper()
     if store.module_row(entity.id, code) is not None:
@@ -703,12 +768,17 @@ def start_module_trial(entity, user, plan: PlanView):
     row = store.upsert_module_row(
         entity.id,
         code,
-        getattr(user, "id", None),
         phase=PHASE_TRIAL,
         trial_end=trial_end,
         app_access_until=trial_end,
     )
     _set_module_access(entity.id, code, True)
+    # The row no longer records who started it, so the log is the only place that act
+    # survives.
+    logger.info(
+        "checkout: trial of {} opened for entity {} by user {} (no subscriber yet)",
+        code, entity.id, getattr(user, "id", None),
+    )
     return row
 
 
@@ -918,7 +988,16 @@ def notify_trials_ending(days_before: int = 7, limit: int | None = None) -> dict
     names = _entity_names_for_notice(set(by_entity))
     for entity_id, rows in by_entity.items():
         try:
-            payer = rows[0].payer_user_id
+            # ANY row that has a subscriber answers; a NULL one answers nothing. An
+            # unordered rows[0] would let a subscriber-less row speak for an entity
+            # that has one, and the notice would then be keyed on, and addressed to,
+            # nobody.
+            payer = next((r.payer_user_id for r in rows if r.payer_user_id), None)
+            if not payer:
+                # A trial nobody has agreed to pay for has nobody to tell. It expires
+                # at term end (``_convert_due_trials``); reported, never swallowed.
+                skipped.append({"entity_id": entity_id, "reason": "no_subscriber"})
+                continue
             codes = sorted(row.function_code.upper() for row in rows)
             amount, currency = _trial_line_price(entity_id, codes)
             context = {
@@ -1054,7 +1133,21 @@ def _convert_due_trials(entity_id, rows) -> tuple[list, list]:
     if not candidates:
         return [], doomed
 
-    payer_user_id = candidates[0].payer_user_id
+    # ANY row that has a subscriber answers; a NULL one answers nothing. An unordered
+    # candidates[0] would let a subscriber-less row speak for an entity that HAS a
+    # subscriber, and expire a trial whose sibling is perfectly billable.
+    payer_user_id = next((row.payer_user_id for row in candidates if row.payer_user_id), None)
+    if not payer_user_id:
+        # A trial nobody activated. There is nobody to charge, so it ends — the honest
+        # outcome, and the same one a cardless trial has always had. Logged because this
+        # job runs unattended and a silent return is how access disappears with nobody
+        # told.
+        logger.info(
+            "trial: entity {} has no subscriber; expiring {} rather than charging",
+            entity_id,
+            ",".join(sorted(row.function_code for row in candidates)),
+        )
+        return [], rows
     # Resolved, not read locally. "No customer" ends this trial and revokes access, and
     # this job runs unattended — a payer whose mapping row went missing would lose a
     # module their card would have paid for, with nobody in the loop to notice.
@@ -1856,19 +1949,26 @@ def _bill_reinstatement_in_house(entity, user, code: str, row) -> None:
     from billing.services import changes
     from billing.services.billing import period_containing
 
-    payer_user_id = row.payer_user_id or getattr(user, "id", None)
+    # The ROW's payer, and the actor only as a fallback for a row that predates one. A
+    # row with no subscriber must NOT fall through to the actor: that would bill whoever
+    # pressed the button for a company that has not confirmed billing at all. It is
+    # unreachable in practice — a reinstatable row is a cancelled PAID row, which has a
+    # payer by definition — so it joins the condition below rather than raising.
+    payer_user_id = row.payer_user_id or None
     # Resolved, not read locally: "no customer" here reinstates the module WITHOUT
     # charging, so a missing mapping row is money quietly not collected.
-    customer_id = _resolve_customer_id(payer_user_id)
-    anchor, _currency = store.billing_cycle_for_user(payer_user_id)
+    customer_id = _resolve_customer_id(payer_user_id) if payer_user_id else None
+    anchor, _currency = (
+        store.billing_cycle_for_user(payer_user_id) if payer_user_id else (None, None)
+    )
     covered_to = row.app_access_until
-    if not customer_id or anchor is None or covered_to is None:
+    if not payer_user_id or not customer_id or anchor is None or covered_to is None:
         # Nothing to prorate against. Better to reinstate than to strand the customer
         # over a missing date, but say so — this is money that was not collected.
         logger.error(
-            "reinstate: cannot price the uncovered period for {} {} (customer={} "
-            "anchor={} covered_to={}); reinstating WITHOUT charging",
-            entity.id, code, customer_id, anchor, covered_to,
+            "reinstate: cannot price the uncovered period for {} {} (payer={} "
+            "customer={} anchor={} covered_to={}); reinstating WITHOUT charging",
+            entity.id, code, payer_user_id, customer_id, anchor, covered_to,
         )
         return
 
@@ -3128,6 +3228,19 @@ def start_trials_for_enabled_modules(entity, user) -> list:
     matters when the trial ends (convert vs expire). Modules that already have a trial
     or a subscription are skipped rather than raising, since this runs over whatever the
     wizard enabled.
+
+    IT ESTABLISHES NO SUBSCRIBER OF ITS OWN. A trial commits nobody, so finishing the wizard
+    does not make the finisher the payer.
+
+    BUT IT LANDS A STAMP THE WIZARD ALREADY EARNED. The billing sheet on step 2 nominates an
+    account and records consent while this table is still empty for the company — the act that
+    establishes the subscriber, made before there was anything to write it on. So if somebody
+    confirmed billing back there, their stamp goes on now that the rows exist
+    (``store.confirmed_payer_for_entity`` answers who, by entity rather than by the acting user,
+    so a wizard finished by a different member still credits the person who agreed to pay).
+    Without this a company that DID add a card would hold one nobody could see: every money read
+    resolves the payer from these rows, so the trial would expire at term end having been told
+    it would convert. Skip the sheet and nothing is stamped, which is the whole point.
     """
     # Lazy import: the entity module service pulls in the full model graph.
     from billing.services.entity_modules import get_enabled_modules_for_entities
@@ -3144,4 +3257,13 @@ def start_trials_for_enabled_modules(entity, user) -> list:
         row = start_module_trial(entity, user, plan)
         if row is not None:
             created.append(row)
+
+    if created:
+        confirmed = store.confirmed_payer_for_entity(entity.id)
+        if confirmed:
+            store.establish_entity_payer(entity.id, confirmed)
+            logger.info(
+                "checkout: entity {} was confirmed in the wizard; subscriber is {}",
+                entity.id, confirmed,
+            )
     return created
