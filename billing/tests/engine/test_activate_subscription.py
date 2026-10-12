@@ -353,7 +353,7 @@ def test_activating_a_company_with_no_subscription_is_refused(shop):
     owner, entity = shop
     _account_with_a_card(owner, entity)
 
-    from billing.services import checkout, store
+    from billing.services import checkout
 
     with pytest.raises(checkout.CheckoutError) as exc:
         checkout.activate_entity_billing(entity, _db_user(owner.id))

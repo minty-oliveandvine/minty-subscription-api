@@ -417,10 +417,9 @@ def _unactivated_for_admin(user_id) -> dict[str, dict]:
     payer's own companies still render. The list losing a row is worth less than the page
     going down, and it is logged.
     """
+    from billing.services import store as sub_store
     from core.policy import Permission, has_permission
     from shared_models.models import UserEntity
-
-    from billing.services import store as sub_store
 
     try:
         member_of = list(
