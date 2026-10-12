@@ -809,6 +809,7 @@ def _resolve_payer(email: str, payer_id: str | None) -> str:
     So an address the database already knows has to name its id out loud.
     """
     from django.db.models import Q
+
     from shared_models.models import User
 
     if payer_id:
@@ -1564,7 +1565,7 @@ def _entities(run: dict) -> dict:
 def setup(run: dict) -> None:
     from billing.services import store
     from billing.services.stripe_client import get_stripe
-    from shared_models.models import Entity, User, UserEntity
+    from shared_models.models import CurrencyInfo, Entity, User, UserEntity
 
     origin = _origin(run, _end_of_run())
 
@@ -1635,13 +1636,18 @@ def setup(run: dict) -> None:
         ):
             print(f"attached card {_set_card(run, CARD_GOOD)}")
 
+        # A company has a currency (Payment Request refuses a bill without one); HK's is HKD.
+        hkd_id = CurrencyInfo.objects.filter(currency_code="HKD").values_list("id", flat=True).first()
+        if hkd_id is None:
+            raise SystemExit("currency_info has no HKD row: load the reference data first")
         made = 0
         for original, _script in run["scenarios"]:
             name = _clone_name(run, original)
             if Entity.objects.filter(name=name).exists():
                 continue
             Entity.objects.create(
-                id=str(uuid.uuid4()), name=name, country_code="HK", status="disconnected",
+                id=str(uuid.uuid4()), name=name, country_code="HK", currency_id=hkd_id,
+                status="disconnected",
             )
             made += 1
 
