@@ -29,6 +29,9 @@ def test_no_application_string_carries_the_schema_name():
     hits = []
     for path in sorted(ROOT.rglob("*.py")):
         rel = path.relative_to(ROOT).as_posix()
+        # Minty/ is the harness checkout CI puts beside the code (its env.py names the default).
+        if rel.startswith("Minty/"):
+            continue
         if rel in ALLOWED or any(s in rel for s in SKIP) or ".venv" in rel or "node_modules" in rel:
             continue
         source = path.read_text(encoding="utf-8-sig")
