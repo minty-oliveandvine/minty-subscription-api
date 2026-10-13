@@ -104,7 +104,8 @@ unset = console backend; `config/smtpurl.py`), `MAIL_FROM`, `SUBSCRIPTION_EMAIL`
 `ONBOARDING_EMAIL` (optional, default `MAIL_FROM`), `STRIPE_SECRET_KEY`,
 `STRIPE_PUBLISHABLE_KEY`, `PETTY_CASH_URL`, `PETTY_CASH_PUBLIC_URL` (optional, default
 `PETTY_CASH_URL`), `MINTY_WEB_URL`, `PAYMENT_REQUEST_WEB_URL`, `CORS_ALLOWED_ORIGINS` (optional,
-default those three origins), `SUBSCRIPTION_SCHEDULER_*`, `LOG_LEVEL` (optional).
+default those three origins), `PREVIEW_ORIGIN_REGEX` (optional, see `docs/features/authentication.md`),
+`SUBSCRIPTION_SCHEDULER_*`, `LOG_LEVEL` (optional).
 
 ## Test it
 

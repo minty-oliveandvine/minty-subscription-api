@@ -73,6 +73,19 @@ def test_urls_and_senders_come_from_the_canonical_names(monkeypatch):
     assert mod.DATABASES["default"]["NAME"] == "minty"
 
 
+
+def test_preview_origins_are_off_unless_set(monkeypatch):
+    monkeypatch.delenv("PREVIEW_ORIGIN_REGEX", raising=False)
+    assert _load_settings(monkeypatch, {"APP_ENV": "development"}).CORS_ALLOWED_ORIGIN_REGEXES == []
+    regex = r"^https://pr-[a-z0-9-]+-(?:my|payment-request)\.dailyminty\.com$"
+    mod = _load_settings(monkeypatch, {"APP_ENV": "production", "SECRET_KEY": "x" * 64, "PREVIEW_ORIGIN_REGEX": regex})
+    assert mod.CORS_ALLOWED_ORIGIN_REGEXES == [regex]
+
+
+def test_a_loose_preview_regex_refuses_to_boot(monkeypatch):
+    with pytest.raises(ImproperlyConfigured, match="PREVIEW_ORIGIN_REGEX"):
+        _load_settings(monkeypatch, {"APP_ENV": "development", "PREVIEW_ORIGIN_REGEX": ".*"})
+
 @pytest.fixture(autouse=True)
 def _restore_settings_module():
     yield

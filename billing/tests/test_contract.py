@@ -172,3 +172,26 @@ def test_the_cors_preflight_succeeds(client):
     assert res.status_code == 200
     assert res["Access-Control-Allow-Origin"] == origin
     assert "x-entity-id" in res["Access-Control-Allow-Headers"].lower()
+
+
+PREVIEW = r"^https://pr-[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?-(?:my|payment-request)\.dailyminty\.com$"
+
+
+@pytest.mark.parametrize(
+    ("origin", "allowed"),
+    [
+        ("https://pr-feat-x-my.dailyminty.com", True),
+        ("https://pr-feat-x-payment-request.dailyminty.com", True),
+        ("https://pr-feat-x-onboarding.dailyminty.com", False),
+        ("https://pr-feat-x-my.dailyminty.com.evil.com", False),
+    ],
+)
+def test_a_preview_set_origin_passes_the_preflight_only_when_the_regex_allows_it(client, settings, origin, allowed):
+    settings.CORS_ALLOWED_ORIGIN_REGEXES = [PREVIEW]
+    res = client.options(
+        "/api/me/subscriptions",
+        HTTP_ORIGIN=origin,
+        HTTP_ACCESS_CONTROL_REQUEST_METHOD="GET",
+        HTTP_ACCESS_CONTROL_REQUEST_HEADERS="authorization,x-entity-id",
+    )
+    assert (res.get("Access-Control-Allow-Origin") == origin) is allowed

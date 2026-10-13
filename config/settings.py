@@ -5,6 +5,7 @@ from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
 from config.dburl import database_url, parse_database_url
+from config.preview_origin import preview_origin_regexes
 from config.smtpurl import parse_smtp_url
 
 load_dotenv()
@@ -127,6 +128,8 @@ CORS_ALLOWED_ORIGINS = [
     ).split(",")
     if origin.strip()
 ]
+# A branch's preview set (config/preview_origin.py); unset = off.
+CORS_ALLOWED_ORIGIN_REGEXES = preview_origin_regexes(os.environ.get("PREVIEW_ORIGIN_REGEX"))
 CORS_ALLOW_HEADERS = [
     "authorization",
     "content-type",
