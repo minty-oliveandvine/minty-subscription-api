@@ -59,6 +59,7 @@ def test_urls_and_senders_come_from_the_canonical_names(monkeypatch):
             "PETTY_CASH_URL": "http://minty:8010/",
             "MINTY_WEB_URL": "https://hub.example/",
             "PAYMENT_REQUEST_WEB_URL": "https://pay.example",
+            "PETTY_CASH_WEB_URL": "https://pettycash.example/",
             "MAIL_FROM": "noreply@minty.example",
             "SMTP_URL": "smtps://u:p@smtp.example",
             "DATABASE_URL": "postgres://u@db/minty?schema=pettycash_alt",
@@ -66,7 +67,12 @@ def test_urls_and_senders_come_from_the_canonical_names(monkeypatch):
     )
     assert mod.PETTY_CASH_URL == "http://minty:8010"
     assert mod.PETTY_CASH_PUBLIC_URL == "http://minty:8010"
-    assert mod.CORS_ALLOWED_ORIGINS == ["https://hub.example", "https://pay.example", "http://minty:8010"]
+    assert mod.CORS_ALLOWED_ORIGINS == [
+        "https://hub.example",
+        "https://pay.example",
+        "https://pettycash.example",
+        "http://minty:8010",
+    ]
     assert mod.DEFAULT_FROM_EMAIL == mod.SUBSCRIPTION_EMAIL == mod.ONBOARDING_EMAIL == "noreply@minty.example"
     assert (mod.EMAIL_HOST, mod.EMAIL_PORT, mod.EMAIL_USE_SSL) == ("smtp.example", 465, True)
     assert mod.DB_SCHEMA == "pettycash_alt"

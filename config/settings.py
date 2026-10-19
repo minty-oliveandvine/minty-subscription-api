@@ -105,10 +105,11 @@ PETTY_CASH_PUBLIC_URL = (os.environ.get("PETTY_CASH_PUBLIC_URL") or PETTY_CASH_U
 FLASK_PROXY_TIMEOUT = 20
 
 # ---------------------------------------------------------------------------
-# CORS - three browser apps call this API: minty-web (the payer portal and the module
+# CORS - four browser apps call this API: minty-web (the payer portal and the module
 # settings page), and - since the sidebar with My Profile was copied into them on
 # 2026-09-30 - minty-payment-request-web and Flask's own pages, whose My Profile shows the
-# Subscriptions Overview from ``/api/me/subscriptions``. Flask (``PETTY_CASH_PUBLIC_URL``, the
+# Subscriptions Overview from ``/api/me/subscriptions``; and minty-petty-cash-web, whose
+# launch page shows the subscription notice (2026-10-19). Flask (``PETTY_CASH_PUBLIC_URL``, the
 # address a person's browser reaches it at) and minty-onboarding-api also call it server-side,
 # which needs no CORS.
 #
@@ -120,11 +121,13 @@ MINTY_WEB_URL = (os.environ.get("MINTY_WEB_URL") or "http://localhost:3000").rst
 PAYMENT_REQUEST_WEB_URL = (
     os.environ.get("PAYMENT_REQUEST_WEB_URL") or "http://localhost:3020"
 ).rstrip("/")
+# minty-petty-cash-web: its launch page reads the subscription notice (2026-10-19).
+PETTY_CASH_WEB_URL = (os.environ.get("PETTY_CASH_WEB_URL") or "http://localhost:3010").rstrip("/")
 CORS_ALLOWED_ORIGINS = [
     origin.strip().rstrip("/")
     for origin in (
         os.environ.get("CORS_ALLOWED_ORIGINS")
-        or f"{MINTY_WEB_URL},{PAYMENT_REQUEST_WEB_URL},{PETTY_CASH_PUBLIC_URL}"
+        or f"{MINTY_WEB_URL},{PAYMENT_REQUEST_WEB_URL},{PETTY_CASH_WEB_URL},{PETTY_CASH_PUBLIC_URL}"
     ).split(",")
     if origin.strip()
 ]

@@ -86,7 +86,8 @@ and lands back on the page — silent while the Flask session is alive, a login 
 
 `SECRET_KEY` (shared), `APP_ENV` (`DEBUG` is `APP_ENV == "development"`), `?schema=` on
 `DATABASE_URL` → `DB_SCHEMA` (the `search_path`), `MINTY_WEB_URL` / `PAYMENT_REQUEST_WEB_URL` /
-`PETTY_CASH_PUBLIC_URL` / `CORS_ALLOWED_ORIGINS` (the browser origins), `PETTY_CASH_URL` (the one
+`PETTY_CASH_WEB_URL` (minty-petty-cash-web's launch page reads the subscription notice, since
+2026-10-19) / `PETTY_CASH_PUBLIC_URL` / `CORS_ALLOWED_ORIGINS` (the browser origins), `PETTY_CASH_URL` (the one
 forwarded call) and `PETTY_CASH_PUBLIC_URL` (the re-handoff links).
 `PREVIEW_ORIGIN_REGEX` (optional, unset = off) adds a branch's preview-set origins (`https://pr-<slug>-<app>.dailyminty.com`) to CORS; minty-infra sets it on one environment only, and a value that could let in any other origin refuses to boot (`config/preview_origin.py`, the same file in all three APIs).
 

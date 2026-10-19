@@ -63,7 +63,8 @@ PETTY_CASH_PUBLIC_URL = PETTY_CASH_URL
 # or failed depending on whose .env ran it.
 MINTY_WEB_URL = "http://localhost:3000"
 PAYMENT_REQUEST_WEB_URL = "http://localhost:3020"
-CORS_ALLOWED_ORIGINS = [MINTY_WEB_URL, PAYMENT_REQUEST_WEB_URL, PETTY_CASH_PUBLIC_URL]
+PETTY_CASH_WEB_URL = "http://localhost:3010"
+CORS_ALLOWED_ORIGINS = [MINTY_WEB_URL, PAYMENT_REQUEST_WEB_URL, PETTY_CASH_WEB_URL, PETTY_CASH_PUBLIC_URL]
 STRIPE_SECRET_KEY = ""  # empty, like Flask's test env: an unstubbed get_stripe() raises
 STRIPE_PUBLISHABLE_KEY = ""
 EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"

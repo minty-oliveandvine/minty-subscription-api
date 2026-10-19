@@ -178,3 +178,17 @@ def test_notice_api_answers_the_cors_preflight(client, entity):
     assert "authorization" in res["Access-Control-Allow-Headers"].lower()
     # Without Vary a cached response for one origin could be replayed to another.
     assert "origin" in res["Vary"].lower()
+
+
+def test_the_petty_cash_app_may_read_the_notice_too(client, entity):
+    # minty-petty-cash-web's launch page shows this notice (2026-10-19), so its origin is let in.
+    origin = settings.PETTY_CASH_WEB_URL
+    res = client.options(
+        _url(entity),
+        HTTP_ORIGIN=origin,
+        HTTP_ACCESS_CONTROL_REQUEST_METHOD="GET",
+        HTTP_ACCESS_CONTROL_REQUEST_HEADERS="authorization",
+    )
+
+    assert res.status_code == 200
+    assert res["Access-Control-Allow-Origin"] == origin
