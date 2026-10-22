@@ -154,10 +154,10 @@ def build_invoice_document(user_id, invoice_id) -> InvoiceDocument | None:
 
 
 def _signed(minor: int, symbol: str, places: int) -> str:
-    """Trimmed like 09-A ("HK$5,872", "HK$90.32"), the sign IN FRONT ("-HK$180.65").
-    ``money.format_trimmed`` alone writes a credit as "HK$-180.65"."""
+    """Like 09-A ("HKD 5,872.00", "HKD 90.32"), the sign IN FRONT ("-HKD 180.65").
+    ``money.format_major`` alone writes a credit as "HKD -180.65"."""
     major = Decimal(abs(int(minor))) / (Decimal(10) ** places)
-    text = money.format_trimmed(symbol, major, places)
+    text = money.format_major(symbol, major, places)
     return f"-{text}" if minor < 0 else text
 
 

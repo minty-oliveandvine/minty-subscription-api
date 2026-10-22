@@ -187,7 +187,7 @@ def build_subscription_panel(cards: list[dict], summary: dict | None, anchor_dis
     places = money.decimal_places(currency_code)
 
     def fmt(amount) -> str:
-        return money.format_trimmed(symbol, amount, places)
+        return money.format_price(symbol, amount, places)
 
     # One name for the bundle everywhere it is spoken about: the priced line, its note,
     # the cancellation notices below, and the decision modal.

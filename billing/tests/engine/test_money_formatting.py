@@ -177,22 +177,20 @@ def test_the_default_stays_two_places_so_existing_callers_are_unaffected():
     assert "400.00" in join_memo("E", "P", 40000, PERIOD, dt(2027, 2, 1))
 
 
-# --- the symbol, and how it joins the amount --------------------------------------
+# --- the label, and how it joins the amount ----------------------------------------
 #
 # The second half of the same split. ``entity.services.modules`` and the payer portal
-# each resolved the symbol themselves and each applied the code-vs-glyph spacing from
-# its own copy — and the two lookups had already drifted: only one upper-cased the code
-# before querying, and only one survived a database error.
+# each resolved the label themselves and each applied the spacing from its own copy. One
+# rule now (owner, 2026-10-21): the ISO code, a space, the currency's places - never the
+# glyph ``currency_info`` records ("HK$"), never a trimmed whole amount.
 
 
-def test_symbol_comes_from_currency_info(app, currencies):
+def test_the_label_is_the_code_even_where_a_glyph_is_recorded(app, currencies):
     with app.app_context():
-        assert money.symbol("HKD") == "HK$"
+        assert money.symbol("HKD") == "HKD"
 
 
-def test_symbol_falls_back_to_the_code_when_none_is_recorded(app, currencies):
-    """``currency_info`` records no symbol for plenty of currencies, which is why the
-    Invoices column has to be able to print "JPY 280" rather than nothing."""
+def test_the_label_is_the_code_for_any_currency_and_empty_for_none(app, currencies):
     with app.app_context():
         assert money.symbol("JPY") == "JPY"
         assert money.symbol("ZZZ") == "ZZZ"
@@ -200,28 +198,44 @@ def test_symbol_falls_back_to_the_code_when_none_is_recorded(app, currencies):
         assert money.symbol("") == ""
 
 
-def test_symbol_upper_cases_the_code_before_looking_it_up(app, currencies):
-    """The drift this closes: ``modules._currency_symbol`` queried the code verbatim, so
-    a lower-cased one missed the row and rendered "hkd" where a glyph existed."""
+def test_the_label_is_trimmed_and_upper_cased(app, currencies):
     with app.app_context():
-        assert money.symbol("hkd") == "HK$"
-        assert money.symbol(" hkd ") == "HK$"
+        assert money.symbol("hkd") == "HKD"
+        assert money.symbol(" hkd ") == "HKD"
 
 
-def test_a_code_is_spaced_off_the_amount_and_a_glyph_is_not(app, currencies):
-    """The one-line rule both surfaces used to hold privately.
-
-    "HKD400" scans as a single token rather than a currency and an amount; "HK$ 400" is
-    not how a glyph is written. Both halves matter, so both are pinned.
-    """
-    assert money.join("HKD", "400.00") == "HKD 400.00"
-    assert money.join("HK$", "400.00") == "HK$400.00"
+def test_the_code_is_spaced_off_the_amount_and_no_code_leaves_it_alone(app, currencies):
+    """"HKD400" scans as a single token rather than a currency and an amount."""
+    assert money.join("HKD", "400.00") == "HKD\u00a0400.00"
     assert money.join("", "400.00") == "400.00"
 
 
 def test_format_with_symbol_uses_the_currencys_own_places(app, currencies):
-    """Symbol, spacing and precision together — what the payer portal prints."""
+    """Code, spacing and precision together - what the payer portal prints."""
     with app.app_context():
-        assert money.format_with_symbol(40000, "HKD") == "HK$400.00"
-        assert money.format_with_symbol(280, "JPY") == "JPY 280"
-        assert money.format_with_symbol(400000, "KWD") == "KWD 400.000"
+        assert money.format_with_symbol(40000, "HKD") == "HKD\u00a0400.00"
+        assert money.format_with_symbol(280, "JPY") == "JPY\u00a0280"
+        assert money.format_with_symbol(400000, "KWD") == "KWD\u00a0400.000"
+
+
+def test_format_major_always_shows_the_places(app, currencies):
+    """The cards, the panel and the invoice document: "HKD 400.00", once "HK$400"."""
+    assert money.format_major("HKD", Decimal("400"), 2) == "HKD\u00a0400.00"
+    assert money.format_major("HKD", Decimal("400.5"), 2) == "HKD\u00a0400.50"
+    assert money.format_major("HKD", Decimal("1234567.89"), 2) == "HKD\u00a01,234,567.89"
+    assert money.format_major("JPY", Decimal("1200"), 0) == "JPY\u00a01,200"
+    assert money.format_major("KWD", Decimal("1.5"), 3) == "KWD\u00a01.500"
+    assert money.format_major("", Decimal("5"), 2) == "5.00"
+
+
+def test_format_price_drops_only_a_trailing_zero_cents(app, currencies):
+    """A price on a screen (the panel, the cards): "HKD 400", but "HKD 400.50" keeps its
+    cents (owner, 2026-10-21). Invoices keep the places - :func:`format_major`."""
+    assert money.format_price("HKD", Decimal("400"), 2) == "HKD\u00a0400"
+    assert money.format_price("HKD", Decimal("400.00"), 2) == "HKD\u00a0400"
+    assert money.format_price("HKD", Decimal("400.5"), 2) == "HKD\u00a0400.50"
+    assert money.format_price("HKD", Decimal("1500"), 2) == "HKD\u00a01,500"
+    assert money.format_price("JPY", Decimal("1200"), 0) == "JPY\u00a01,200"
+    assert money.format_price("KWD", Decimal("1.5"), 3) == "KWD\u00a01.500"
+    assert money.format_price("", Decimal("5"), 2) == "5"
+
