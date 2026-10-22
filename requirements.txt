@@ -8,8 +8,9 @@ python-dotenv>=1.0,<2.0
 gunicorn>=23.0,<24.0
 requests>=2.28,<3.0
 # The one log line every Minty backend writes (minty_shared.logctx). An immutable tag: a change
-# is a new tag, bumped in all five backends.
-minty-shared @ git+https://github.com/minty-oliveandvine/minty-shared-py@v0.1
+# is a new tag, bumped in all five backends. The tag's archive, not git+: the slim Docker images
+# have no git.
+minty-shared @ https://github.com/minty-oliveandvine/minty-shared-py/archive/refs/tags/v0.1.tar.gz
 Jinja2>=3.1,<4.0
 # The single Stripe writer (billing/services/stripe_client.py). Pinned to what Minty runs
 # (Minty/requirements.txt) so the port behaves identically; bump both together.
