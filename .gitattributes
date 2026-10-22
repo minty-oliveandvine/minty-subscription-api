@@ -1,0 +1,23 @@
+# Every text file is LF, in the repository AND in the working tree, whatever core.autocrlf says
+# (the .editorconfig files say end_of_line = lf). Same rule as minty-shared-ts.
+* text=auto eol=lf
+
+# Windows-only scripts keep CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binaries, named so no text heuristic ever touches them.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.zip binary
+*.docx binary
+*.xlsx binary
