@@ -12,6 +12,9 @@ What is pinned (the user's decisions, 2026-09-29):
   refused, loudly; an invoice that is no document (never sent, a draft, void) is refused.
 """
 
+# Amounts: owner 2026-10-21 - the ISO code, a space, always the currency's places ("HKD 400.00"),
+# never a symbol from currency_info and never a trimmed whole amount (was "HK$400").
+
 from __future__ import annotations
 
 import logging
@@ -34,7 +37,8 @@ UPGRADED = datetime(2026, 9, 1, 12, tzinfo=UTC)
 
 
 def _hkd():
-    """HKD printing as the frame does ("HK$"), seeded before ``_payer`` seeds it as "$"."""
+    """HKD with a glyph recorded ("HK$"), seeded before ``_payer`` seeds it as "$" - the
+    document must still print the code."""
     seed_currency("HKD", symbol="HK$")
     seed_country()
 
@@ -103,22 +107,22 @@ def test_a_renewal_prints_09a_plan_lines_with_their_companies_under_each(app, mo
 
     # 09-A's order and words; each plan's figure is its companies' sum.
     assert _lines_of(doc) == [
-        ("Petty cash module only", "HK$650.32", [
-            ("Company E Limited", "HK$280"),
-            ("Company F Limited (access after cancellation)", "HK$90.32"),
-            ("Company G Limited", "HK$280"),
+        ("Petty cash module only", "HKD\u00a0650.32", [
+            ("Company E Limited", "HKD\u00a0280.00"),
+            ("Company F Limited (access after cancellation)", "HKD\u00a090.32"),
+            ("Company G Limited", "HKD\u00a0280.00"),
         ]),
-        ("Payment request module only", "HK$280", [("Aetheria Capital Limited", "HK$280")]),
-        ("SuperMinty", "HK$400", [("Nexora Health Limited", "HK$400")]),
+        ("Payment request module only", "HKD\u00a0280.00", [("Aetheria Capital Limited", "HKD\u00a0280.00")]),
+        ("SuperMinty", "HKD\u00a0400.00", [("Nexora Health Limited", "HKD\u00a0400.00")]),
     ]
-    assert (doc.total, doc.total_minor) == ("HK$1,330.32", 133032)
-    assert doc.amount_header == "Amount (HK$)"
+    assert (doc.total, doc.total_minor) == ("HKD\u00a01,330.32", 133032)
+    assert doc.amount_header == "Amount (HKD)"
     assert (doc.reference, doc.filename) == ("in_breakdown_1", "Inv-in_breakdown_1.pdf")
 
 
 def test_a_credit_sits_under_its_own_plan_with_the_sign_in_front(app, monkeypatch):
     """An upgrade: the old plan's unused days credited, the new one charged. Each stays under
-    its own plan, and a credit reads "-HK$180.65", never "HK$-180.65"."""
+    its own plan, and a credit reads "-HKD\u00a0180.65", never "HKD\u00a0-180.65"."""
     _hkd()
     payer = _payer()
     account = _account(payer)
@@ -134,11 +138,11 @@ def test_a_credit_sits_under_its_own_plan_with_the_sign_in_front(app, monkeypatc
     doc = _document(payer, invoice)
 
     assert _lines_of(doc) == [
-        ("Petty cash module only", "-HK$180.65",
-         [("Company E Limited (unused time)", "-HK$180.65")]),
-        ("SuperMinty", "HK$258.06", [("Company E Limited", "HK$258.06")]),
+        ("Petty cash module only", "-HKD\u00a0180.65",
+         [("Company E Limited (unused time)", "-HKD\u00a0180.65")]),
+        ("SuperMinty", "HKD\u00a0258.06", [("Company E Limited", "HKD\u00a0258.06")]),
     ]
-    assert doc.total == "HK$77.41"
+    assert doc.total == "HKD\u00a077.41"
 
 
 def test_a_zero_line_is_on_no_invoice_anyone_saw(app, monkeypatch):
@@ -153,7 +157,7 @@ def test_a_zero_line_is_on_no_invoice_anyone_saw(app, monkeypatch):
     )
 
     assert _lines_of(_document(payer, invoice)) == [
-        ("Petty cash module only", "HK$280", [("Acme Ltd", "HK$280")]),
+        ("Petty cash module only", "HKD\u00a0280.00", [("Acme Ltd", "HKD\u00a0280.00")]),
     ]
 
 

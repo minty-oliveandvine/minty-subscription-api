@@ -8,10 +8,10 @@ two-decimal currency — so the split went unnoticed. On a zero-decimal currency
 module card would read 280 while the memo explaining that very charge read 2.80, and
 the dialog asking the customer to authorise it read 2.80 as well.
 
-The SYMBOL half was split the same way and is now here too. ``entity.services.modules``
-looked the code up without upper-casing it and let a database error escape; the payer
-portal upper-cased and fell back. Both then applied the same code-vs-glyph spacing rule
-from their own copy of it. One currency renders one way now, wherever it is printed.
+The LABEL half was split the same way and is now here too. Every amount is written with
+the ISO code, never a symbol (owner, 2026-10-21): "HKD 1,234.50" - the code, a space, the
+currency's own places - on every card, panel, portal row and invoice, as the apps write it
+(``@minty/shared/money``). ``currency_info.symbol`` ("HK$") is no longer read for display.
 
 Deliberately NOT in ``billing.py``. That module is pure arithmetic — no ORM, no clock,
 no Stripe — which is what makes the money rules testable without a database. So it takes
@@ -82,43 +82,25 @@ def decimal_places(currency_code: str | None) -> int:
 
 
 def symbol(currency_code: str | None) -> str:
-    """The display symbol for a currency, from ``currency_info``.
+    """The label in front of an amount: the currency's ISO code, upper-cased ("HKD").
 
-    Falls back to the upper-cased CODE ("HKD") when no symbol is recorded, and to "" when
-    there is no currency at all. Never raises and never leaves a poisoned session behind:
-    a symbol lookup must not be the thing that costs the page its amount.
-
-    The code is upper-cased before the lookup. One of the two callers this replaces did
-    not, so a lowercase code missed the row and rendered the bare code even where a
-    symbol existed.
+    "" when there is no currency at all. Never a symbol from ``currency_info`` - every amount
+    is written with its code (owner, 2026-10-21) - so the name stays only because the API's
+    ``currency_symbol`` / ``currency`` fields carry it.
     """
     if not currency_code:
         return ""
-    code = str(currency_code).strip().upper()
-
-    # Imported here for the same reason as in ``decimal_places``.
-    from shared_models.models import CurrencyInfo
-
-    try:
-        row = CurrencyInfo.objects.filter(currency_code=code).first()
-        if row is not None and row.symbol:
-            return row.symbol
-    except Exception:  # noqa: BLE001 - a missing symbol must not cost the amount
-        logger.exception("money: could not read a symbol for {}; using the code", code)
-        # (Flask rolled the SQLAlchemy session back here; under Django's autocommit a
-        # failed read poisons nothing.)
-    return code
+    return str(currency_code).strip().upper()
 
 
 def join(currency_symbol: str, text: str) -> str:
-    """Put a symbol in front of an already-formatted amount, spaced correctly.
+    """Put the code in front of an already-formatted amount: "HKD 400.00".
 
-    A CODE is spaced off the number, a GLYPH is not: "HKD 400", but "HK$400". Without
-    this the panel read "HKD400", which scans as one token rather than a currency and an
-    amount. The same rule the onboarding app's ``money()`` applies.
+    Always one NON-BREAKING space (owner, 2026-10-21), so a line never splits the code from its
+    amount - "HKD400" scans as one token rather than a currency and an amount. With
+    no code the amount stands alone (never a "$").
     """
-    space = " " if currency_symbol[-1:].isalpha() else ""
-    return f"{currency_symbol}{space}{text}"
+    return f"{currency_symbol}\u00a0{text}" if currency_symbol else text
 
 
 def to_major(amount_minor, currency_code: str | None) -> Decimal:
@@ -140,23 +122,16 @@ def format_minor(amount_minor, currency_code: str | None) -> str:
 
 
 def format_with_symbol(amount_minor, currency_code: str | None) -> str:
-    """Minor units as "HK$400.00" / "HKD 400.00" -- symbol resolved, never hardcoded.
-
-    Always shows the currency's decimal places. For the surface that trims a whole amount
-    to "HK$400" instead, see :func:`format_trimmed`: the two share the symbol and the
-    spacing, and differ only in that trailing-zero rule.
-    """
+    """Minor units as "HKD 400.00" -- the code, a space, the currency's own places."""
     return join(symbol(currency_code), format_minor(amount_minor, currency_code))
 
 
-def format_trimmed(currency_symbol: str, amount_major, places: int = FALLBACK_DECIMAL_PLACES) -> str:
-    """MAJOR units as "HK$400" when whole, "HK$400.50" when not.
+def format_major(currency_symbol: str, amount_major, places: int = FALLBACK_DECIMAL_PLACES) -> str:
+    """MAJOR units as "HKD 400.00" / "HKD 400.50" / "JPY 1,200" -- always the currency's places.
 
-    The settings page and the module cards print money this way: cents are shown only
-    when they mean something, because a column of "HK$400.00" reads as noise where every
-    price is whole. The payer portal's :func:`format_with_symbol` always prints the
-    places instead -- that is a real difference in what the two SHOW, not a duplicate,
-    which is why both exist here rather than one being folded into the other.
+    The invoice document prints money this way: a document of a charge always shows its
+    places, the same as :func:`format_with_symbol` (the payer portal) and the apps'
+    ``formatMoney``. A PRICE on a screen is :func:`format_price` instead.
 
     Takes ``amount_major`` and ``places`` rather than minor units and a currency code:
     its callers have already scaled through :func:`to_major` and resolved
@@ -167,6 +142,18 @@ def format_trimmed(currency_symbol: str, amount_major, places: int = FALLBACK_DE
     if places <= 0:
         return join(currency_symbol, f"{int(Decimal(amount_major).to_integral_value()):,}")
     quantized = Decimal(amount_major).quantize(Decimal(1).scaleb(-places))
-    if quantized == quantized.to_integral_value():
-        return join(currency_symbol, f"{int(quantized):,}")
     return join(currency_symbol, f"{quantized:,.{places}f}")
+
+
+def format_price(currency_symbol: str, amount_major, places: int = FALLBACK_DECIMAL_PLACES) -> str:
+    """A PRICE as the settings page, the module cards and the panel show it: "HKD 400" when
+    whole, "HKD 400.50" when not (owner, 2026-10-21) - cents only when they mean something,
+    because a column of "HKD 400.00" reads as noise where every price is whole. The apps'
+    ``formatPrice`` is the same rule. Invoices keep the places (:func:`format_major`).
+    """
+    if places > 0:
+        quantized = Decimal(amount_major).quantize(Decimal(1).scaleb(-places))
+        if quantized == quantized.to_integral_value():
+            return join(currency_symbol, f"{int(quantized):,}")
+    return format_major(currency_symbol, amount_major, places)
+

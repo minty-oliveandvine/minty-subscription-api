@@ -144,7 +144,7 @@ def _panel(*rows):
 
 
 def _row(label, date, *, overdue=False):
-    return {"at": None, "date": date, "label": label, "amount": "HKD 280",
+    return {"at": None, "date": date, "label": label, "amount": "HKD\u00a0280",
             "overdue": overdue, "note": None}
 
 
