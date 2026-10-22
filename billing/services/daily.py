@@ -83,6 +83,8 @@ import hashlib
 from contextlib import contextmanager
 from datetime import datetime
 
+from minty_shared import logctx
+
 from billing.services._log import logger
 
 # Every job in the pass, in call order. Names match the CLI commands so a line in the log
@@ -475,10 +477,11 @@ def run_daily(
             continue
 
         try:
-            if name == SWEEP_TOUCHED:
-                summary = _sweep_touched(_touched_payers(summaries))
-            else:
-                summary = _RUNNERS[name](now, days_before=days_before, issue=issue)
+            with logctx.log_step(f"subscriptions.{name}"):
+                if name == SWEEP_TOUCHED:
+                    summary = _sweep_touched(_touched_payers(summaries))
+                else:
+                    summary = _RUNNERS[name](now, days_before=days_before, issue=issue)
         except Exception as exc:
             # (Flask rolled its session back here so the next job started clean; under
             # Django's autocommit a failed job leaves nothing staged.)

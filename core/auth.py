@@ -3,6 +3,7 @@ import logging
 import jwt
 from django.conf import settings
 from django.core.exceptions import ValidationError
+from minty_shared import logctx
 from ninja.security import HttpBearer
 
 from shared_models.enums import EntityRole, SystemRole, is_superadmin
@@ -86,20 +87,14 @@ class BearerAuth(HttpBearer):
         request.is_super_admin = is_super_admin
         request.is_system_superuser = system_superuser
         request.is_entity_member = False
+        # The person only: the company asked about holds no role of theirs, so it is not
+        # an authorised scope to put on the log line.
+        logctx.bind(user=user.id)
         return user
 
     def authenticate(self, request, token):
         try:
-            import hashlib
-
             key = settings.SECRET_KEY
-            key_hash = hashlib.sha256(key.encode()).hexdigest()[:16]
-            logger.info(
-                "Auth attempt: key_len=%d key_hash=%s token_len=%d",
-                len(key),
-                key_hash,
-                len(token),
-            )
             payload = jwt.decode(
                 token, key, algorithms=["HS256"], leeway=CLOCK_SKEW_LEEWAY_SECONDS
             )
@@ -207,6 +202,7 @@ class BearerAuth(HttpBearer):
             request.is_super_admin = is_super_admin
             request.is_system_superuser = system_superuser
             request.is_entity_member = is_entity_member
+            logctx.bind(user=user.id, entity=entity_id)
             return user
         except jwt.ExpiredSignatureError:
             logger.warning("Auth rejected: token expired")

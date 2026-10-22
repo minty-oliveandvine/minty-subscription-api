@@ -72,10 +72,13 @@ class Command(BaseCommand):
 
     def handle(self, *args, job: str, mode: str, issue: bool, apply: bool, repair: bool,
                limit, days_before, users, **options):
+        from minty_shared import logctx
+
         from billing.services import _context
 
         runner = getattr(self, "_job_" + job.replace("-", "_"))
-        with _context.scope():
+        logctx.start_trace()
+        with _context.scope(), logctx.log_step(f"command.subscriptions.{job}"):
             runner(mode=mode, issue=issue, apply=apply, repair=repair, limit=limit,
                    days_before=days_before, users=users)
 

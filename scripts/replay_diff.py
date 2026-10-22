@@ -42,7 +42,7 @@ from pathlib import Path
 
 ID_PATTERNS = [
     # a log line that landed mid-line (stderr interleaved with stdout) is not report content
-    (re.compile(r"20\d\d-\d\d-\d\dT[\d:]+Z (ERROR|WARNING|INFO) billing-api .*$"), ""),
+    (re.compile(r"20\d\d-\d\d-\d\dT[\d:.]+Z (ERROR|WARNING|INFO) \[trace=[^\]]*\] \[[^\]]*\] .*$"), ""),
     (re.compile(r"\b(pm|in|cus|clock|sub|pi|ch|seti|si)_[A-Za-z0-9]+"), r"\1_XXX"),
     (re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"), "UUID"),
     # the dunning lines print the payer id's first eight characters; the clone is a new payer

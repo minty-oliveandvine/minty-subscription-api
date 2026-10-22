@@ -37,6 +37,7 @@ from __future__ import annotations
 import logging
 
 from django.conf import settings
+from minty_shared import logctx
 
 logger = logging.getLogger("billing-api")
 
@@ -71,8 +72,10 @@ def run_pass_now(*, mode: str) -> dict | None:
     # before the first query; at exit it releases what the pass opened rather than
     # holding a connection for the next hour.
     close_old_connections()
+    # Its own trace: nothing the timer runs belongs to a request.
+    logctx.start_trace()
     try:
-        with _context.scope(), daily.daily_lock() as acquired:
+        with _context.scope(), logctx.log_step(f"scheduler.{mode}"), daily.daily_lock() as acquired:
             if not acquired:
                 logger.info(
                     "subscriptions: another pass is already running; skipping the %s pass", mode
@@ -85,6 +88,7 @@ def run_pass_now(*, mode: str) -> dict | None:
         return None
     finally:
         close_old_connections()
+        logctx.reset()
 
 
 def start_scheduler():

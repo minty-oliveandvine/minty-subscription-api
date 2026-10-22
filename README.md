@@ -134,7 +134,7 @@ against the routers (step 3, importing the engine's stubs) - `docs/features/subs
 
 ```
 config/          settings (the scheduler switch, CORS, DB, Stripe keys, mail, logging) · settings_test · urls (the four routers, /healthz)
-core/            auth (BearerAuth, SelfBearerAuth, EntityBearerAuth) · exceptions ({"error"} shape) · middleware (service scope, request log) · policy (roles/permissions) · flask_client (the ONLY caller of Flask) · log_formatters
+core/            auth (BearerAuth, SelfBearerAuth, EntityBearerAuth) · exceptions ({"error"} shape) · middleware (service scope, request log) · policy (roles/permissions) · flask_client (the ONLY caller of Flask); the log line is minty-shared-py's (`docs/features/logging.md`)
 shared_models/   the 21 mirrors, managed = False · enums (the Postgres enums) · fields (PgEnumField, CharNField)
 billing/         api/ (me, modules, notice, onboarding - the four routers, live; _json.py = Flask's jsonify) · services/ (THE ENGINE: the 24 modules of Minty's blueprints/subscription/services ported 1:1, plus entity_modules.py, _context.py, _log.py, and this service's own invoice_document.py + invoice_pdf.py - the invoice PDF, Figma 09-A) · static/email/ (the 9 inline images) · static/invoice/ (the PDF's Inter and Noto Sans HK fonts with their OFL licences, and 09-A's logo vector) · scheduler.py · management/commands/{subscriptions,plans,replay_scenarios,export_openapi}.py · tests/ (+ tests/engine/, the ported suite; tests/api/, the route tests)
 scripts/         replay_diff.py (Flask report vs Django report, normalised; the Flask script was deleted 2026-10-06)
