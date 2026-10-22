@@ -3,11 +3,17 @@ from pathlib import Path
 
 from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
+from minty_shared.config import (
+    DEFAULT_LOCAL_DATABASE_URL,
+    app_env,
+    database_url_from_env,
+    django_database,
+    django_email,
+    preview_origin_regexes,
+    require_secret_key,
+)
 from minty_shared.logctx import logging_config
-
-from config.dburl import database_url, parse_database_url
-from config.preview_origin import preview_origin_regexes
-from config.smtpurl import parse_smtp_url
+from minty_shared.time import DEFAULT_ENTITY_TIMEZONE
 
 load_dotenv()
 
@@ -18,20 +24,19 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # one, and a mismatch here 401s every request rather than failing loudly at boot. All four
 # services must read it from one source (Part 3's ``minty-infra`` makes that one place).
 _DEFAULT_SECRET_KEY = "change-me-in-production"
-SECRET_KEY = os.environ.get("SECRET_KEY", _DEFAULT_SECRET_KEY)
-# APP_ENV is ``development`` or ``production`` (the default); anything else is production.
-APP_ENV = os.environ.get("APP_ENV", "production").strip().lower()
+# APP_ENV is ``development`` or ``production``; anything else is production (minty_shared.config).
+APP_ENV = app_env()
 DEBUG = APP_ENV == "development"
 
-# REFUSE TO BOOT WITH THE PLACEHOLDER KEY OUTSIDE DEVELOPMENT. On 2026-09-14 the onboarding
-# API ran in production without SECRET_KEY set: every authenticated call answered 401 while
-# the public endpoints kept working, and nothing said why. Worse than broken, it was
-# forgeable - the fallback string is in the repo. A crash at startup is the loud failure.
-if not DEBUG and SECRET_KEY == _DEFAULT_SECRET_KEY:
-    raise ImproperlyConfigured(
-        "SECRET_KEY is not set. It must be the same value the Flask app mints tokens "
-        "with; without it every request is refused with 401. Refusing to start."
+# REFUSE TO BOOT WITH THE PLACEHOLDER KEY OUTSIDE DEVELOPMENT (minty_shared.config): on
+# 2026-09-14 an API ran in production without SECRET_KEY, every authenticated call answered
+# 401, and the fallback string is in the repo - forgeable as well as broken.
+try:
+    SECRET_KEY = require_secret_key(
+        os.environ.get("SECRET_KEY"), placeholder=_DEFAULT_SECRET_KEY, development=DEBUG
     )
+except RuntimeError as exc:
+    raise ImproperlyConfigured(str(exc)) from None
 ALLOWED_HOSTS = os.environ.get("ALLOWED_HOSTS", "*").split(",")
 
 # Deliberately no django.contrib.contenttypes / django.contrib.auth. Authentication is our
@@ -48,7 +53,7 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     "core.middleware.ServiceScopeMiddleware",
-    "core.middleware.RequestLoggingMiddleware",
+    "minty_shared.django.middleware.RequestLoggingMiddleware",
     "django.middleware.common.CommonMiddleware",
 ]
 
@@ -88,7 +93,7 @@ def _flag(name: str, default: bool = False) -> bool:
 # ---------------------------------------------------------------------------
 SUBSCRIPTION_SCHEDULER_ENABLED = _flag("SUBSCRIPTION_SCHEDULER_ENABLED", False)
 SUBSCRIPTION_SCHEDULER_LIGHT = _flag("SUBSCRIPTION_SCHEDULER_LIGHT", True)
-SUBSCRIPTION_SCHEDULER_TZ = os.environ.get("SUBSCRIPTION_SCHEDULER_TZ") or "Asia/Hong_Kong"
+SUBSCRIPTION_SCHEDULER_TZ = os.environ.get("SUBSCRIPTION_SCHEDULER_TZ") or DEFAULT_ENTITY_TIMEZONE
 SUBSCRIPTION_SCHEDULER_FULL_HOUR = int(os.environ.get("SUBSCRIPTION_SCHEDULER_FULL_HOUR") or 5) % 24
 
 # ---------------------------------------------------------------------------
@@ -132,8 +137,11 @@ CORS_ALLOWED_ORIGINS = [
     ).split(",")
     if origin.strip()
 ]
-# A branch's preview set (config/preview_origin.py); unset = off.
-CORS_ALLOWED_ORIGIN_REGEXES = preview_origin_regexes(os.environ.get("PREVIEW_ORIGIN_REGEX"))
+# A branch's preview set (minty_shared.config); unset = off, a loose pattern refuses to boot.
+try:
+    CORS_ALLOWED_ORIGIN_REGEXES = preview_origin_regexes(os.environ.get("PREVIEW_ORIGIN_REGEX"))
+except ValueError as exc:
+    raise ImproperlyConfigured(str(exc)) from None
 CORS_ALLOW_HEADERS = [
     "authorization",
     "content-type",
@@ -148,11 +156,11 @@ CORS_ALLOW_HEADERS = [
 # This service is a TENANT of the schema, never its owner. Every model is managed = False
 # and this repo ships no migrations: Alembic in Minty is the owner-of-record for all DDL.
 # The schema name is a setting shared with Minty: ``?schema=`` on DATABASE_URL (default
-# pettycashv3, config/dburl.py), the same URL Minty reads. Every db_table is unqualified and
+# pettycashv3, minty_shared.config), the same URL Minty reads. Every db_table is unqualified and
 # resolves through search_path. `DATABASE_URL=...?schema=pettycash_alt pytest` proves nothing
 # spells it.
 # ---------------------------------------------------------------------------
-_DEFAULT_DB, DB_SCHEMA = parse_database_url(database_url())
+_DEFAULT_DB, DB_SCHEMA = django_database(database_url_from_env(DEFAULT_LOCAL_DATABASE_URL))
 
 DATABASES = {"default": _DEFAULT_DB}
 
@@ -178,12 +186,12 @@ STRIPE_PUBLISHABLE_KEY = os.environ.get("STRIPE_PUBLISHABLE_KEY", "")
 
 # ---------------------------------------------------------------------------
 # Mail - the eight subscription notices and the setup reminder, on the same Brevo SMTP
-# Minty uses: SMTP_URL (config/smtpurl.py). Without it every send is logged and skipped
+# Minty uses: SMTP_URL (minty_shared.config). Without it every send is logged and skipped
 # rather than failing the pass that raised it (Flask's rule, kept). MAIL_FROM is the default
 # sender; the billing sender is SUBSCRIPTION_EMAIL, as in Flask, and the setup reminder's
 # ONBOARDING_EMAIL - both default to MAIL_FROM.
 # ---------------------------------------------------------------------------
-_SMTP = parse_smtp_url(os.environ.get("SMTP_URL"))
+_SMTP = django_email(os.environ.get("SMTP_URL"))
 EMAIL_BACKEND = _SMTP["EMAIL_BACKEND"]
 EMAIL_HOST = _SMTP["EMAIL_HOST"]
 EMAIL_PORT = _SMTP["EMAIL_PORT"]
@@ -212,3 +220,5 @@ LOGGING = logging_config(
     no_propagate=["billing-api.http"],
     level=os.environ.get("LOG_LEVEL", "INFO"),
 )
+# The access line's logger (minty_shared.django.middleware.RequestLoggingMiddleware).
+MINTY_HTTP_LOGGER = "billing-api.http"

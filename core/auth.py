@@ -3,7 +3,7 @@ import logging
 import jwt
 from django.conf import settings
 from django.core.exceptions import ValidationError
-from minty_shared import logctx
+from minty_shared import logctx, tokens
 from ninja.security import HttpBearer
 
 from shared_models.enums import EntityRole, SystemRole, is_superadmin
@@ -11,10 +11,6 @@ from shared_models.models import User, UserEntity
 
 logger = logging.getLogger("billing-api")
 
-#: Seconds of clock disagreement tolerated on ``iat`` / ``exp`` between the minting host
-#: (Flask) and this one - the same allowance minty-onboarding-api makes, so a token it
-#: accepts and forwards here is not refused for a few seconds of skew.
-CLOCK_SKEW_LEEWAY_SECONDS = 60
 
 
 def get_entity_role(user_id: str, entity_id: str) -> str | None:
@@ -95,9 +91,8 @@ class BearerAuth(HttpBearer):
     def authenticate(self, request, token):
         try:
             key = settings.SECRET_KEY
-            payload = jwt.decode(
-                token, key, algorithms=["HS256"], leeway=CLOCK_SKEW_LEEWAY_SECONDS
-            )
+            # HS256 with the clock skew every Minty backend allows (minty_shared.tokens).
+            payload = tokens.decode_bearer(token, key)
             user = User.objects.get(id=payload["user_id"])
             user_id = payload["user_id"]
             token_entity_id = (payload.get("entity_id") or "").strip()

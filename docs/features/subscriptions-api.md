@@ -78,9 +78,11 @@ payer from those rows, and its trial would expire having been told it would conv
 ## 2. The API
 
 Mounted by `config/urls.py`; auth per router in `docs/features/authentication.md`. Bodies are
-`{"error": "<sentence>"}` with Flask's status codes (`core/exceptions.py`): 400 bad input, 401
-no/invalid token, 402 card declined, 403 not allowed / no consent, 404 not yours, 409
-already done, 5xx upstream. `billing/tests/test_contract.py` pins every table below.
+`{"error": "<sentence>"}` with Flask's status codes (`core/exceptions.py`, rendered by every
+API's envelope, `minty_shared.django.errors`): 400 bad input, 401 no/invalid token, 402 card
+declined, 403 not allowed / no consent, 404 not yours, 409 already done, 422 input the schema
+refuses (with `fields`, one sentence per field), 5xx upstream. `billing/tests/test_contract.py`
+pins every table below; `billing/tests/test_error_envelope.py` pins the envelope.
 
 **Every email input is English only** (2026-10-01, the frontends' rule): `billing_accounts.EMAIL_RE`
 = printable ASCII minus "@", one "@", a dot in the domain — still deliberately shallow
@@ -747,7 +749,7 @@ for a handover that is over.
 - a deferred trial's module card says `trial_closing` for its first six hours
   (`TRIAL_CLOSING_WINDOW`) and trial expired after that, while its access stays on for the grace.
 
-Mail: `SMTP_URL` (parsed into Django's `EMAIL_*` settings by `config/smtpurl.py`) on the same
+Mail: `SMTP_URL` (parsed into Django's `EMAIL_*` settings by `minty_shared.config.django_email`) on the same
 Brevo SMTP Minty uses, sender `SUBSCRIPTION_EMAIL` (fallback `MAIL_FROM`, the setting
 `DEFAULT_FROM_EMAIL`; the setup reminder's is `ONBOARDING_EMAIL`, production
 `onboarding@dailyminty.com`, same fallback - `notify.sender_for`); each SMTP step times out after `?timeout=` seconds (`settings.EMAIL_TIMEOUT`, default 10; Django's
@@ -830,7 +832,7 @@ as `recipient_for`, so a replay never mails a real billing address. Pinned in
 
 `.env.example` is the list. `APP_ENV` (`development` | `production`, the default; `DEBUG`
 follows it); the scheduler switches; `SECRET_KEY` (shared, verify only); `DATABASE_URL` with
-`?schema=` (default `pettycashv3`, a setting never a literal — `config/dburl.py`,
+`?schema=` (default `pettycashv3`, a setting never a literal — `minty_shared.config`,
 `billing/tests/test_schema_name.py`); `STRIPE_*`; `SMTP_URL` / `MAIL_FROM` /
 `SUBSCRIPTION_EMAIL` / `ONBOARDING_EMAIL`; `PETTY_CASH_URL` (the forwarded call);
 `PETTY_CASH_PUBLIC_URL` (the address a PERSON reaches Minty at — every link in an email;

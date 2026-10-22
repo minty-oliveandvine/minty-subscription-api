@@ -18,7 +18,7 @@ defined once in [`minty-shared-py`](https://github.com/minty-oliveandvine/minty-
 
 Both also go to stderr, which is what Render keeps.
 
-- **trace**: `core.middleware.RequestLoggingMiddleware` opens one per request. An incoming
+- **trace**: `minty_shared.django.middleware.RequestLoggingMiddleware` (settings `MINTY_HTTP_LOGGER`) opens one per request. An incoming
   `X-Request-ID` of 8-32 lowercase hex digits is kept; anything else (missing, uppercase, a
   newline, a forged `[user=...]`) is replaced with 8 fresh digits. The id is echoed on the
   response as `X-Request-ID` and kept on `request.request_id`.

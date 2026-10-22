@@ -2,7 +2,7 @@
 # Container entrypoint for minty-subscription-api.
 #
 # This service is a TENANT of the schema Flask owns: settings.py pins search_path to
-# the ``?schema=`` on DATABASE_URL (default pettycashv3, config/dburl.py), and shared_models maps tables Flask's Alembic
+# the ``?schema=`` on DATABASE_URL (default pettycashv3, minty_shared.config), and shared_models maps tables Flask's Alembic
 # migrations create. So wait for both the database and that schema rather than creating
 # anything ourselves.
 #
@@ -19,9 +19,9 @@ import time
 
 import psycopg
 
-from config.dburl import database_url, parse_database_url
+from minty_shared.config import DEFAULT_LOCAL_DATABASE_URL, database_url_from_env, django_database
 
-db, schema = parse_database_url(database_url())
+db, schema = django_database(database_url_from_env(DEFAULT_LOCAL_DATABASE_URL))
 # Every query parameter but search_path (sslmode, ...) goes to the driver as Django's does.
 params = {k: v for k, v in db["OPTIONS"].items() if k != "options"}
 

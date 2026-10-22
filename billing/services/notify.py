@@ -81,19 +81,19 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta
 from email import encoders
 from email.mime.base import MIMEBase
 from email.mime.image import MIMEImage
 from pathlib import Path
 from urllib.parse import urlencode
 
-import pytz
 from django.conf import settings
 from django.core.mail import EmailMultiAlternatives
 from django.core.mail.message import SafeMIMEMultipart
 from django.db import IntegrityError, transaction
 from django.template.loader import render_to_string
+from minty_shared import time as shared_time
 
 from billing.services import clock, display
 from billing.services._log import logger
@@ -168,9 +168,8 @@ PAYMENT_FAILED_EVENTS = frozenset({RENEWAL_FAILED, DUNNING_RETRY_FAILED})
 NOTICE_TEMPLATE = "email/subscription_notice.html"
 
 #: The zone a company that has never set one is dated in (``entities.timezone`` is NULL on
-#: every row today): the one ``SUBSCRIPTION_SCHEDULER_TZ`` and Flask's ``models.db.tz``
-#: already assume.
-DEFAULT_TIMEZONE = "Asia/Hong_Kong"
+#: every row today) - every backend's one default, ``minty_shared.time``.
+DEFAULT_TIMEZONE = shared_time.DEFAULT_ENTITY_TIMEZONE
 
 
 # --- Formatting helpers -------------------------------------------------------
@@ -196,23 +195,19 @@ _warned_zones: set[str] = set()
 
 
 def zone_named(name):
-    """The pytz zone ``name`` names, else ``DEFAULT_TIMEZONE``.
+    """The zone ``name`` names, else ``DEFAULT_TIMEZONE`` (``minty_shared.time``).
 
     Blank means the company never set one. An unknown name is a data problem, not a reason
     to drop the email: it is dated in the default, and said once per name so it gets fixed.
     """
     cleaned = (name or "").strip()
-    if cleaned:
-        try:
-            return pytz.timezone(cleaned)
-        except pytz.UnknownTimeZoneError:
-            if cleaned not in _warned_zones:
-                _warned_zones.add(cleaned)
-                logger.warning(
-                    "notify: unknown time zone {!r}; dating its emails in {}",
-                    cleaned, DEFAULT_TIMEZONE,
-                )
-    return pytz.timezone(DEFAULT_TIMEZONE)
+    if cleaned and not shared_time.is_known_zone(cleaned) and cleaned not in _warned_zones:
+        _warned_zones.add(cleaned)
+        logger.warning(
+            "notify: unknown time zone {!r}; dating its emails in {}",
+            cleaned, DEFAULT_TIMEZONE,
+        )
+    return shared_time.zone_named(cleaned)
 
 
 def entity_zone(entity_id):
@@ -252,8 +247,8 @@ def account_zone(billing_group_id):
         logger.exception(
             "notify: could not read the time zones of billing account {}", billing_group_id
         )
-    zones = {zone_named(name).zone for name in names}
-    return pytz.timezone(zones.pop()) if len(zones) == 1 else zone_named(None)
+    zones = {zone_named(name).key for name in names}
+    return zone_named(zones.pop()) if len(zones) == 1 else zone_named(None)
 
 
 def payment_deadline(billing_group_id) -> datetime | None:
@@ -287,9 +282,7 @@ def in_zone(value: datetime, zone=None) -> datetime:
 
     A naive value is read as UTC, which is how the engine stores every instant.
     """
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=UTC)
-    return value.astimezone(zone or zone_named(None))
+    return shared_time.in_zone(value, zone)
 
 
 def modules_phrase(codes) -> str:

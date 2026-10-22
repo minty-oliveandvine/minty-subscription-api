@@ -4,7 +4,8 @@ import os
 # below, after the import that would otherwise trip the guard.
 os.environ.setdefault("APP_ENV", "development")
 
-from config.dburl import parse_database_url  # noqa: E402
+from minty_shared.config import django_database  # noqa: E402
+
 from config.settings import *  # noqa: E402, F401, F403
 
 # A fixed key so tests can mint a JWT the service will accept. Nothing about the value
@@ -20,7 +21,7 @@ SUBSCRIPTION_SCHEDULER_ENABLED = False
 #   unset  -> SQLite in memory, tables built FROM THE MODELS (SHARED_MODELS_MANAGED_FOR_TESTING).
 #             Proves this service's logic. Cannot see whether the models match the real schema.
 #   set    -> PostgreSQL, a database built FROM docs/schema/01_schema_rebased.sql in the Minty
-#             repo by tests/pg_harness.py (loaded by conftest.py at the repo root). Nothing is
+#             repo by tests/pg_harness.py (minty_shared.testing.pg, from conftest.py at the repo root). Nothing is
 #             created from the models; a mirror column the schema lacks fails on the SELECT,
 #             which is the point. Same knobs as Minty: MINTY_TEST_PG_DBNAME (minty_test),
 #             MINTY_TEST_PG_KEEP=1, PG_BIN, MINTY_REPO (C:\Github\Minty).
@@ -29,7 +30,7 @@ if _PG_URI:
     from urllib.parse import parse_qs as _parse_qs
     from urllib.parse import urlsplit as _urlsplit
 
-    _db, _schema = parse_database_url(_PG_URI)
+    _db, _schema = django_database(_PG_URI)
     # ``?schema=`` on the test URI wins; without one the schema is DATABASE_URL's.
     if "schema" in _parse_qs(_urlsplit(_PG_URI).query):
         DB_SCHEMA = _schema

@@ -8,10 +8,10 @@ two-decimal currency — so the split went unnoticed. On a zero-decimal currency
 module card would read 280 while the memo explaining that very charge read 2.80, and
 the dialog asking the customer to authorise it read 2.80 as well.
 
-The LABEL half was split the same way and is now here too. Every amount is written with
-the ISO code, never a symbol (owner, 2026-10-21): "HKD 1,234.50" - the code, a space, the
-currency's own places - on every card, panel, portal row and invoice, as the apps write it
-(``@minty/shared/money``). ``currency_info.symbol`` ("HK$") is no longer read for display.
+How an amount is WRITTEN is every backend's rule, in ``minty_shared.money``: "HKD 1,234.50" -
+the code, a non-breaking space, the currency's own places - as the apps write it
+(``@minty/shared/money``). This module is the half that is this service's own: resolving the
+places from ``currency_info``.
 
 Deliberately NOT in ``billing.py``. That module is pure arithmetic — no ORM, no clock,
 no Stripe — which is what makes the money rules testable without a database. So it takes
@@ -25,6 +25,8 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from minty_shared import money as shared_money
+
 from billing.services import _context
 from billing.services._log import logger
 
@@ -32,7 +34,7 @@ from billing.services._log import logger
 # currency in circulation, so it keeps money rendering rather than blowing up a page —
 # but it is a GUESS, so it logs. A currency missing from ``currency_info`` is a data
 # problem to fix, not a condition to absorb silently.
-FALLBACK_DECIMAL_PLACES = 2
+FALLBACK_DECIMAL_PLACES = shared_money.FALLBACK_DECIMAL_PLACES
 
 _G_KEY = "_subscription_decimal_places"
 
@@ -82,43 +84,26 @@ def decimal_places(currency_code: str | None) -> int:
 
 
 def symbol(currency_code: str | None) -> str:
-    """The label in front of an amount: the currency's ISO code, upper-cased ("HKD").
-
-    "" when there is no currency at all. Never a symbol from ``currency_info`` - every amount
-    is written with its code (owner, 2026-10-21) - so the name stays only because the API's
-    ``currency_symbol`` / ``currency`` fields carry it.
-    """
-    if not currency_code:
-        return ""
-    return str(currency_code).strip().upper()
+    """The label in front of an amount: the currency's ISO code, upper-cased ("HKD"), "" with
+    no currency. Never a symbol from ``currency_info`` (owner, 2026-10-21); the name stays
+    because the API's ``currency_symbol`` / ``currency`` fields carry it."""
+    return shared_money.label(currency_code)
 
 
 def join(currency_symbol: str, text: str) -> str:
-    """Put the code in front of an already-formatted amount: "HKD 400.00".
-
-    Always one NON-BREAKING space (owner, 2026-10-21), so a line never splits the code from its
-    amount - "HKD400" scans as one token rather than a currency and an amount. With
-    no code the amount stands alone (never a "$").
-    """
-    return f"{currency_symbol}\u00a0{text}" if currency_symbol else text
+    """The code, ONE non-breaking space, an already-formatted amount (``minty_shared.money``)."""
+    return shared_money.join(currency_symbol, text)
 
 
 def to_major(amount_minor, currency_code: str | None) -> Decimal:
     """Minor units to a major-unit Decimal. HKD 28000 -> 280.00; JPY 280 -> 280."""
-    if amount_minor is None:
-        return Decimal("0")
-    return Decimal(int(amount_minor)) / (Decimal(10) ** decimal_places(currency_code))
+    return shared_money.to_major(amount_minor, decimal_places(currency_code))
 
 
 def format_minor(amount_minor, currency_code: str | None) -> str:
-    """Minor units as a plain grouped decimal — no symbol, no currency code.
-
-    For the invoice memo and the confirm dialog, both of which state the currency
-    separately. Repeating it here invites the two disagreeing.
-    """
-    places = decimal_places(currency_code)
-    value = abs(Decimal(int(amount_minor or 0))) / (Decimal(10) ** places)
-    return f"{value:,.{places}f}"
+    """Minor units as a plain grouped decimal - no code. For the invoice memo and the confirm
+    dialog, both of which state the currency separately."""
+    return shared_money.format_minor(amount_minor, decimal_places(currency_code))
 
 
 def format_with_symbol(amount_minor, currency_code: str | None) -> str:
@@ -127,33 +112,12 @@ def format_with_symbol(amount_minor, currency_code: str | None) -> str:
 
 
 def format_major(currency_symbol: str, amount_major, places: int = FALLBACK_DECIMAL_PLACES) -> str:
-    """MAJOR units as "HKD 400.00" / "HKD 400.50" / "JPY 1,200" -- always the currency's places.
-
-    The invoice document prints money this way: a document of a charge always shows its
-    places, the same as :func:`format_with_symbol` (the payer portal) and the apps'
-    ``formatMoney``. A PRICE on a screen is :func:`format_price` instead.
-
-    Takes ``amount_major`` and ``places`` rather than minor units and a currency code:
-    its callers have already scaled through :func:`to_major` and resolved
-    :func:`decimal_places`, often for several amounts at once. ``places`` was once fixed
-    at 2, which rounds a three-decimal currency wrong and invents a ".00" on a
-    zero-decimal one.
-    """
-    if places <= 0:
-        return join(currency_symbol, f"{int(Decimal(amount_major).to_integral_value()):,}")
-    quantized = Decimal(amount_major).quantize(Decimal(1).scaleb(-places))
-    return join(currency_symbol, f"{quantized:,.{places}f}")
+    """MAJOR units as "HKD 400.00" / "HKD 400.50" / "JPY 1,200" - always the currency's places
+    (the invoice document, as the payer portal and the apps' ``formatMoney``)."""
+    return shared_money.format_major(currency_symbol, amount_major, places)
 
 
 def format_price(currency_symbol: str, amount_major, places: int = FALLBACK_DECIMAL_PLACES) -> str:
-    """A PRICE as the settings page, the module cards and the panel show it: "HKD 400" when
-    whole, "HKD 400.50" when not (owner, 2026-10-21) - cents only when they mean something,
-    because a column of "HKD 400.00" reads as noise where every price is whole. The apps'
-    ``formatPrice`` is the same rule. Invoices keep the places (:func:`format_major`).
-    """
-    if places > 0:
-        quantized = Decimal(amount_major).quantize(Decimal(1).scaleb(-places))
-        if quantized == quantized.to_integral_value():
-            return join(currency_symbol, f"{int(quantized):,}")
-    return format_major(currency_symbol, amount_major, places)
-
+    """A PRICE: "HKD 400" when whole, "HKD 400.50" when not (owner, 2026-10-21). Invoices
+    keep the places (:func:`format_major`)."""
+    return shared_money.format_price(currency_symbol, amount_major, places)
