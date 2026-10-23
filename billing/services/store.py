@@ -2008,7 +2008,7 @@ def settle_invoice(
     if record.status in invoice_number.ISSUED_STATUSES and not record.invoice_number:
         # After the save and in its own transaction: what the processor said is recorded
         # even if numbering fails. Said at ERROR because the list then shows Stripe's id
-        # until a later settle or ``backfill_invoice_numbers`` gives it one.
+        # until a later settle of the same invoice gives it one.
         try:
             record.invoice_number = invoice_number.assign(record.id)
         except Exception:
