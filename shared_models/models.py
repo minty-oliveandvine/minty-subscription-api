@@ -604,11 +604,26 @@ class SubscriptionInvoice(UpdatedAtMixin):
     idempotency_key = models.CharField(max_length=255, null=True, blank=True, unique=True)
     issued_at = models.DateTimeField(null=True, blank=True)
     paid_at = models.DateTimeField(null=True, blank=True)
+    # ``INV-<ACCOUNT>-YYYYMM-NNNN``, given once when the invoice is first issued
+    # (``billing.services.invoice_number``); NULL on a draft and on a reservation never sent.
+    invoice_number = models.CharField(max_length=40, null=True, blank=True, unique=True)
     created_at = models.DateTimeField(db_default=Now())
 
     class Meta:
         managed = False
         db_table = "subscription_invoice"
+
+
+class SubscriptionInvoiceCounter(models.Model):
+    """The last invoice number given in a month (``period`` = ``YYYYMM``, UTC): one counter
+    for every account, so the number alone is unique."""
+
+    period = models.CharField(max_length=6, primary_key=True)
+    last_value = models.IntegerField()
+
+    class Meta:
+        managed = False
+        db_table = "subscription_invoice_counter"
 
 
 class SubscriptionInvoiceLine(models.Model):

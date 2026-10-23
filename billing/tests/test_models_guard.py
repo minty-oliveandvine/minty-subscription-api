@@ -2,7 +2,7 @@
 
 1. Every model is ``managed = False`` and this repo has no ``migrations/`` directory: Alembic
    in Minty owns the DDL, and ``docker/entrypoint.sh`` runs no ``migrate``.
-2. The thirteen subscription tables are all here, under their schema names, and so are the
+2. The fourteen subscription tables are all here, under their schema names, and so are the
    read-only rows the engine needs (``user``, ``user_entity``, ``entities``,
    ``entity_function``, ``entity_function_map``, ``country_info``, ``currency_info``,
    ``invitation``) - nothing else. A new table here is a plan amendment, not a commit.
@@ -30,6 +30,7 @@ SUBSCRIPTION_TABLES = {
     "user_stripe_customer",
     "subscription_invoice",
     "subscription_invoice_line",
+    "subscription_invoice_counter",  # invoice numbers, owner 2026-10-23
     "subscription_transfer",
     "subscription_audit_log",
     "subscription_email_log",

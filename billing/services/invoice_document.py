@@ -103,8 +103,10 @@ class InvoiceDocument:
 
     @property
     def filename(self) -> str:
-        """``Inv-<ref>.pdf`` — the breakdown CSV's naming (``Inv-<ref> Breakdown by Entity``)."""
-        return f"Inv-{self.reference.lstrip('#').strip()}.pdf"
+        """``INV-ACME-202610-0042.pdf``; an older reference keeps ``Inv-<ref>.pdf`` - the
+        breakdown CSV's naming (minty-web's ``invoiceFileStem``)."""
+        stem = self.reference.lstrip("#").strip()
+        return f"{stem if stem.startswith('INV-') else f'Inv-{stem}'}.pdf"
 
 
 def build_invoice_document(user_id, invoice_id) -> InvoiceDocument | None:
