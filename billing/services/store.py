@@ -35,6 +35,7 @@ from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.db.models.functions import Now
 
+from billing.services import invoice_number
 from billing.services._log import logger
 from billing.services.billing import plan_code
 from billing.services.constants import (
@@ -2004,6 +2005,14 @@ def settle_invoice(
         changed.append("hosted_invoice_url")
     if changed:
         record.save(update_fields=changed)
+    if record.status in invoice_number.ISSUED_STATUSES and not record.invoice_number:
+        # After the save and in its own transaction: what the processor said is recorded
+        # even if numbering fails. Said at ERROR because the list then shows Stripe's id
+        # until a later settle or ``backfill_invoice_numbers`` gives it one.
+        try:
+            record.invoice_number = invoice_number.assign(record.id)
+        except Exception:
+            logger.exception("invoice: {} is issued but could not be given a number", record.id)
     return record
 
 

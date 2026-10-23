@@ -411,9 +411,10 @@ def _line(entity_id, entity_name, product, amount, kind="full"):
 
 
 def _invoice(ref, *, status="paid", total=40000, lines=(), issued=None, ident="i1",
-             memo=None, paid=None):
+             memo=None, paid=None, number=None):
     return SimpleNamespace(
         id=f"{ident}-0000-0000-0000-000000000000",
+        invoice_number=number,
         external_id=ref,
         status=status,
         total=total,

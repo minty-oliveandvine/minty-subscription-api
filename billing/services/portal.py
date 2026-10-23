@@ -965,12 +965,13 @@ def _money(amount_minor, currency_code) -> str:
 def _reference(invoice) -> str:
     """What to print in the Invoice # column.
 
-    There is no sequential invoice NUMBER in the schema — the processor's id is the only
-    external reference we hold, and a locally invented counter would be a second identity
-    for the same document that support could not look up anywhere. So: the processor's id
-    when we have one, and a short form of the local id when the row was reserved but
-    never sent (``external_id`` is NULL — see ``store.reserve_invoice``).
+    The invoice's own number (``INV-ACME-202610-0042``, ``invoice_number.py``) once it is
+    issued. Before that, and on rows issued before numbers existed and not yet backfilled:
+    the processor's id when we have one, and a short form of the local id when the row was
+    reserved but never sent (``external_id`` is NULL — see ``store.reserve_invoice``).
     """
+    if invoice.invoice_number:
+        return invoice.invoice_number
     if invoice.external_id:
         return invoice.external_id
     return f"#{str(invoice.id)[:8].upper()}"

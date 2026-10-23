@@ -560,6 +560,22 @@ found; `dunning._nothing_open_but_owed` re-reads the card's rows still reading "
 it" true for a row that has an `external_id`. Existing rows are not backfilled (the user's
 call: "Only prevent new ones").
 
+**Invoices have their own number (2026-10-23, owner; schema item 24).** The Invoice # column,
+the preview, the PDF and the file names used to print Stripe's id (`in_1Q…`). Now
+`subscription_invoice.invoice_number` reads `INV-<ACCOUNT>-YYYYMM-NNNN`, e.g.
+`INV-ACME-202610-0042` (`billing/services/invoice_number.py`): the billing account's
+`billing_company` at issue, A–Z/0–9, at most 8 (no usable letter → the account's id, or the
+payer's, cut to 6); the month of `issued_at` in UTC, like the Date column; and ONE counter per
+month for every account (`subscription_invoice_counter`, so two accounts called "Acme" never
+collide). `store.settle_invoice` gives it the first time the row is open, paid, uncollectible
+or void — never to a draft, whose settle already carries Stripe's `created` as `issued_at` —
+under a row lock and in its own transaction, so a failure there still records what Stripe said
+(logged at ERROR; the next settle retries). It never changes after: a rename leaves old numbers
+alone and a voided invoice keeps its own. `portal._reference` prints it, falling back to Stripe's
+id and then `#<uuid8>`. No backfill (owner: production has no invoices yet), and the number is
+not copied into Stripe's metadata (it exists only after finalizing). DDL for a database already
+up: Minty `migrations/i1a01_invoice_number.sql`.
+
 **The Stripe API version is pinned (2026-09-30, both engines).** `stripe_client.get_stripe()`
 set only the key, so the API version was whatever the installed SDK defaulted to. stripe-python
 12 defaults to `2025-03-31.basil`, which REMOVED Invoice `charge` and `payment_intent`: the
