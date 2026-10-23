@@ -401,7 +401,7 @@ def get_module_cards(entity_id: str) -> list[dict]:
                 # Ready to print. The card states what the cancellation costs, and money
                 # on a card is formatted by the same rule as money in the panel.
                 "extension_formatted": (
-                    money.format_trimmed(
+                    money.format_price(
                         money.symbol(plan.currency_code if plan else None),
                         money.to_major(
                             row.extension_amount, plan.currency_code if plan else None

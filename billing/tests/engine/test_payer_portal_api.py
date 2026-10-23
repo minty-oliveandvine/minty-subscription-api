@@ -946,15 +946,14 @@ def test_a_currency_code_is_spaced_off_the_amount(app, monkeypatch):
     monkeypatch.setattr(models_db, "CurrencyInfo", fake_model([]))
 
     with app.app_context():
-        assert portal._money(5754, "HKD") == "HKD 57.54"
+        assert portal._money(5754, "HKD") == "HKD\u00a057.54"
 
 
-def test_a_currency_glyph_is_not_spaced_off_the_amount(app, monkeypatch):
-    """"HK$ 57.54" is not how a symbol is written.
+def test_a_recorded_glyph_is_never_printed_the_code_is(app, monkeypatch):
+    """"HKD 57.54", even where ``currency_info`` records "HK$" (owner, 2026-10-21: every
+    amount carries its code, never a symbol).
 
-    Patched on ``shared_models.models`` because that is where the lookup reads it: the
-    symbol resolution lives in ``money.symbol``, which imports ``CurrencyInfo`` from there
-    at call time, so patching the module attribute intercepts it.
+    Patched on ``shared_models.models``, where a lookup would read it, to prove none does.
     """
     import shared_models.models as models_db
     from billing.services import portal
@@ -962,7 +961,7 @@ def test_a_currency_glyph_is_not_spaced_off_the_amount(app, monkeypatch):
     monkeypatch.setattr(models_db, "CurrencyInfo", fake_model([SimpleNamespace(symbol="HK$")]))
 
     with app.app_context():
-        assert portal._money(5754, "HKD") == "HK$57.54"
+        assert portal._money(5754, "HKD") == "HKD\u00a057.54"
 
 
 # --- Change subscriber (read only) -------------------------------------------

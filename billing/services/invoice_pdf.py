@@ -8,7 +8,7 @@ leading (1.21 em) the baseline sits one ascent (0.969 em) below it, which is whe
 
 READINGS OF THE FRAME (told to the user, 2026-09-29):
 
-* "Description" / "Amount (HK$)" share a baseline, and so does each row's text and figure — the
+* "Description" / "Amount (HKD)" share a baseline, and so does each row's text and figure — the
   frame's 17px and 4px drift is not copied;
 * every figure is right-aligned to x=716 (the frame's total sits 5px further right);
 * the company rows under a plan are this code's own (09-A has none): indented, in the address
@@ -55,7 +55,7 @@ LEADING = 1.21
 BLACK = (0x00, 0x00, 0x00)
 GREY = (0x73, 0x7A, 0x87)    # the address, the email, the note, the company rows
 INK = (0x33, 0x3B, 0x45)     # the plan lines
-HEAD = (0x16, 0x20, 0x2E)    # "Description" / "Amount (HK$)"
+HEAD = (0x16, 0x20, 0x2E)    # "Description" / "Amount (HKD)"
 TEAL = (0x4F, 0xC7, 0xC7)    # the total
 LINK = (0x2E, 0x9B, 0x9B)    # the footer's mailbox
 RULE = (0xE6, 0xE6, 0xE6)

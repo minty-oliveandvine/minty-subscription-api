@@ -76,9 +76,9 @@ def test_a_trial_converting_before_the_invoice_date_is_on_that_invoice(app):
     ])
 
     assert panel["next_invoice"]["date"] == "28 Aug 2026"
-    assert panel["next_invoice"]["amount"] == "HKD 400"
+    assert panel["next_invoice"]["amount"] == "HKD\u00a0400"
     # Total is unchanged: the monthly cost of both modules was always 400.
-    assert panel["total"] == "HKD 400"
+    assert panel["total"] == "HKD\u00a0400"
 
 
 def test_a_trial_converting_after_the_invoice_date_is_not(app):
@@ -92,8 +92,8 @@ def test_a_trial_converting_after_the_invoice_date_is_not(app):
         _card("PAYMENT_REQUEST", "Payment Request", status="active", end=_PAID_THROUGH),
     ])
 
-    assert panel["next_invoice"]["amount"] == "HKD 280"
-    assert panel["total"] == "HKD 400", "still 400 a month once the trial converts"
+    assert panel["next_invoice"]["amount"] == "HKD\u00a0280"
+    assert panel["total"] == "HKD\u00a0400", "still 400 a month once the trial converts"
 
 
 def test_a_trial_that_will_not_convert_is_never_on_the_invoice(app):
@@ -105,7 +105,7 @@ def test_a_trial_that_will_not_convert_is_never_on_the_invoice(app):
         _card("PAYMENT_REQUEST", "Payment Request", status="active", end=_PAID_THROUGH),
     ])
 
-    assert panel["next_invoice"]["amount"] == "HKD 280"
+    assert panel["next_invoice"]["amount"] == "HKD\u00a0280"
 
 
 def test_a_pending_cancel_is_off_the_invoice_but_its_extension_is_on_it(app):
@@ -117,7 +117,7 @@ def test_a_pending_cancel_is_off_the_invoice_but_its_extension_is_on_it(app):
         _card("PAYMENT_REQUEST", "Payment Request", status="active", end=_PAID_THROUGH),
     ])
 
-    assert panel["next_invoice"]["amount"] == "HKD 400", "280 recurring + 120 extension"
+    assert panel["next_invoice"]["amount"] == "HKD\u00a0400", "280 recurring + 120 extension"
     assert panel["next_invoice"]["includes_extension"] is True
 
 
@@ -132,11 +132,11 @@ def test_a_cancellation_is_its_own_row_not_part_of_the_renewal(app):
     ])
 
     assert [(u["label"], u["amount"]) for u in panel["upcoming_charges"]] == [
-        ("Renewal", "HKD 280"),
-        ("Petty Cash cancellation", "HKD 120"),
+        ("Renewal", "HKD\u00a0280"),
+        ("Petty Cash cancellation", "HKD\u00a0120"),
     ]
     # The invoice itself still totals both — that fact did not change.
-    assert panel["next_invoice"]["amount"] == "HKD 400"
+    assert panel["next_invoice"]["amount"] == "HKD\u00a0400"
 
 
 def test_a_cancellation_survives_having_no_renewal_to_ride(app):
@@ -188,9 +188,9 @@ def test_past_due_is_still_billed_and_marked_overdue(app):
     ])
 
     assert panel["is_empty"] is False, "a module in arrears is still a subscription"
-    assert panel["total"] == "HKD 280"
+    assert panel["total"] == "HKD\u00a0280"
     assert panel["next_invoice"]["overdue"] is True
-    assert panel["next_invoice"]["amount"] == "HKD 280"
+    assert panel["next_invoice"]["amount"] == "HKD\u00a0280"
     assert panel["upcoming_charges"][0]["overdue"] is True
 
 
@@ -223,7 +223,7 @@ def test_a_scheduled_cancellation_still_winds_down(app):
         {"label": "Payment Request", "date": "12 Sep 2026"}
     ]
     # ...and it is off the invoice, unlike past_due.
-    assert panel["next_invoice"]["amount"] == "HKD 280"
+    assert panel["next_invoice"]["amount"] == "HKD\u00a0280"
 
 
 # --- the rendered list ---------------------------------------------------------
@@ -256,7 +256,7 @@ def test_a_conversion_and_the_renewal_are_both_listed(app):
 
     assert len(panel["upcoming_charges"]) == 2
     # The renewal bills the bundle; the conversion bills only its catch-up slice.
-    assert panel["upcoming_charges"][-1]["amount"] == "HKD 400"
+    assert panel["upcoming_charges"][-1]["amount"] == "HKD\u00a0400"
 
 
 def test_a_trial_that_will_not_convert_is_not_an_upcoming_charge(app):
@@ -304,7 +304,7 @@ def test_a_whole_bundle_converting_on_one_day_is_one_row(app):
     panel = _panel(app, [a, b])
 
     assert [(u["label"], u["date"], u["amount"]) for u in panel["upcoming_charges"]] == [
-        ("Super Minty converts", "20 Aug 2026", "HKD 400"),
+        ("Super Minty converts", "20 Aug 2026", "HKD\u00a0400"),
     ]
 
 
@@ -319,8 +319,8 @@ def test_conversions_on_different_days_stay_separate(app):
     panel = _panel(app, [a, b])
 
     assert [(u["label"], u["amount"]) for u in panel["upcoming_charges"]] == [
-        ("Petty Cash converts", "HKD 280"),
-        ("Payment Request converts", "HKD 120"),
+        ("Petty Cash converts", "HKD\u00a0280"),
+        ("Payment Request converts", "HKD\u00a0120"),
     ]
 
 
@@ -336,7 +336,7 @@ def test_a_same_day_conversion_that_is_not_the_bundle_keeps_its_module_name(app)
         _card("PAYMENT_REQUEST", "Payment Request", status="active", end=_PAID_THROUGH),
     ])
 
-    assert ("Petty Cash converts", "HKD 280") in [
+    assert ("Petty Cash converts", "HKD\u00a0280") in [
         (u["label"], u["amount"]) for u in panel["upcoming_charges"]
     ]
 
@@ -380,7 +380,7 @@ def test_the_bundle_note_never_quotes_a_per_module_price(app):
         _card("PAYMENT_REQUEST", "Payment Request", status="trialing", end=_BEFORE),
     ], anchor=None)
 
-    assert paid["note"] == "Super Minty price — save HKD 160"
+    assert paid["note"] == "Super Minty price — save HKD\u00a0160"
     assert paid["note"] == trialing["note"]
     assert "each" not in paid["note"]
 

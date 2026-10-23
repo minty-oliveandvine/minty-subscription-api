@@ -952,10 +952,10 @@ INVOICE_STATUS_LABELS = {
 
 
 def _money(amount_minor, currency_code) -> str:
-    """"HK$400.00", or "HKD 400.00" — symbol from ``currency_info``, never hardcoded.
+    """"HKD 400.00" — the code, a space, the currency's places (``services.money``).
 
-    The symbol lookup and the code-vs-glyph spacing both live in ``services.money`` now;
-    this used to hold its own copy of each, as did ``modules._fmt_money``.
+    This used to hold its own copy of the label lookup and spacing, as did
+    ``modules._fmt_money``.
     """
     from billing.services import money
 

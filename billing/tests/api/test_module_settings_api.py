@@ -137,7 +137,7 @@ def services(monkeypatch):
             "authorize_entity_billing": {"ok": True},
             "activate_entity_billing": {"ok": True, "payer_user_id": "u1"},
             "start_module_trials": ["PETTY_CASH"],
-            "preview_subscribe_modules": {"total_formatted": "HK$68.00"},
+            "preview_subscribe_modules": {"total_formatted": "HKD\u00a068.00"},
             "preview_reinstate_modules": {"amount_formatted": "0.00"},
             "preview_cancel_module": {"kind": "trial"},
             "cancel_module": {"access_end": None},
@@ -335,7 +335,7 @@ def _card(**over):
         "learn_more": "#", "is_subscribed": True, "trial_eligible": False, "trial_closing": False,
         "trial_expired": False, "lapsed_long": None, "has_access": True, "subscription_id": None,
         "subscription_status": "active", "can_cancel": True, "amount": Decimal("68.00"),
-        "formatted_amount": "HK$68.00", "currency_code": "HKD", "billing_interval": "month",
+        "formatted_amount": "HKD\u00a068.00", "currency_code": "HKD", "billing_interval": "month",
         "cancel_at_period_end": False, "pending_cancel": False, "trial_cancelled": False,
         "formatted_period_end": "August 19, 2026", "period_end_short": "19 Aug",
         "period_end_long": "19 Aug 2026", "period_end": datetime(2026, 8, 19, 0, 0, tzinfo=UTC),
@@ -380,7 +380,7 @@ def test_the_page_model_carries_flasks_card_with_iso_dates(client, user, entity,
     assert card["period_end"] == "2026-08-19T00:00:00+00:00"
     assert card["access_end_date"] == "2026-08-19"
     assert card["period_end_long"] == "19 Aug 2026"
-    assert card["formatted_amount"] == "HK$68.00"
+    assert card["formatted_amount"] == "HKD\u00a068.00"
     assert card["amount"] == "68.00"
     assert card["pending_cancel"] is True
     assert page["can_manage_modules"] is True
@@ -600,7 +600,7 @@ def test_the_quote_route_resolves_codes_the_same_way(client, user, entity, payer
     by_post = _act(client, user, entity, "restart-quote", {"codes": ["payment_request"]})
 
     assert by_get.status_code == by_post.status_code == 200
-    assert by_get.json() == by_post.json() == {"total_formatted": "HK$68.00"}
+    assert by_get.json() == by_post.json() == {"total_formatted": "HKD\u00a068.00"}
     priced = [args for name, args, _k in services["calls"] if name == "preview_subscribe_modules"]
     assert [a[2] for a in priced] == [["PAYMENT_REQUEST"], ["PAYMENT_REQUEST"]]
 

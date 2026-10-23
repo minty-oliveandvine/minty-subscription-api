@@ -26,7 +26,7 @@ from billing.services.invoice_pdf import ASCENT, FLOW_BOTTOM, RIGHT
 STRIPE_ID = "in_1Q8xZ2AbCdEfGhIjKlMnOpQr"  # a real-length Stripe invoice id: 27 characters
 
 
-def _row(company, plan="Petty Cash", amount="HK$280", minor=28000, suffix=""):
+def _row(company, plan="Petty Cash", amount="HKD\u00a0280.00", minor=28000, suffix=""):
     return CompanyRow(f"{company}{suffix}", f"{company} - {plan}{suffix}", amount, minor)
 
 
@@ -39,21 +39,21 @@ def _doc(**overrides) -> InvoiceDocument:
         bill_to_name="Company A Limited",
         bill_to_address=("Unit 10, 1/F", "ABC Building", "2 ABC Street", "Quarry Bay, Hong Kong"),
         bill_to_email="billing@companyalimited.com",
-        amount_header="Amount (HK$)",
+        amount_header="Amount (HKD)",
         groups=(
-            PlanGroup("Petty cash module only", "HK$650.32", 65032, (
+            PlanGroup("Petty cash module only", "HKD\u00a0650.32", 65032, (
                 _row("Company E Limited"),
-                _row("Company F Limited", amount="HK$90.32", minor=9032,
+                _row("Company F Limited", amount="HKD\u00a090.32", minor=9032,
                      suffix=" (access after cancellation)"),
                 _row("Company G Limited"),
             )),
-            PlanGroup("Payment request module only", "HK$280", 28000,
+            PlanGroup("Payment request module only", "HKD\u00a0280.00", 28000,
                       (_row("Aetheria Capital Limited", plan="Payment Request"),)),
-            PlanGroup("SuperMinty", "HK$400", 40000,
-                      (_row("Nexora Health Limited", plan="Super Minty", amount="HK$400",
+            PlanGroup("SuperMinty", "HKD\u00a0400.00", 40000,
+                      (_row("Nexora Health Limited", plan="Super Minty", amount="HKD\u00a0400.00",
                             minor=40000),)),
         ),
-        total="HK$1,330.32",
+        total="HKD\u00a01,330.32",
         total_minor=133032,
     )
     return replace(doc, **overrides)
@@ -62,8 +62,8 @@ def _doc(**overrides) -> InvoiceDocument:
 def _many(companies: int) -> InvoiceDocument:
     rows = tuple(_row(f"Company {i:02d} Trading Limited") for i in range(1, companies + 1))
     total = 28000 * companies
-    return _doc(groups=(PlanGroup("Petty cash module only", f"HK${total // 100:,}", total, rows),),
-                total=f"HK${total // 100:,}", total_minor=total)
+    return _doc(groups=(PlanGroup("Petty cash module only", f"HKD {total // 100:,}.00", total, rows),),
+                total=f"HKD {total // 100:,}.00", total_minor=total)
 
 
 def _text(marks, text, page=1):
@@ -103,21 +103,21 @@ def test_the_page_is_drawn_where_the_frame_draws_it():
     assert (_top(address), address.size, address.color) == (pytest.approx(293), 12, (0x73, 0x7A, 0x87))
     assert _top(_text(marks, "billing@companyalimited.com")) == pytest.approx(380)
 
-    description, header = _text(marks, "Description"), _text(marks, "Amount (HK$)")
+    description, header = _text(marks, "Description"), _text(marks, "Amount (HKD)")
     assert (_top(description), description.font) == (pytest.approx(439), ("InterSemiBold", ""))
     assert header.y == description.y  # one baseline: the frame's 17px drift is not copied
     assert header.x + header.width == pytest.approx(RIGHT)
 
     first = _text(marks, "Petty cash module only")
     assert (first.x, _top(first), first.color) == (55, pytest.approx(511), (0x33, 0x3B, 0x45))
-    figure = _text(marks, "HK$650.32")
+    figure = _text(marks, "HKD\u00a0650.32")
     assert (figure.y, figure.x + figure.width) == (first.y, pytest.approx(RIGHT))
 
     rules = [m for m in marks if m.kind == "rule"]
     assert len(rules) == 3
     assert all((r.x, r.x + r.width, r.color) == (55, 734, (0xE6, 0xE6, 0xE6)) for r in rules)
 
-    total = _text(marks, "HK$1,330.32")
+    total = _text(marks, "HKD\u00a01,330.32")
     assert (total.size, total.color, total.font) == (20, (0x4F, 0xC7, 0xC7), ("Inter", "B"))
     assert total.x + total.width == pytest.approx(RIGHT)
     assert _text(marks, "Amount").y == total.y  # the label shares the figure's baseline
@@ -133,7 +133,7 @@ def test_each_company_sits_under_its_plan_with_its_figure_in_the_inner_column():
 
     heading = _text(marks, "Petty cash module only")
     company = _text(marks, "Company F Limited (access after cancellation)")
-    figure = _text(marks, "HK$90.32")
+    figure = _text(marks, "HKD\u00a090.32")
     assert company.x > heading.x and company.y > heading.y
     assert company.size == 12 and figure.y == company.y
     assert figure.x + figure.width == pytest.approx(invoice_pdf.ROW_FIGURE_RIGHT)
