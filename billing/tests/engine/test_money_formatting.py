@@ -55,7 +55,7 @@ class _FakeQuery:
 def currencies(monkeypatch):
     """Patch ``currency_info`` with a known table. Returns the dict so a test can
     add to it — key is the UPPER-CASED code, as ``decimal_places`` normalises."""
-    import shared_models.models
+    import minty_db.models
 
     table = {
         "HKD": _FakeCurrency(2, "HK$"),   # a GLYPH: not spaced off the amount
@@ -66,7 +66,7 @@ def currencies(monkeypatch):
     class _FakeModel:
         objects = _FakeQuery(table)
 
-    monkeypatch.setattr(shared_models.models, "CurrencyInfo", _FakeModel)
+    monkeypatch.setattr(minty_db.models, "CurrencyInfo", _FakeModel)
     return table
 
 

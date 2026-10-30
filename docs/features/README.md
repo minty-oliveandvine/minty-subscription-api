@@ -21,7 +21,7 @@ False` · single Stripe writer) and the in-process scheduler's known costs
 are in the repo `README.md`; read it first. Running it: `manage.py runserver 8000` with `.env`
 (`APP_ENV`, `SECRET_KEY` shared with Minty, `DATABASE_URL` with its `?schema=`, the scheduler's
 `SUBSCRIPTION_SCHEDULER_*` settings, the Stripe keys); tests `pytest` (SQLite, 35 on 2026-09-21) and `MINTY_TEST_PG_URI=…
-MINTY_REPO=… pytest` (Postgres from the schema file); `pytest e2e` against a running service
+pytest` (Postgres from minty-db's packaged schema file); `pytest e2e` against a running service
 (`e2e/README.md`).
 
 Keep these current: when a route, a rule or a test named here changes, change the line that

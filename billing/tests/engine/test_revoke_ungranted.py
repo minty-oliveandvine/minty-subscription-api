@@ -11,9 +11,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
+from minty_db.models import Entity, EntityFunctionMap, EntityModuleSubscription
 
 from billing.services.access_sweep import revoke_ungranted_module_access
-from shared_models.models import Entity, EntityFunctionMap, EntityModuleSubscription
 
 from .conftest import make_entity, make_user, seed_modules
 
@@ -55,8 +55,8 @@ def test_dry_run_lists_exactly_the_unbacked_grants_and_writes_nothing(world):
 
     assert hits == sorted(
         [
-            {"entity_id": backed.id, "code": "PAYMENT_REQUEST"},  # on, no row for THIS module
-            {"entity_id": bare.id, "code": "PETTY_CASH"},
+            {"entity_id": str(backed.id), "code": "PAYMENT_REQUEST"},  # on, no row for THIS module
+            {"entity_id": str(bare.id), "code": "PETTY_CASH"},
         ],
         key=lambda h: (h["entity_id"], h["code"]),
     )

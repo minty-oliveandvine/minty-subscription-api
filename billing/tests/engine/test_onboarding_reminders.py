@@ -29,7 +29,7 @@ def mail(settings):
 
 
 def _user(email, *, active=True):
-    from shared_models.models import User
+    from minty_db.models import User
 
     uid = str(uuid.uuid4())
     User.objects.create(id=uid, email=email, username=email, first_name="Sam", last_name="Lee",
@@ -39,7 +39,7 @@ def _user(email, *, active=True):
 
 
 def _member(user_id, entity_id, *, role="admin", joined=None, approved=True):
-    from shared_models.models import UserEntity
+    from minty_db.models import UserEntity
 
     UserEntity.objects.create(user_id=user_id, entity_id=entity_id, role=role, approved=approved,
                               created_at=joined or datetime(2026, 9, 1, tzinfo=UTC))
@@ -48,7 +48,7 @@ def _member(user_id, entity_id, *, role="admin", joined=None, approved=True):
 def _company(*, status="onboarding", saved_step=None, name="Acme Shop", creator=None):
     """A company in setup, created by ``creator`` (a new user when not given). Returns
     ``(entity_id, creator_id, updated_at)``."""
-    from shared_models.models import Entity
+    from minty_db.models import Entity
 
     eid = str(uuid.uuid4())
     Entity.objects.create(id=eid, name=name, status=status, onboarding_saved_step=saved_step)
@@ -96,7 +96,7 @@ def test_three_reminders_then_silence(mail):
         _run(updated + timedelta(days=day))
 
     assert len(mail.outbox) == 3
-    from shared_models.models import SubscriptionEmailLog
+    from minty_db.models import SubscriptionEmailLog
 
     keys = sorted(SubscriptionEmailLog.objects.filter(event="onboarding_reminder")
                   .values_list("dedupe_key", flat=True))
@@ -120,7 +120,7 @@ def test_a_finished_company_is_never_reminded(mail):
 def test_it_goes_to_the_person_who_started_the_company(mail):
     """The earliest approved admin - not an admin who joined later, nor an earlier
     non-admin - and to that person, not the company's business email."""
-    from shared_models.models import Entity
+    from minty_db.models import Entity
 
     creator = _user("creator@test.com")
     eid, _, updated = _company(creator=creator)
@@ -221,8 +221,9 @@ def test_the_daily_pass_and_the_command_run_it():
 
 @pytest.mark.django_db
 def test_the_preview_renders_every_email_and_claims_nothing(tmp_path, mail):
+    from minty_db.models import SubscriptionEmailLog
+
     from billing.services import notify
-    from shared_models.models import SubscriptionEmailLog
 
     call_command("preview_emails", "--out", str(tmp_path))
 

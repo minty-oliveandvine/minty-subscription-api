@@ -19,10 +19,11 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from minty_db.models import EntityFunction
+
 from billing.services import entity_modules, money
 from billing.services._log import logger
 from billing.services.display import day as fmt_day
-from shared_models.models import EntityFunction
 
 
 def _empty_panel_next_invoice(cards: list[dict], fmt) -> dict | None:
@@ -557,8 +558,9 @@ def _restart_quote(entity_id, user_id, lapsed) -> dict | None:
     fetches it, which is a slower screen rather than a broken one — and far better than
     a takeover that renders no price at all.
     """
+    from minty_db.models import Entity, User
+
     from billing.services.store import _by_pk
-    from shared_models.models import Entity, User
 
     try:
         from billing.services.checkout import preview_subscribe_modules

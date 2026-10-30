@@ -315,14 +315,15 @@ def _cycle(payer, monkeypatch):
     """Anchored 28 Jul, read on 13 Aug: the next renewal is 28 Aug."""
     import uuid
 
+    from minty_db.models import UserStripeCustomer
+
     from billing.services import clock, store
     from billing.tests.engine.conftest import seed_plans
-    from shared_models.models import UserStripeCustomer
 
     seed_plans()
     # The row itself: ``wallet`` stubs ``store.upsert_customer_mapping``.
     UserStripeCustomer(
-        id=str(uuid.uuid4()), user_id=str(payer.id), stripe_customer_id="cus_1"
+        id=uuid.uuid4(), user_id=str(payer.id), stripe_customer_id="cus_1"
     ).save(force_insert=True)
     store.start_billing_cycle(payer.id, ANCHOR, "hkd")
     monkeypatch.setattr(clock, "now", lambda: datetime(2026, 8, 13, 9, tzinfo=UTC))
@@ -679,8 +680,9 @@ def _two_accounts(wallet):  # noqa: F811
 
 
 def test_moving_repoints_the_company_and_charges_nothing(app, wallet):  # noqa: F811
+    from minty_db.models import SubscriptionInvoice
+
     from billing.services import billing_accounts, store
-    from shared_models.models import SubscriptionInvoice
 
     payer, acme, beta, moving = _two_accounts(wallet)
 
@@ -799,8 +801,9 @@ def test_a_company_on_no_account_is_placed_and_nothing_else_is_written(app, wall
     card-free trial has none: it is PLACED (it used to be refused as "nothing to move").
     Nothing is charged, no consent is written - that is the confirm's own statement, made
     right after - and there are no paid days to carry onto the account."""
+    from minty_db.models import EntityBillingConsent, SubscriptionInvoice
+
     from billing.services import billing_accounts, store
-    from shared_models.models import EntityBillingConsent, SubscriptionInvoice
 
     payer, _acme, beta, _moving = _two_accounts(wallet)
     loose = _loose_trial(payer)

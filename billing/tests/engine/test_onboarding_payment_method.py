@@ -111,7 +111,8 @@ def test_payer_identity_names_the_customer_after_the_user_not_the_entity(monkeyp
     """One customer can pay for several entities, so an entity name would be wrong the
     moment a second entity is added. The username rides in ``description`` because
     first/last names are not unique."""
-    import shared_models.models as models_db
+    import minty_db.models as models_db
+
     from billing.services import checkout
 
     class _Payer:
@@ -132,7 +133,8 @@ def test_payer_identity_names_the_customer_after_the_user_not_the_entity(monkeyp
 def test_payer_identity_omits_a_missing_email_rather_than_blanking_it(monkeypatch):
     """``User.email`` is nullable. Sending email=None would blank the customer's address
     at Stripe rather than leave whatever it already holds — so it's omitted."""
-    import shared_models.models as models_db
+    import minty_db.models as models_db
+
     from billing.services import checkout
 
     class _Payer:
@@ -149,7 +151,8 @@ def test_payer_identity_omits_a_missing_email_rather_than_blanking_it(monkeypatc
 def test_payer_identity_is_empty_when_the_user_is_gone(monkeypatch):
     """A missing user must not block the customer create — the user_id stamp still has
     to go on, since being resolvable matters more than having a display name."""
-    import shared_models.models as models_db
+    import minty_db.models as models_db
+
     from billing.services import checkout
 
     monkeypatch.setattr(models_db, "User", fake_model([]))
@@ -162,12 +165,12 @@ def test_payer_identity_is_empty_when_the_user_is_gone(monkeypatch):
 def _seed_catalog(db):
     import uuid
 
-    from shared_models.models import EntityFunction
+    from minty_db.models import EntityFunction
 
     rows = {}
     for code, name in (("PETTY_CASH", "Petty Cash"), ("PAYMENT_REQUEST", "Payment Request")):
         row = EntityFunction(
-            id=str(uuid.uuid4()), function_code=code, function_name=name,
+            id=uuid.uuid4(), function_code=code, function_name=name,
             description=f"{name} module", is_active=True,
         )
         row.save(force_insert=True)
@@ -248,7 +251,7 @@ def _entity_with_member(db, user_id=U1):
     """A real entity the bearer is a member of, so the routes' membership check passes."""
     import uuid as _uuid
 
-    from shared_models.models import Entity, User, UserEntity
+    from minty_db.models import Entity, User, UserEntity
 
     user = User(
         id=user_id,

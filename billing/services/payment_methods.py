@@ -347,7 +347,7 @@ def _companies_billing_on(user_id, payment_method_id: str) -> list[str]:
         }
         if not live:
             return []
-        from shared_models.models import Entity
+        from minty_db.models import Entity
 
         rows = Entity.objects.filter(id__in=sorted(live))
         return sorted((e.name or "").strip() or str(e.id) for e in rows)

@@ -68,7 +68,7 @@ def stub_user(app, monkeypatch):
         user = SimpleNamespace(**fields)
         # Replace the whole class on the module the builder imports it from at call time
         # (``store._by_pk(User, ...)`` -> ``User.objects.filter(pk=...).first()``).
-        monkeypatch.setattr("shared_models.models.User", fake_model([user]))
+        monkeypatch.setattr("minty_db.models.User", fake_model([user]))
         return user
 
     return _install

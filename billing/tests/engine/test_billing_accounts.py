@@ -39,10 +39,10 @@ class _DbShim:
 
 
 def _user(db, email):
-    from shared_models.models import User
+    from minty_db.models import User
 
     row = User(
-        id=str(uuid.uuid4()),
+        id=uuid.uuid4(),
         email=email,
         username=email,
         first_name="Pat",
@@ -57,9 +57,9 @@ def _user(db, email):
 
 
 def _entity(db, name="Acme"):
-    from shared_models.models import Entity
+    from minty_db.models import Entity
 
-    row = Entity(id=str(uuid.uuid4()), name=name, status="disconnected")
+    row = Entity(id=uuid.uuid4(), name=name, status="disconnected")
     row.save(force_insert=True)
     pass  # commit: autocommit under Django
     return row
@@ -320,7 +320,7 @@ def test_the_oldest_named_account_names_the_customer(app, db_session):
 def test_an_unreadable_account_never_breaks_naming_the_customer(app, monkeypatch):
     """A display name is never worth failing a card save for. Asked outside an app
     context — or with the table missing — this falls back to the user record."""
-    import shared_models.models as models_db
+    import minty_db.models as models_db
     checkout = pytest.importorskip("billing.services.checkout")  # slice C
 
     class _Payer:

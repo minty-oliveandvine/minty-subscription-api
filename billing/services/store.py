@@ -23,8 +23,9 @@ index's refusal poisons nothing around it.
 
 A PORT, NOT A REWRITE (Part 2 step 2 of the modernisation plan): the functions, their
 names, signatures and return shapes are Flask's ``blueprints/subscription/services/store.py``;
-only the ORM calls changed. Every uuid comes back as a hyphenated ``str``
-(``shared_models.fields.MintyUUIDField``), exactly as SQLAlchemy's ``MintyUuid`` gave it.
+only the ORM calls changed. Ids are ``uuid.UUID`` since minty-db (2026-10-30; Flask's
+SQLAlchemy gave text): an id that arrives as text - a token claim, a path - is turned into one
+by ``_id`` before it is stored on a row or compared with one.
 """
 from __future__ import annotations
 
@@ -34,19 +35,7 @@ from datetime import UTC, datetime
 from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.db.models.functions import Now
-
-from billing.services import invoice_number
-from billing.services._log import logger
-from billing.services.billing import plan_code
-from billing.services.constants import (
-    EXT_INVOICED,
-    EXT_PENDING,
-    PHASE_ACTIVE,
-    PHASE_PAST_DUE,
-    PHASE_SCHEDULED_CANCEL,
-    PHASE_TRIAL,
-)
-from shared_models.models import (
+from minty_db.models import (
     BillingAccountPaymentMethod,
     BillingPlan,
     EntityBillingConsent,
@@ -58,6 +47,18 @@ from shared_models.models import (
     SubscriptionInvoiceLine,
     SubscriptionTransfer,
     UserStripeCustomer,
+)
+
+from billing.services import invoice_number
+from billing.services._log import logger
+from billing.services.billing import plan_code
+from billing.services.constants import (
+    EXT_INVOICED,
+    EXT_PENDING,
+    PHASE_ACTIVE,
+    PHASE_PAST_DUE,
+    PHASE_SCHEDULED_CANCEL,
+    PHASE_TRIAL,
 )
 
 # Columns a caller may set on an existing row WITHOUT disturbing the fields it doesn't
@@ -74,8 +75,15 @@ _MODULE_MUTABLE_FIELDS = frozenset(
 )
 
 
-def _uuid() -> str:
-    return str(uuid.uuid4())
+def _uuid() -> uuid.UUID:
+    return uuid.uuid4()
+
+
+def _id(value) -> uuid.UUID | None:
+    """An id as ``uuid.UUID``: a row's own, or text from a token or a path (malformed text raises)."""
+    if value is None or isinstance(value, uuid.UUID):
+        return value
+    return uuid.UUID(str(value))
 
 
 def _one_or_none(queryset):
@@ -97,7 +105,7 @@ def _by_pk(model, pk):
         return model.objects.filter(pk=pk).first()
     except (ValueError, TypeError):
         return None
-    except Exception as exc:  # noqa: BLE001 - ValidationError is what MintyUUIDField raises
+    except Exception as exc:  # noqa: BLE001 - ValidationError is what UUIDField raises for malformed text
         if exc.__class__.__name__ == "ValidationError":
             return None
         raise
@@ -207,7 +215,7 @@ def payer_for_entity(entity_id) -> str | None:
     if not entity_id:
         return None
     return next(
-        (row.payer_user_id for row in module_rows_for_entity(entity_id) if row.payer_user_id),
+        (str(row.payer_user_id) for row in module_rows_for_entity(entity_id) if row.payer_user_id),
         None,
     )
 
@@ -747,7 +755,7 @@ def create_billing_account(
 
     group = PayerBillingGroup(
         id=_uuid(),
-        payer_user_id=str(payer_user_id),
+        payer_user_id=_id(payer_user_id),
         stripe_payment_method_id=str(payment_method_id),
         billing_email=(str(billing_email).strip() or None) if billing_email else None,
         billing_company=(
@@ -846,7 +854,7 @@ def nominate_card_for_entity(
     if not entity_id or not payer_user_id or not payment_method_id:
         raise ValueError("entity, payer and payment method are all required")
 
-    payer = str(payer_user_id)
+    payer = _id(payer_user_id)
     with transaction.atomic():
         group = _group_for_card(payer, payment_method_id)
         _repoint(entity_id, payer, group, source)
@@ -876,9 +884,9 @@ def nominate_group_for_entity(
     if not entity_id or not payer_user_id or not group_id:
         raise ValueError("entity, payer and billing account are all required")
 
-    payer = str(payer_user_id)
+    payer = _id(payer_user_id)
     group = billing_group(group_id)
-    if group is None or str(group.payer_user_id) != payer:
+    if group is None or group.payer_user_id != payer:
         raise ValueError(f"no billing account {group_id} for payer {payer}")
     with transaction.atomic():
         _repoint(entity_id, payer, group, source)
@@ -1109,7 +1117,7 @@ def shared_business_email(emails) -> str | None:
 def business_email(entity_id) -> str | None:
     """A company's business email (onboarding step 1), trimmed; None when it has none."""
     # Lazy, like ``entities_paid_for_by``.
-    from shared_models.models import Entity
+    from minty_db.models import Entity
 
     entity = _by_pk(Entity, str(entity_id)) if entity_id else None
     return (getattr(entity, "business_email", None) or "").strip() or None
@@ -1117,7 +1125,7 @@ def business_email(entity_id) -> str | None:
 
 def entity_timezone(entity_id) -> str | None:
     """A company's ``timezone`` column as stored (an IANA name, or None when never set)."""
-    from shared_models.models import Entity
+    from minty_db.models import Entity
 
     entity = _by_pk(Entity, str(entity_id)) if entity_id else None
     return getattr(entity, "timezone", None)
@@ -1161,7 +1169,7 @@ def _on_account(group, column: str) -> list:
     companies = _companies_on_account(group)
     if not companies:
         return []
-    from shared_models.models import Entity
+    from minty_db.models import Entity
 
     return list(Entity.objects.filter(id__in=sorted(companies)).values_list(column, flat=True))
 
@@ -1463,7 +1471,7 @@ def upsert_module_row(
     # str(None) is the literal 'None', which is not a uuid and fails fk_ems_user. A row
     # with no subscriber yet is written NULL; an established payer still wins over a
     # request for a different one.
-    payer_value = str(effective_payer) if effective_payer else None
+    payer_value = _id(effective_payer) if effective_payer else None
 
     if row is None:
         row = EntityModuleSubscription(
@@ -1595,13 +1603,13 @@ def establish_entity_payer(entity_id, payer_user_id) -> str:
     if not entity_id or not payer_user_id:
         raise ValueError("establish_entity_payer needs an entity and a payer")
 
-    payer = str(payer_user_id)
+    payer = _id(payer_user_id)
     stamped = EntityModuleSubscription.objects.filter(
         entity_id=str(entity_id), payer_user_id__isnull=True
     ).update(payer_user_id=payer, updated_at=Now())
 
     settled = payer_for_entity(entity_id)
-    if settled and str(settled) != payer:
+    if settled and _id(settled) != payer:
         # Lost the race. Say so loudly: the caller MUST NOT report success, or two
         # people walk away each believing they are the one being charged.
         logger.warning(
@@ -1615,7 +1623,7 @@ def establish_entity_payer(entity_id, payer_user_id) -> str:
         "store: entity {} now bills to payer {} ({} row(s) stamped)",
         entity_id, payer, stamped,
     )
-    return payer
+    return str(payer)
 
 
 def payer_is_dunning(user_id) -> bool:
@@ -1670,7 +1678,7 @@ def entities_paid_for_by(user_id) -> list[tuple[str, str]]:
 
     # Lazy, like ``renewals._entity_names`` — the subscription store must not pull the
     # entity model graph in at import time.
-    from shared_models.models import Entity
+    from minty_db.models import Entity
 
     named = {
         str(e.id): (e.name or "").strip() or str(e.id)

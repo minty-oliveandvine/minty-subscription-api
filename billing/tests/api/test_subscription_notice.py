@@ -25,9 +25,9 @@ from datetime import UTC, datetime, timedelta
 import jwt
 import pytest
 from django.conf import settings
+from minty_db.models import Entity, UserEntity
 
 from billing.tests.api.conftest import ORIGIN, bearer, preflight
-from shared_models.models import Entity, UserEntity
 
 pytestmark = pytest.mark.django_db
 
@@ -88,7 +88,7 @@ def test_notice_api_rejects_an_expired_token(client, user, entity):
 
 def test_a_token_for_one_entity_cannot_read_another(client, user, entity, countries, notice_builder):
     """A token that names a company is held to it."""
-    other = Entity.objects.create(id=str(uuid.uuid4()), name="Other Co", country_code="HK", status="connected")
+    other = Entity.objects.create(id=uuid.uuid4(), name="Other Co", country_code="HK", status="connected")
     UserEntity.objects.create(user_id=user.id, entity_id=other.id, role="admin", approved=True)
 
     res = client.get(_url(other), **_auth(_token(user.id, entity_id=entity.id)))

@@ -43,14 +43,14 @@ def _trial(entity, codes=(MODULE,)):
 
 
 def _db_row(entity, code=MODULE):
-    from shared_models.models import EntityModuleSubscription
+    from minty_db.models import EntityModuleSubscription
 
     return EntityModuleSubscription.objects.get(entity_id=str(entity.id), function_code=code)
 
 
 def _db_user(user_id):
     """The live User row. ``make_user`` answers a snapshot; the services want the model."""
-    from shared_models.models import User
+    from minty_db.models import User
 
     return User.objects.get(id=str(user_id))
 
@@ -146,8 +146,9 @@ def test_the_payer_is_read_from_a_row_that_has_one_not_the_first_row(shop):
     seed_module("PAYMENT_REQUEST", "Payment Request")
     _trial(entity)
 
+    from minty_db.models import EntityModuleSubscription
+
     from billing.services import store
-    from shared_models.models import EntityModuleSubscription
 
     store.establish_entity_payer(entity.id, owner.id)
     # A second module row with no payer, written straight so no code path can stamp it.
@@ -200,8 +201,9 @@ def test_the_list_does_not_leak_a_company_the_viewer_is_no_admin_of(shop):
     _trial(entity)
     cashier = make_user("cashier@test.com")
 
+    from minty_db.models import UserEntity
+
     from billing.services import portal
-    from shared_models.models import UserEntity
 
     UserEntity.objects.create(
         user_id=cashier.id, entity_id=entity.id, role="cashier", approved=True
@@ -291,8 +293,9 @@ def test_finalize_credits_whoever_confirmed_not_whoever_finished(shop):
     finisher = make_user("finisher@test.com")
     _confirmed_in_the_wizard(owner, entity)
 
+    from minty_db.models import UserEntity
+
     from billing.services import checkout, store
-    from shared_models.models import UserEntity
 
     UserEntity.objects.create(
         user_id=finisher.id, entity_id=entity.id, role="admin", approved=True

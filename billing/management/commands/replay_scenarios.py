@@ -809,8 +809,7 @@ def _resolve_payer(email: str, payer_id: str | None) -> str:
     So an address the database already knows has to name its id out loud.
     """
     from django.db.models import Q
-
-    from shared_models.models import User
+    from minty_db.models import User
 
     if payer_id:
         row = User.objects.filter(pk=payer_id).first()
@@ -838,7 +837,7 @@ def _check_tag_owner(run: dict) -> None:
     run that worked. This file has warned about it in prose since the first tag rename. This
     is the check.
     """
-    from shared_models.models import EntityModuleSubscription
+    from minty_db.models import EntityModuleSubscription
 
     found = _entities(run)
     if not found:
@@ -1450,7 +1449,7 @@ def _survey(stripe, cutoff: datetime) -> tuple[list, list]:
     """(deletable clocks, orphan customers) - Minty's ``prune_replay_stripe.survey`` over
     THIS database only: a replay-purpose customer (or one on a ``replay-*`` clock) that no
     ``user_stripe_customer`` row names and that is older than ``cutoff``."""
-    from shared_models.models import UserStripeCustomer
+    from minty_db.models import UserStripeCustomer
 
     clocks = {}
     for clock in stripe.test_helpers.TestClock.list(limit=100).auto_paging_iter():
@@ -1510,14 +1509,16 @@ def prune_orphans(run: dict) -> None:
 
     NEVER FATAL. This is housekeeping and the replay is the job.
     """
+    from minty_db.models import Entity, SubscriptionAuditLog
+
     from billing.services.stripe_client import get_stripe
-    from shared_models.models import Entity, SubscriptionAuditLog
 
     # The database half first: `--teardown` deletes this run's entities moments before
     # `--setup` recreates them, and `subscription_audit_log` is the one table with no
     # foreign key to follow them down. Replay payers only.
     try:
-        alive = set(Entity.objects.values_list("id", flat=True))
+        # Text both sides: ids are uuid.UUID since minty-db, and a UUID is never "in" a set of text.
+        alive = {str(entity_id) for entity_id in Entity.objects.values_list("id", flat=True)}
         dangling = [
             row.id
             for row in SubscriptionAuditLog.objects.filter(payer_user_id=run["user_id"])
@@ -1554,7 +1555,7 @@ def prune_orphans(run: dict) -> None:
 
 
 def _entities(run: dict) -> dict:
-    from shared_models.models import Entity
+    from minty_db.models import Entity
 
     wanted = {_clone_name(run, name) for name, _ in run["scenarios"]}
     return {e.name: e for e in Entity.objects.filter(name__in=list(wanted))}
@@ -1563,9 +1564,10 @@ def _entities(run: dict) -> dict:
 # --- setup ------------------------------------------------------------------
 
 def setup(run: dict) -> None:
+    from minty_db.models import CurrencyInfo, Entity, User, UserEntity
+
     from billing.services import store
     from billing.services.stripe_client import get_stripe
-    from shared_models.models import CurrencyInfo, Entity, User, UserEntity
 
     origin = _origin(run, _end_of_run())
 
@@ -1869,10 +1871,11 @@ def _daily_jobs(run: dict, today: datetime, log: list[str]) -> None:
 
 
 def replay(run: dict, dry: bool = False) -> None:
+    from minty_db.models import User
+
     from billing.services import store
     from billing.services.checkout import cancel_module, reactivate_module, start_module_trials
     from billing.services.entity_modules import set_entity_module
-    from shared_models.models import User
 
     _patch_clock()
     _patch_notify(run)
@@ -2050,9 +2053,9 @@ def replay(run: dict, dry: bool = False) -> None:
 
 def report(run: dict) -> None:
     from django.db.models import F
+    from minty_db.models import SubscriptionInvoice
 
     from billing.services import store
-    from shared_models.models import SubscriptionInvoice
 
     with _context.scope():
         # NULLS LAST: Postgres sorts NULL first by default on ASC, so a reserved row
@@ -2135,8 +2138,7 @@ def reset(run: dict) -> None:
     Both are append-only in production, deliberately, and nothing here changes that. This
     is the replay's own payer being rewound.
     """
-    from billing.services import store
-    from shared_models.models import (
+    from minty_db.models import (
         EntityBillingConsent,
         EntityBillingGroup,
         EntityModuleSubscription,
@@ -2146,6 +2148,8 @@ def reset(run: dict) -> None:
         SubscriptionInvoice,
         SubscriptionInvoiceLine,
     )
+
+    from billing.services import store
 
     with _context.scope():
         ids = [str(e.id) for e in _entities(run).values()]
@@ -2193,7 +2197,7 @@ def reset(run: dict) -> None:
 
 def teardown(run: dict) -> None:
     """Remove the entities too. Matched on this run's names, so it cannot reach a real one."""
-    from shared_models.models import Entity, EntityModuleSubscription, UserEntity
+    from minty_db.models import Entity, EntityModuleSubscription, UserEntity
 
     with _context.scope():
         ids = [str(e.id) for e in _entities(run).values()]

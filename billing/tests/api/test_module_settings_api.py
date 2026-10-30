@@ -31,9 +31,9 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
+from minty_db.models import UserEntity
 
 from billing.tests.api.conftest import ORIGIN, bearer, post_json
-from shared_models.models import UserEntity
 
 pytestmark = pytest.mark.django_db
 
@@ -276,9 +276,9 @@ def test_the_page_needs_only_module_view(client, entity, cashier, payer_is):
 def test_a_path_for_another_company_is_refused(client, user, entity, countries, services):
     """The token (and header) name one company; the path names another. The role was proved
     for the first, so the second gets nothing from it."""
-    from shared_models.models import Entity
+    from minty_db.models import Entity
 
-    other = Entity.objects.create(id=str(uuid.uuid4()), name="Somebody Else Ltd", country_code="HK", status="connected")
+    other = Entity.objects.create(id=uuid.uuid4(), name="Somebody Else Ltd", country_code="HK", status="connected")
 
     response = client.get(_page(other), **_scoped(user, entity))
 

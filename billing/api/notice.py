@@ -29,7 +29,7 @@ from ninja import Router
 from billing.api._json import respond
 from billing.services._log import logger
 from core.auth import EntityBearerAuth, get_entity_role
-from shared_models.enums import is_superadmin
+from core.roles import is_superadmin
 
 
 class NoticeBearerAuth(EntityBearerAuth):

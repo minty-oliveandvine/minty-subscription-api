@@ -17,13 +17,12 @@ SUBSCRIPTION_SCHEDULER_ENABLED = False
 
 # Two test databases, chosen by MINTY_TEST_PG_URI:
 #
-#   unset  -> SQLite in memory, tables built FROM THE MODELS (SHARED_MODELS_MANAGED_FOR_TESTING).
+#   unset  -> SQLite in memory, tables built FROM THE MODELS (MIGRATION_MODULES has minty_db: None).
 #             Proves this service's logic. Cannot see whether the models match the real schema.
-#   set    -> PostgreSQL, a database built FROM docs/schema/01_schema_rebased.sql in the Minty
-#             repo by tests/pg_harness.py (loaded by conftest.py at the repo root). Nothing is
-#             created from the models; a mirror column the schema lacks fails on the SELECT,
-#             which is the point. Same knobs as Minty: MINTY_TEST_PG_DBNAME (minty_test),
-#             MINTY_TEST_PG_KEEP=1, PG_BIN, MINTY_REPO (C:\Github\Minty).
+#   set    -> PostgreSQL, a database built FROM minty-db's packaged 01_schema_rebased.sql by
+#             minty_db.testing.pg (the root conftest.py's plugin). Nothing is created from the
+#             models; a model column the schema lacks fails on the SELECT, which is the point.
+#             MINTY_TEST_PG_DBNAME (minty_test - always a unique one), MINTY_TEST_PG_KEEP=1.
 _PG_URI = os.environ.get("MINTY_TEST_PG_URI")
 if _PG_URI:
     from urllib.parse import parse_qs as _parse_qs
@@ -51,7 +50,6 @@ LOGGING["handlers"]["file_core"] = {"class": "logging.NullHandler"}  # noqa: F40
 LOGGING["handlers"]["file_api"] = {"class": "logging.NullHandler"}  # noqa: F405
 
 # Build the shared tables in the test database. In production they are Alembic's.
-SHARED_MODELS_MANAGED_FOR_TESTING = not _PG_URI  # tables come from the schema file on Postgres
 
 # No test may reach the real Flask app or Stripe. billing/tests/conftest.py blocks the
 # transport; these values exist so an un-stubbed call fails fast against an obviously fake

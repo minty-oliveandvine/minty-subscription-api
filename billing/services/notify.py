@@ -985,8 +985,9 @@ def recipient_for(user_id) -> tuple[str | None, str]:
     Falls back to ``xero_email``: a user who signed up through Xero may have no personal
     ``email`` at all, and they are just as capable of owing money as anyone else.
     """
+    from minty_db.models import User
+
     from billing.services.store import _by_pk
-    from shared_models.models import User
 
     user = _by_pk(User, user_id)
     if user is None:
@@ -1045,7 +1046,7 @@ def already_sent(event: str, dedupe_key: str) -> bool:
     raises: an unreadable log answers False, and ``_claim`` still refuses a second delivery.
     """
     try:
-        from shared_models.models import SubscriptionEmailLog
+        from minty_db.models import SubscriptionEmailLog
 
         return SubscriptionEmailLog.objects.filter(
             event=event, dedupe_key=str(dedupe_key), status=STATUS_SENT
@@ -1085,7 +1086,7 @@ def _claim(user_id, event: str, dedupe_key: str):
     The insert is a savepoint so a lost race (the unique index refusing it) can be caught
     without poisoning an enclosing transaction - pytest-django wraps each test in one.
     """
-    from shared_models.models import SubscriptionEmailLog
+    from minty_db.models import SubscriptionEmailLog
 
     existing = SubscriptionEmailLog.objects.filter(
         event=event, dedupe_key=str(dedupe_key)

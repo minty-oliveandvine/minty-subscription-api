@@ -1,58 +1,33 @@
 """Repo-root pytest hooks.
 
-Postgres test mode (MINTY_TEST_PG_URI set): build the test database from the Minty repo's
-``docs/schema/01_schema_rebased.sql`` with Minty's ``tests/pg_harness.py`` and hand it to
-pytest-django instead of letting it create one. Three codebases, one schema build — the
-mirrors in ``shared_models`` are then checked against the real database, which SQLite
-(tables built from the models) can never do.
+Postgres test mode (MINTY_TEST_PG_URI set): minty-db's plugin builds the test database from its
+packaged ``01_schema_rebased.sql`` and hands it to pytest-django, so the models run against
+the real schema, which SQLite (tables built from the models) can never do. Unset, the plugin
+does nothing and the SQLite path in ``config/settings_test.py`` applies.
 
-Unset, this file does nothing and the SQLite path in ``config/settings_test.py`` applies.
+The id guard: ids are ``uuid.UUID`` objects since minty-db (owner, 2026-10-28), while request
+paths, token claims and JSON carry text. ``UUID("x") == "x"`` is quietly False, so a missed
+conversion skips a match without raising. Under test, comparing a UUID with a str raises
+instead. Dict and set lookups don't compare unless hashes collide, so the guard can't see a
+UUID key looked up with text (or the reverse); those are converted at the edge.
 """
 
 from __future__ import annotations
 
-import importlib.util
-import os
-import sys
-from pathlib import Path
+import re
+import uuid
 
-import pytest
+pytest_plugins = ["minty_db.testing.pg"]
 
-if os.environ.get("MINTY_TEST_PG_URI"):
+_uuid_eq = uuid.UUID.__eq__
+# Only uuid-shaped text is a missed conversion; Django itself compares a lookup value with "".
+_UUID_TEXT = re.compile(r"[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}")
 
-    def _load_harness():
-        minty = Path(os.environ.get("MINTY_REPO", r"C:\Github\Minty"))
-        path = minty / "tests" / "pg_harness.py"
-        if not path.exists():
-            raise RuntimeError(f"Minty repo not found at {minty} (set MINTY_REPO); need {path}")
-        spec = importlib.util.spec_from_file_location("minty_pg_harness", path)
-        mod = importlib.util.module_from_spec(spec)
-        assert spec.loader is not None
-        sys.modules[spec.name] = mod  # dataclasses resolve annotations via sys.modules
-        spec.loader.exec_module(mod)
-        return mod
 
-    @pytest.fixture(scope="session")
-    def django_db_setup(django_db_blocker):
-        """Replace pytest-django's database creation with the schema-file build."""
-        from django.conf import settings
-        from django.db import connections
+def _strict_eq(self: uuid.UUID, other: object):
+    if isinstance(other, str) and _UUID_TEXT.fullmatch(other.strip("{}")):
+        raise TypeError(f"comparing UUID {self} with the str {other!r}: convert one side first")
+    return _uuid_eq(self, other)
 
-        harness = _load_harness()
-        built = harness.build()
-        try:
-            for alias in connections:
-                connections[alias].close()
-            settings.DATABASES["default"]["NAME"] = built.dbname
-            connections["default"].settings_dict["NAME"] = built.dbname
-            connections["default"].settings_dict["TEST"]["NAME"] = built.dbname
-            with django_db_blocker.unblock():
-                with connections["default"].cursor() as cur:
-                    cur.execute("SELECT count(*) FROM information_schema.tables WHERE table_schema=%s", [settings.DB_SCHEMA])
-                    (n,) = cur.fetchone()
-                    assert n >= 50, f"harness database has only {n} tables"
-            yield
-        finally:
-            for alias in connections:
-                connections[alias].close()
-            built.drop()
+
+uuid.UUID.__eq__ = _strict_eq  # type: ignore[method-assign]

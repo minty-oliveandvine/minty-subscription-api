@@ -38,8 +38,8 @@ def stage_for(quiet: timedelta) -> int | None:
 
 def _creators(entity_ids: list[str]) -> dict[str, str]:
     """entity id -> the user who created it: its earliest approved admin, if active."""
-    from shared_models.enums import EntityRole
-    from shared_models.models import User, UserEntity
+    from minty_db.enums import EntityRole
+    from minty_db.models import User, UserEntity
 
     creators: dict[str, str] = {}
     for row in (UserEntity.objects
@@ -60,8 +60,8 @@ def notify_unfinished_onboarding(now: datetime | None = None,
     Returns ``{"reminded": [...], "skipped": [...]}`` - one entry per company that was due,
     ``skipped`` naming why (no creator, already sent, no address, mail off).
     """
-    from shared_models.enums import EntityStatus
-    from shared_models.models import Entity
+    from minty_db.enums import EntityStatus
+    from minty_db.models import Entity
 
     now = now or clock.now()
     due = list(

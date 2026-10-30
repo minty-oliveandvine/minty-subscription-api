@@ -166,13 +166,13 @@ def module_on(entity_id) -> bool:
 
 
 def db_entity(entity_id):
-    from shared_models.models import Entity
+    from minty_db.models import Entity
 
     return Entity.objects.get(pk=entity_id)
 
 
 def db_user(user_id):
-    from shared_models.models import User
+    from minty_db.models import User
 
     return User.objects.get(pk=user_id)
 
@@ -234,7 +234,7 @@ def test_a_trial_that_ends_without_a_card_expires_and_lapses(shop, monkeypatch):
     from billing.services import checkout, consent
 
     outcome = checkout.convert_or_expire_due_trials()
-    assert outcome["expired"] == [{"entity_id": entity.id, "code": MODULE}]
+    assert outcome["expired"] == [{"entity_id": str(entity.id), "code": MODULE}]
     assert outcome["converted"] == []
     assert module_on(entity.id) is False
     assert str(module_row(entity.id).phase) == "expired"
@@ -271,15 +271,16 @@ def test_a_trial_that_ends_with_a_card_converts_to_an_exact_in_house_invoice(sho
     stripe = install_fake_stripe(monkeypatch, pays=True)
     ended = module_row(entity.id).trial_end + timedelta(minutes=1)
     set_clock(monkeypatch, ended)
-    from billing.services import checkout, store
-    from shared_models.models import (
+    from minty_db.models import (
         SubscriptionAuditLog,
         SubscriptionInvoice,
         SubscriptionInvoiceLine,
     )
 
+    from billing.services import checkout, store
+
     outcome = checkout.convert_or_expire_due_trials()
-    assert outcome["converted"] == [{"entity_id": entity.id, "code": MODULE}], outcome
+    assert outcome["converted"] == [{"entity_id": str(entity.id), "code": MODULE}], outcome
     assert outcome["expired"] == []
 
     row = module_row(entity.id)
@@ -290,7 +291,7 @@ def test_a_trial_that_ends_with_a_card_converts_to_an_exact_in_house_invoice(sho
     assert len(invoices) == 1
     invoice = invoices[0]
     lines = list(SubscriptionInvoiceLine.objects.filter(invoice_id=invoice.id))
-    assert [str(line.entity_id) for line in lines] == [entity.id]
+    assert [line.entity_id for line in lines] == [entity.id]
     # cents are integers: exact, and the invoice total is the line
     assert Decimal(invoice.total) == Decimal(sum(line.amount for line in lines))
     assert 0 < invoice.total <= PRICE_CENTS
@@ -313,7 +314,7 @@ def test_a_trial_that_ends_with_a_card_converts_to_an_exact_in_house_invoice(sho
     assert len(audit) == 1
     (entry,) = audit
     assert str(entry.function_code) == MODULE
-    assert str(entry.payer_user_id) == owner.id and str(entry.actor_user_id) == owner.id
+    assert entry.payer_user_id == owner.id and entry.actor_user_id == owner.id
     assert entry.action == "cancel" and str(entry.outcome) == "succeeded"
     assert (str(entry.phase_before), str(entry.phase_after)) == ("active", "scheduled_cancel")
     assert entry.cancel_reason == "moving on"
@@ -341,7 +342,7 @@ def test_the_payer_portal_lists_the_converted_company(shop, monkeypatch):
     assert checkout.convert_or_expire_due_trials()["converted"]
 
     body = portal.build_payer_subscriptions(owner.id)
-    assert [e["entity_id"] for e in body["entities"]] == [entity.id]
+    assert [e["entity_id"] for e in body["entities"]] == [str(entity.id)]
     module = next(m for m in body["entities"][0]["modules"] if m["code"] == MODULE)
     assert module["status"] == "active"
     assert body["billing"]["paid_through"] is not None

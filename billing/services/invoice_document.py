@@ -214,9 +214,10 @@ def _bill_to(user_id, invoice) -> tuple[str, tuple[str, ...], str]:
     (``portal.invoice_account_id``). A payer with no account at all is billed by their own
     name and email, as ``account_name`` already reads for an unnamed account.
     """
+    from minty_db.models import User
+
     from billing.services import payment_methods, portal
     from billing.services.store import _by_pk
-    from shared_models.models import User
 
     groups = sub_store.billing_groups_for_payer(user_id)
     account_id = portal.invoice_account_id(invoice, [str(group.id) for group in groups])

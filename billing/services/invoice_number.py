@@ -52,7 +52,7 @@ def _period(moment: datetime | None) -> str:
 def _next_value(period: str) -> int:
     """Take the month's next number. Call inside a transaction: the UPDATE holds the
     counter's row lock until it commits, which is what keeps two workers apart."""
-    from shared_models.models import SubscriptionInvoiceCounter as Counter
+    from minty_db.models import SubscriptionInvoiceCounter as Counter
 
     Counter.objects.bulk_create([Counter(period=period, last_value=0)], ignore_conflicts=True)
     Counter.objects.filter(period=period).update(last_value=F("last_value") + 1)
@@ -66,7 +66,7 @@ def assign(invoice_id) -> str | None:
     is locked first, so two settles of the same invoice at once give it one number, and the
     counter moves in the same transaction, so a failure here leaves no gap.
     """
-    from shared_models.models import SubscriptionInvoice
+    from minty_db.models import SubscriptionInvoice
 
     with transaction.atomic():
         invoice = (

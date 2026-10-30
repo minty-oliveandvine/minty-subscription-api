@@ -234,8 +234,9 @@ def test_an_item_nobody_reserved_is_refused(monkeypatch, caplog):
 
 
 def test_a_total_that_disagrees_with_the_reservation_is_refused(monkeypatch, caplog):
+    from minty_db.models import SubscriptionInvoice
+
     from billing.services import billing_gateway
-    from shared_models.models import SubscriptionInvoice
 
     stripe, left = _stranded(monkeypatch)
     SubscriptionInvoice.objects.filter(external_id=left).update(total=1)
@@ -249,8 +250,9 @@ def test_a_reworded_line_is_still_the_same_item(monkeypatch):
     """Matched by amount, company and days - never by the words, which a resume rebuilds from
     names cut to 255 characters, and which a deploy may have changed since. Matching on them
     would take the item already there for a missing one and charge it twice."""
+    from minty_db.models import SubscriptionInvoiceLine
+
     from billing.services import billing_gateway
-    from shared_models.models import SubscriptionInvoiceLine
 
     stripe, left = _stranded(monkeypatch)
     SubscriptionInvoiceLine.objects.filter(

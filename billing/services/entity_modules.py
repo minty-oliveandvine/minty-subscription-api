@@ -26,9 +26,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 
+from minty_db.enums import ModuleCode
+from minty_db.models import EntityFunction, EntityFunctionMap
+
 from billing.services._log import logger
-from shared_models.enums import ModuleCode
-from shared_models.models import EntityFunction, EntityFunctionMap
 
 # Canonical module codes: the ``module_code`` enum (schema item 20). The Payment Request
 # module's code is PAYMENT_REQUEST; ``MODULE_BILL`` keeps its historical name so the call

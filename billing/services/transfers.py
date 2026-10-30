@@ -49,6 +49,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from django.db import IntegrityError, transaction
+from minty_db.models import SubscriptionTransfer, User, UserEntity
 
 from billing.services import access, clock, store
 from billing.services._log import logger
@@ -93,7 +94,6 @@ from billing.services.constants import (
 from billing.services.constants import (
     TRANSFER_STRANDED_STATUSES as STRANDED_STATUSES,
 )
-from shared_models.models import SubscriptionTransfer, User, UserEntity
 
 #: How long an unanswered offer stays open. Checked at ACCEPT as well as by any sweep,
 #: so an expired offer cannot be accepted merely because nothing has swept it yet —
@@ -228,7 +228,7 @@ def unseen_outcomes(from_user_id, *, limit: int = 5) -> list[dict]:
     handful of unanswered handovers has a different problem, and the screen shows them one
     at a time anyway.
     """
-    from shared_models.models import Entity
+    from minty_db.models import Entity
 
     if not from_user_id:
         return []
@@ -297,7 +297,7 @@ def incoming_transfers_payload(user_id) -> list[dict]:
     here rather than read off the row because the stored one is an estimate taken when the
     offer was made, and the outgoing payer's ``paid_through`` advances on every renewal.
     """
-    from shared_models.models import Entity
+    from minty_db.models import Entity
 
     out = []
     for offer in incoming_transfers(user_id):
@@ -1500,7 +1500,7 @@ def _notify(offer, kind: str) -> None:
     event, recipient, path = events[kind]
 
     try:
-        from shared_models.models import Entity
+        from minty_db.models import Entity
 
         entity = store._by_pk(Entity, offer.entity_id)
         names = {}

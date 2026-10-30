@@ -28,6 +28,8 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime
 
+from minty_db.models import CountryInfo, Entity, EntityFunction, User
+
 from billing.services import display
 from billing.services._log import logger
 from billing.services.constants import (
@@ -38,7 +40,6 @@ from billing.services.constants import (
 )
 from billing.services.entity_modules import MODULE_CODES
 from billing.services.store import _by_pk
-from shared_models.models import CountryInfo, Entity, EntityFunction, User
 
 # --- Status vocabulary -------------------------------------------------------
 #
@@ -417,9 +418,10 @@ def _unactivated_for_admin(user_id) -> dict[str, dict]:
     payer's own companies still render. The list losing a row is worth less than the page
     going down, and it is logged.
     """
+    from minty_db.models import UserEntity
+
     from billing.services import store as sub_store
     from core.policy import Permission, has_permission
-    from shared_models.models import UserEntity
 
     try:
         member_of = list(
@@ -674,8 +676,9 @@ def _admin_candidates(entity_id) -> list[dict]:
     admin on the same ladder (``permission_policy.ROLE_RANK``), and dropping someone for
     being MORE senior than the bar is the kind of filter that reads as a missing user.
     """
+    from minty_db.models import UserEntity
+
     from core.policy import Role, role_at_least
-    from shared_models.models import UserEntity
 
     try:
         # Same filter as the Settings user list: an unapproved row is a request to join,
@@ -1205,9 +1208,10 @@ def retryable_invoice_ids(user_id, failed=None) -> set[str]:
     metadata would. A failed invoice not in this set is shown failed, with no button that could
     only refuse.
     """
+    from minty_db.models import SubscriptionInvoice
+
     from billing.services import clock, dunning, policy
     from billing.services import store as sub_store
-    from shared_models.models import SubscriptionInvoice
 
     if failed is None:
         failed = SubscriptionInvoice.objects.filter(
@@ -1278,7 +1282,7 @@ def build_payer_invoices(
     debt it is. An account that is not the caller's matches nothing. Narrowed in Python,
     like the entity filter, over a set already fixed to the payer.
     """
-    from shared_models.models import SubscriptionInvoice
+    from minty_db.models import SubscriptionInvoice
 
     invoices = list(
         SubscriptionInvoice.objects.filter(payer_user_id=str(user_id))
@@ -1407,7 +1411,7 @@ def _payers_invoice(user_id, invoice_id):
     request reaches another payer's history by either route."""
     import uuid
 
-    from shared_models.models import SubscriptionInvoice
+    from minty_db.models import SubscriptionInvoice
 
     try:
         wanted = str(uuid.UUID(str(invoice_id)))
@@ -1457,11 +1461,12 @@ def build_invoice_breakdown(user_id, invoice_id) -> dict | None:
     """
     from datetime import timedelta
 
+    from minty_db.models import BillingPlan
+
     from billing.services import money
     from billing.services import store as sub_store
     from billing.services.billing import period_containing
     from billing.services.renewals import _extension_product
-    from shared_models.models import BillingPlan
 
     invoice = _payers_invoice(user_id, invoice_id)
     if invoice is None:

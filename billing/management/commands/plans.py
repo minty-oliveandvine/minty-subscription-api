@@ -6,8 +6,7 @@ and the schema."""
 from __future__ import annotations
 
 from django.core.management.base import BaseCommand
-
-from shared_models.models import BillingPlan
+from minty_db.models import BillingPlan
 
 
 class Command(BaseCommand):

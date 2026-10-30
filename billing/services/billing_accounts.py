@@ -105,8 +105,9 @@ def _accounts(user_id) -> dict:
 
 
 def _payer(user_id) -> dict:
+    from minty_db.models import User
+
     from billing.services import portal
-    from shared_models.models import User
 
     return portal._person(sub_store._by_pk(User, user_id), user_id)
 
@@ -118,7 +119,7 @@ def _name(group, payer: dict) -> str:
 
 
 def _company_name(entity_id) -> str:
-    from shared_models.models import Entity
+    from minty_db.models import Entity
 
     entity = sub_store._by_pk(Entity, entity_id)
     return ((getattr(entity, "name", None) or "").strip()) or "That company"
@@ -153,7 +154,7 @@ def set_default_card(user_id, account_id, payment_method_id) -> dict:
 def _valid_address(address) -> dict:
     """The address as Stripe will take it, or a 422. Line 1 and a registered country are
     required; every other key is optional and a blank one clears."""
-    from shared_models.models import CountryInfo
+    from minty_db.models import CountryInfo
 
     if not isinstance(address, dict):
         raise PaymentMethodError("Enter the address to bill.", status=422)
@@ -352,9 +353,10 @@ def retry_invoice(user_id, invoice_id) -> dict | None:
     """
     import uuid
 
+    from minty_db.models import SubscriptionInvoice
+
     from billing.services.dunning import retry_now
     from billing.services.portal import FAILED_INVOICE_STATUSES, retryable_invoice_ids
-    from shared_models.models import SubscriptionInvoice
 
     try:
         wanted = str(uuid.UUID(str(invoice_id)))

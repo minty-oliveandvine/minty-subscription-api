@@ -151,8 +151,9 @@ def test_an_attempt_still_in_flight_is_refused_not_discarded(monkeypatch):
 
 def _reserved(payer, entity, *, age):
     """A reservation of the first attempt that the processor never confirmed, ``age`` old."""
+    from minty_db.models import SubscriptionInvoice
+
     from billing.services import store
-    from shared_models.models import SubscriptionInvoice
 
     row = store.reserve_invoice(
         payer_user_id=payer.id, stripe_customer_id=CUSTOMER, period=PERIOD, currency="hkd",

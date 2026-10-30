@@ -14,8 +14,7 @@ from datetime import UTC, datetime
 
 import pytest
 from django.db.models.expressions import Combinable
-
-from shared_models.models import EntityFunctionMap
+from minty_db.models import EntityFunctionMap
 
 from .conftest import make_entity, make_user, seed_module
 

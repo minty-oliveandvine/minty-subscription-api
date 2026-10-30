@@ -19,8 +19,7 @@ import jwt
 import pytest
 from django.conf import settings
 from django.test import Client
-
-from shared_models.models import CountryInfo, Entity, User, UserEntity
+from minty_db.models import CountryInfo, Entity, User, UserEntity
 
 
 def make_token(user_id, *, entity_id="", role="admin", system_role="normal", minutes=30,
@@ -58,7 +57,7 @@ def client():
 @pytest.fixture
 def user(db):
     return User.objects.create(
-        id=str(uuid.uuid4()),
+        id=uuid.uuid4(),
         email="payer@example.com",
         password="not-checked-here",
         first_name="Pay",
@@ -73,7 +72,7 @@ def user(db):
 def other_user(db):
     """Somebody with no role on the entity under test - the 401 case on company routes."""
     return User.objects.create(
-        id=str(uuid.uuid4()),
+        id=uuid.uuid4(),
         email="stranger@example.com",
         password="not-checked-here",
         first_name="No",
@@ -96,7 +95,7 @@ def countries(db):
 def entity(db, user, countries):
     """A live company the ``user`` fixture administers."""
     e = Entity.objects.create(
-        id=str(uuid.uuid4()), name="Payer Trading Co", country_code="HK", status="connected",
+        id=uuid.uuid4(), name="Payer Trading Co", country_code="HK", status="connected",
     )
     UserEntity.objects.create(user_id=user.id, entity_id=e.id, role="admin", approved=True)
     return e

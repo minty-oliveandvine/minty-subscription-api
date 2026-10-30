@@ -441,11 +441,12 @@ class _Lines(list):
 @pytest.fixture
 def payer_invoices(app, monkeypatch):
     """Drive ``build_payer_invoices`` off synthetic invoices."""
-    import shared_models.models as model
+    import minty_db.models as model
+
     from billing.services import portal
 
     def _install(invoices):
-        # Patched on ``shared_models.models`` because that is where ``build_payer_invoices``
+        # Patched on ``minty_db.models`` because that is where ``build_payer_invoices``
         # imports it at call time. ``order_by`` on the fake keeps the order given.
         monkeypatch.setattr(model, "SubscriptionInvoice", fake_model(invoices))
         # Money formatting reaches for currency_info; the symbol is not what is under test.
@@ -940,7 +941,8 @@ def test_a_currency_code_is_spaced_off_the_amount(app, monkeypatch):
     to the bare code, so this is the ordinary case rather than the edge one. Same rule as
     ``modules._fmt_money``: a code is spaced, a glyph is not.
     """
-    import shared_models.models as models_db
+    import minty_db.models as models_db
+
     from billing.services import portal
 
     monkeypatch.setattr(models_db, "CurrencyInfo", fake_model([]))
@@ -953,9 +955,10 @@ def test_a_recorded_glyph_is_never_printed_the_code_is(app, monkeypatch):
     """"HKD 57.54", even where ``currency_info`` records "HK$" (owner, 2026-10-21: every
     amount carries its code, never a symbol).
 
-    Patched on ``shared_models.models``, where a lookup would read it, to prove none does.
+    Patched on ``minty_db.models``, where a lookup would read it, to prove none does.
     """
-    import shared_models.models as models_db
+    import minty_db.models as models_db
+
     from billing.services import portal
 
     monkeypatch.setattr(models_db, "CurrencyInfo", fake_model([SimpleNamespace(symbol="HK$")]))
@@ -1078,7 +1081,7 @@ def test_only_admins_are_offered(app, monkeypatch):
         (_member("u5", "Sam", "Lee", "sam.lee@x.com"), "shop_manager"),
     ]
 
-    import shared_models.models as models_db
+    import minty_db.models as models_db
 
     # The service reads the memberships (user_id, role) then the users by id.
     monkeypatch.setattr(
@@ -1101,7 +1104,8 @@ def test_only_admins_are_offered(app, monkeypatch):
 def test_losing_the_member_query_costs_the_list_and_not_the_page(app, monkeypatch):
     """Same posture as the rest of the portal's optional reads: answer nothing rather than
     fail the page. (Flask's copy also asserted a session rollback; autocommit needs none.)"""
-    import shared_models.models as models_db
+    import minty_db.models as models_db
+
     from billing.services import portal
 
     class _Boom:

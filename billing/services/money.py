@@ -61,7 +61,7 @@ def decimal_places(currency_code: str | None) -> int:
         # Imported here, not at module scope: the subscription services are imported by
         # the Stripe client, and pulling the model layer in at import time drags the
         # whole entity model graph along with it (same reason as ``clock.database_now``).
-        from shared_models.models import CurrencyInfo
+        from minty_db.models import CurrencyInfo
 
         row = CurrencyInfo.objects.filter(currency_code=code).first()
         if row is None:

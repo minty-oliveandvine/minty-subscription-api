@@ -1,9 +1,9 @@
 """The three rules of the mirrors, as tests.
 
-1. Every model is ``managed = False`` and this repo has no ``migrations/`` directory: Alembic
-   in Minty owns the DDL, and ``docker/entrypoint.sh`` runs no ``migrate``.
-2. The fourteen subscription tables are all here, under their schema names, and so are the
-   read-only rows the engine needs (``user``, ``user_entity``, ``entities``,
+1. This service ships no DDL: no ``migrations/`` directory, and minty-db's migrations are
+   switched off here (``MIGRATION_MODULES``) - they run by hand, never from a service.
+2. The models are minty-db's (since 2026-10-30), which has every table; the code imports only
+   the fourteen subscription tables' models and the read-only rows the engine needs (``user``, ``user_entity``, ``entities``,
    ``entity_function``, ``entity_function_map``, ``country_info``, ``currency_info``,
    ``invitation``) - nothing else. A new table here is a plan amendment, not a commit.
 3. ``stripe`` is imported in exactly one module (``billing/services/stripe_client.py``,
@@ -47,36 +47,33 @@ READ_ONLY_TABLES = {
 }
 
 
-def _models():
-    return [m for m in apps.get_models() if m._meta.app_label in ("shared_models", "billing")]
+def _imported_models() -> set[str]:
+    """Every minty_db model the service's code (not its tests) names."""
+    names = set()
+    for path in ROOT.rglob("*.py"):
+        rel = path.relative_to(ROOT).as_posix()
+        if ".venv" in rel or rel.startswith(("billing/tests/", "e2e/")):
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8-sig"))):
+            if isinstance(node, ast.ImportFrom) and node.module == "minty_db.models":
+                names |= {a.name for a in node.names}
+            elif isinstance(node, ast.Attribute) and ast.unparse(node.value) in ("minty_db.models", "models_db"):
+                names.add(node.attr)
+    return names
 
 
-def test_every_model_is_unmanaged_in_production():
-    # Under test SHARED_MODELS_MANAGED_FOR_TESTING may have flipped the runtime flag (SQLite
-    # builds the tables from the models); the SOURCE must still say managed = False.
-    source = (ROOT / "shared_models" / "models.py").read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    classes = [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name != "Meta"]
-    for cls in classes:
-        metas = [n for n in cls.body if isinstance(n, ast.ClassDef) and n.name == "Meta"]
-        assert metas, f"{cls.name} has no Meta"
-        meta = {
-            n.targets[0].id: n.value.value
-            for n in metas[0].body
-            if isinstance(n, ast.Assign) and isinstance(n.value, ast.Constant)
-        }
-        if meta.get("abstract") is True:
-            continue  # a mixin, not a table
-        assert meta.get("managed") is False, f"{cls.name} must be managed = False"
+def test_no_migrations_directory_and_minty_db_never_migrates_here():
+    from django.conf import settings
 
-
-def test_no_migrations_directory_anywhere():
     assert not list(ROOT.glob("*/migrations")), "this service ships no DDL"
+    assert settings.MIGRATION_MODULES.get("minty_db", "unset") is None
 
 
-def test_the_tables_are_exactly_the_domain_plus_the_read_only_rows():
-    tables = {m._meta.db_table for m in _models()}
-    assert tables == SUBSCRIPTION_TABLES | READ_ONLY_TABLES
+def test_the_code_uses_only_the_domain_tables_and_the_read_only_rows():
+    allowed = {m.__name__ for m in apps.get_app_config("minty_db").get_models()
+               if m._meta.db_table in SUBSCRIPTION_TABLES | READ_ONLY_TABLES}
+    assert len(allowed) == len(SUBSCRIPTION_TABLES | READ_ONLY_TABLES), "a listed table has no minty_db model"
+    assert _imported_models() <= allowed, sorted(_imported_models() - allowed)
 
 
 def test_stripe_is_imported_in_one_module_at_most():

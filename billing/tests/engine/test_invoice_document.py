@@ -182,9 +182,10 @@ def test_a_plan_09a_has_no_words_for_prints_its_own_name_last(app, monkeypatch, 
 def test_every_company_row_is_one_stripe_item_in_stripe_s_own_words(app, monkeypatch):
     """Issued through the real gateway against a Stripe that keeps what it was sent: each
     row's full text and amount is exactly one item's description and amount."""
+    from minty_db.models import SubscriptionInvoice, UserStripeCustomer
+
     from billing.services import billing_gateway
     from billing.services.billing import Invoice, Line, Period
-    from shared_models.models import SubscriptionInvoice, UserStripeCustomer
 
     _hkd()
     payer = _payer()
@@ -243,8 +244,9 @@ def test_bill_to_is_the_invoices_billing_account_as_08b_prints_it(app, monkeypat
 def test_an_invoice_from_before_accounts_belongs_to_the_oldest_account(app, monkeypatch):
     """The same attribution as the invoice list's account filter and dunning's - the PDF
     and the page it is downloaded from agree on whose invoice it is."""
+    from minty_db.models import PayerBillingGroup
+
     from billing.services import portal
-    from shared_models.models import PayerBillingGroup
 
     _hkd()
     payer = _payer()
@@ -281,7 +283,7 @@ def test_an_unnamed_account_reads_as_the_payer_and_so_does_its_email(app, monkey
 
 def _company_on(account, payer, name, business_email):
     """A company on ``account`` that ``payer`` still pays for, with its business email."""
-    from shared_models.models import EntityBillingGroup, EntityModuleSubscription
+    from minty_db.models import EntityBillingGroup, EntityModuleSubscription
 
     entity = _entity(None, name)
     entity.business_email = business_email
@@ -291,7 +293,7 @@ def _company_on(account, payer, name, business_email):
         source="chosen",
     )
     EntityModuleSubscription.objects.create(
-        id=str(uuid.uuid4()), entity_id=entity.id, function_code="PETTY_CASH",
+        id=uuid.uuid4(), entity_id=entity.id, function_code="PETTY_CASH",
         payer_user_id=payer.id, phase="trial", trial_end=UPGRADED,
     )
     return entity
@@ -371,8 +373,9 @@ def test_an_address_that_cannot_be_read_is_refused_never_printed_blank(app, monk
 
 
 def test_the_bill_date_is_the_date_the_invoice_list_shows(app, monkeypatch):
+    from minty_db.models import SubscriptionInvoice
+
     from billing.services import portal
-    from shared_models.models import SubscriptionInvoice
 
     _hkd()
     payer = _payer()

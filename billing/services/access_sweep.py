@@ -27,10 +27,10 @@ from datetime import UTC, timedelta
 
 from django.db.models import Exists, OuterRef
 from django.db.models.functions import Now
+from minty_db.enums import ModuleCode
+from minty_db.models import Entity, EntityFunction, EntityFunctionMap, EntityModuleSubscription
 
 from billing.services._log import logger
-from shared_models.enums import ModuleCode
-from shared_models.models import Entity, EntityFunction, EntityFunctionMap, EntityModuleSubscription
 
 
 def revoke_ungranted_module_access(*, dry_run: bool = True) -> list[dict]:
@@ -299,12 +299,16 @@ def _sweep_scope(payer_user_id, sub_store):
         EntityFunction.objects.filter(function_code__in=entity_modules.MODULE_CODES)
         .values_list("id", flat=True)
     )
+    # Text ids throughout: the store's reads below answer with text, and a uuid.UUID (what the
+    # models give since minty-db) and its text are different set members - mixing them would
+    # sweep a company twice, empty the payer intersection and miss the onboarding exemption.
     entity_ids = (
-        set(
-            EntityFunctionMap.objects.filter(
+        {
+            str(entity_id)
+            for entity_id in EntityFunctionMap.objects.filter(
                 entity_function_id__in=module_fn_ids, is_enabled=True
             ).values_list("entity_id", flat=True)
-        )
+        }
         if module_fn_ids
         else set()
     )
@@ -324,7 +328,7 @@ def _sweep_scope(payer_user_id, sub_store):
     # judge the head of the batch by a different rule than the tail. Unfiltered by
     # entity_ids on purpose: the set of in-flight onboardings is small, and an IN
     # clause over every enabled entity is the part that would not scale.
-    onboarding_ids = set(
-        Entity.objects.filter(status="onboarding").values_list("id", flat=True)
-    )
+    onboarding_ids = {
+        str(entity_id) for entity_id in Entity.objects.filter(status="onboarding").values_list("id", flat=True)
+    }
     return entity_ids, onboarding_ids

@@ -757,7 +757,7 @@ def _token(app, **claims):
 @pytest.fixture
 def signed_in(monkeypatch):
     """A resolvable user for the routes' ``User.query.get`` check."""
-    import shared_models.models as models_db
+    import minty_db.models as models_db
 
     monkeypatch.setattr(
         models_db,

@@ -36,14 +36,15 @@ FAILED = "open"
 def _payer(monkeypatch, email="retry@payer.test"):
     """A payer with a cycle and one account (card ``pm_a``) paid to ``PAID_THROUGH``, and the
     clock two days past it - inside the give-up window."""
+    from minty_db.models import UserStripeCustomer
+
     from billing.services import clock, store
-    from shared_models.models import UserStripeCustomer
 
     monkeypatch.setattr(clock, "now", lambda: NOW)
     seed_currency("HKD")
     payer = _user(None, email)
     UserStripeCustomer(
-        id=str(uuid.uuid4()),
+        id=uuid.uuid4(),
         user_id=str(payer.id),
         stripe_customer_id=f"cus_{uuid.uuid4().hex[:8]}",
         anchor_at=ANCHOR,
@@ -64,10 +65,10 @@ def _key(payer, account, start=PAID_THROUGH) -> str:
 def _invoice(payer, account, *, external, key, status=FAILED, age_days=0):
     """A local invoice row as the gateway leaves it: ``idempotency_key`` is the renewal's
     period key (``renewals.period_key``), or a change's own key."""
-    from shared_models.models import SubscriptionInvoice
+    from minty_db.models import SubscriptionInvoice
 
     invoice = SubscriptionInvoice(
-        id=str(uuid.uuid4()),
+        id=uuid.uuid4(),
         payer_user_id=str(payer.id),
         billing_group_id=str(account.id) if account is not None else None,
         external_id=external,

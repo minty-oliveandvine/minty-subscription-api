@@ -42,10 +42,10 @@ class _DbShim:
 
 
 def _user(db, email):
-    from shared_models.models import User
+    from minty_db.models import User
 
     row = User(
-        id=str(uuid.uuid4()),
+        id=uuid.uuid4(),
         email=email,
         username=email,
         first_name="A",
@@ -60,9 +60,9 @@ def _user(db, email):
 
 
 def _entity(db, name="Acme"):
-    from shared_models.models import Entity
+    from minty_db.models import Entity
 
-    row = Entity(id=str(uuid.uuid4()), name=name, status="disconnected")
+    row = Entity(id=uuid.uuid4(), name=name, status="disconnected")
     row.save(force_insert=True)
     pass  # commit: autocommit under Django
     return row
@@ -82,7 +82,7 @@ def test_a_second_module_joins_the_entitys_existing_payer(app, db_session):
 
         rows = store.module_rows_for_entity(entity.id)
         assert {r.function_code for r in rows} == {"PETTY_CASH", "PAYMENT_REQUEST"}
-        assert {r.payer_user_id for r in rows} == {str(first.id)}, (
+        assert {r.payer_user_id for r in rows} == {first.id}, (
             "the second module must join the established payer, not open a second one"
         )
         assert store.payer_for_entity(entity.id) == str(first.id)
@@ -105,7 +105,7 @@ def test_an_update_cannot_move_the_payer(app, db_session):
 
         row = store.module_row(entity.id, "PETTY_CASH")
         assert row.phase == "scheduled_cancel", "the field write must still land"
-        assert row.payer_user_id == str(owner.id), "but the payer must not move"
+        assert row.payer_user_id == owner.id, "but the payer must not move"
 
 
 def test_the_first_payer_is_still_free_to_be_anyone(app, db_session):
@@ -153,5 +153,5 @@ def test_repeat_writes_by_the_established_payer_are_untouched(app, db_session):
 
         rows = store.module_rows_for_entity(entity.id)
         assert len(rows) == 2
-        assert {r.payer_user_id for r in rows} == {str(owner.id)}
+        assert {r.payer_user_id for r in rows} == {owner.id}
         assert store.module_row(entity.id, "PAYMENT_REQUEST").phase == "active"

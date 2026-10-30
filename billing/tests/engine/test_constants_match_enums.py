@@ -7,16 +7,17 @@ Minty's ``column_types._enum`` assertion, ported. The audit ``action`` column is
 
 from __future__ import annotations
 
-from billing.services import constants
-from billing.services.entity_modules import MODULE_CODES
-from shared_models.enums import (
+from minty_db.enums import (
     AuditOutcome,
     ExtensionState,
     ModuleCode,
     SubscriptionPhase,
     TransferStatus,
 )
-from shared_models.models import SubscriptionAuditLog
+from minty_db.models import SubscriptionAuditLog
+
+from billing.services import constants
+from billing.services.entity_modules import MODULE_CODES
 
 
 def test_phases_are_exactly_the_enum_members():

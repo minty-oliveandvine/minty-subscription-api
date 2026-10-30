@@ -271,10 +271,11 @@ def test_the_renewal_puts_the_terms_on_the_extension_line(monkeypatch):
 def test_the_invoice_line_row_records_what_each_line_paid_for():
     """``store.reserve_invoice`` writes the three columns as the lines carry them - and a line
     that had no single rate is stored with none, never a blend."""
+    from minty_db.models import SubscriptionInvoiceLine
+
     from billing.services import store
     from billing.services.billing import Line, Period
     from billing.tests.engine.conftest import make_entity, make_user, seed_currency
-    from shared_models.models import SubscriptionInvoiceLine
 
     currency = seed_currency("HKD")
     payer = make_user("terms@payer.test")

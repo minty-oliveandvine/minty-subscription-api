@@ -653,7 +653,7 @@ def _payer_identity(user_id) -> dict[str, str]:
     Returns {} if the user can't be loaded; the ``user_id`` stamp still goes on, since
     resolvability matters more than a display name.
     """
-    from shared_models.models import User
+    from minty_db.models import User
 
     user = store._by_pk(User, user_id) if user_id else None
     if user is None:
@@ -841,7 +841,7 @@ def convert_or_expire_due_trials(limit: int | None = None) -> dict:
     # the customer never chose, the second immediately crediting it back.
     by_entity: dict[str, list] = {}
     for row in store.due_trials(now, limit=limit):
-        by_entity.setdefault(row.entity_id, []).append(row)
+        by_entity.setdefault(str(row.entity_id), []).append(row)
 
     for entity_id, rows in by_entity.items():
         try:
@@ -902,7 +902,7 @@ def _entity_names_for_notice(entity_ids) -> dict[str, str]:
     if not entity_ids:
         return {}
     try:
-        from shared_models.models import Entity
+        from minty_db.models import Entity
 
         rows = Entity.objects.filter(id__in=[str(i) for i in entity_ids])
         return {str(e.id): (e.name or "").strip() for e in rows if (e.name or "").strip()}
@@ -982,7 +982,7 @@ def notify_trials_ending(days_before: int = 7, limit: int | None = None) -> dict
     skipped: list[dict] = []
     by_entity: dict[str, list] = {}
     for row in store.trials_ending_between(start, end, limit=limit):
-        by_entity.setdefault(row.entity_id, []).append(row)
+        by_entity.setdefault(str(row.entity_id), []).append(row)
 
     events = []
     names = _entity_names_for_notice(set(by_entity))
@@ -1344,7 +1344,7 @@ def _entity_invoice_name(entity_id) -> str:
     Never raises. A cosmetic lookup must not be able to stop a charge — a line reading as
     a uuid is bad, and silently not billing is worse.
     """
-    from shared_models.models import Entity
+    from minty_db.models import Entity
 
     try:
         entity = store._by_pk(Entity, entity_id)

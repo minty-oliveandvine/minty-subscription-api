@@ -2,7 +2,7 @@
 # Container entrypoint for minty-subscription-api.
 #
 # This service is a TENANT of the schema Flask owns: settings.py pins search_path to
-# the ``?schema=`` on DATABASE_URL (default pettycashv3, config/dburl.py), and shared_models maps tables Flask's Alembic
+# the ``?schema=`` on DATABASE_URL (default pettycashv3, config/dburl.py), and minty_db's models (the minty-db package) map tables its migrations own; Flask's Alembic
 # migrations create. So wait for both the database and that schema rather than creating
 # anything ourselves.
 #

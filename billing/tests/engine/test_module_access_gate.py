@@ -57,9 +57,9 @@ class _DbShim:
 
 
 def _entity(db, *, status="disconnected", name="Acme"):
-    from shared_models.models import Entity
+    from minty_db.models import Entity
 
-    row = Entity(id=str(uuid.uuid4()), name=name, status=status)
+    row = Entity(id=uuid.uuid4(), name=name, status=status)
     row.save(force_insert=True)
     pass  # commit: autocommit under Django
     return row
@@ -68,10 +68,10 @@ def _entity(db, *, status="disconnected", name="Acme"):
 def _function(db, code, *, is_active):
     """A catalog row. ``is_active`` is deliberately varied in these tests — the gate
     must ignore it entirely when deciding who may use a module."""
-    from shared_models.models import EntityFunction
+    from minty_db.models import EntityFunction
 
     row = EntityFunction(
-        id=str(uuid.uuid4()),
+        id=uuid.uuid4(),
         function_code=code,
         function_name=code.title(),
         is_active=is_active,
@@ -84,7 +84,7 @@ def _function(db, code, *, is_active):
 def _grant(db, entity, fn, *, enabled=True, actor=None):
     # ``actor`` is accepted for the callers' readability only: entity_function_map.created_by
     # is the person (a user id or NULL, schema section 4), never a label.
-    from shared_models.models import EntityFunctionMap
+    from minty_db.models import EntityFunctionMap
 
     row = EntityFunctionMap(
         entity_id=entity.id,
@@ -98,10 +98,10 @@ def _grant(db, entity, fn, *, enabled=True, actor=None):
 
 
 def _payer(db):
-    from shared_models.models import User
+    from minty_db.models import User
 
     row = User(
-        id=str(uuid.uuid4()),
+        id=uuid.uuid4(),
         email="payer@test.com",
         username="payer@test.com",
         first_name="Pay",
@@ -116,10 +116,10 @@ def _payer(db):
 
 
 def _sub_row(db, entity, code, *, phase, trial_end=None, app_access_until=None):
-    from shared_models.models import EntityModuleSubscription
+    from minty_db.models import EntityModuleSubscription
 
     row = EntityModuleSubscription(
-        id=str(uuid.uuid4()),
+        id=uuid.uuid4(),
         entity_id=entity.id,
         function_code=code,
         payer_user_id=_payer(db).id,
@@ -169,7 +169,7 @@ def test_map_row_is_what_decides(app, db_session):
         _grant(db_session, entity, fn, enabled=True)
         assert _is_module_enabled(entity.id, "PAYMENT_REQUEST") is True
 
-        from shared_models.models import EntityFunctionMap
+        from minty_db.models import EntityFunctionMap
 
         row = EntityFunctionMap.objects.get(entity_id=entity.id, entity_function_id=fn.id)
         row.is_enabled = False
@@ -212,7 +212,7 @@ def test_sweep_revokes_access_with_no_subscription_row(app, db_session):
 
         result = sweep_expired_module_access()
 
-        assert {"entity_id": entity.id, "code": "PETTY_CASH"} in result["disabled"]
+        assert {"entity_id": str(entity.id), "code": "PETTY_CASH"} in result["disabled"]
         assert _is_module_enabled(entity.id, "PETTY_CASH") is False
 
 
@@ -259,7 +259,7 @@ def test_sweep_terminates_a_cancellation_whose_access_ran_out(app, db_session, m
 
         result = sweep_expired_module_access()
 
-        assert {"entity_id": entity.id, "code": "PETTY_CASH"} in result["disabled"]
+        assert {"entity_id": str(entity.id), "code": "PETTY_CASH"} in result["disabled"]
         assert _is_module_enabled(entity.id, "PETTY_CASH") is False
         db_session.session.refresh(row)
         assert row.phase == "cancelled"
@@ -337,3 +337,26 @@ def test_sweep_leaves_a_running_trial_alone(app, db_session):
 
         assert result["disabled"] == []
         assert _is_module_enabled(entity.id, "PETTY_CASH") is True
+
+
+def test_the_sweep_scope_is_one_id_type_so_nothing_is_counted_twice_or_missed(app, db_session):
+    """Ids are uuid.UUID since minty-db; the scope joins sets from two reads. A UUID and its
+    text are different set members, so mixed types would sweep a company twice, empty the
+    payer-scoped intersection, and stop the onboarding exemption matching - silently."""
+    from billing.services import store as sub_store
+    from billing.services.access_sweep import _sweep_scope
+
+    with app.app_context():
+        billed = _entity(db_session, name="Billed and enabled")
+        onboarding = _entity(db_session, status="onboarding", name="Mid-wizard")
+        pc = _function(db_session, "PETTY_CASH", is_active=False)
+        _grant(db_session, billed, pc, enabled=True)
+        _grant(db_session, onboarding, pc, enabled=True)
+        _sub_row(db_session, billed, "PETTY_CASH", phase="active")
+
+        entity_ids, onboarding_ids = _sweep_scope(None, sub_store)
+
+        assert {type(i) for i in entity_ids} == {str}, entity_ids
+        assert {type(i) for i in onboarding_ids} == {str}, onboarding_ids
+        assert sorted(entity_ids) == sorted({str(billed.id), str(onboarding.id)}), "each company once"
+        assert str(onboarding.id) in onboarding_ids

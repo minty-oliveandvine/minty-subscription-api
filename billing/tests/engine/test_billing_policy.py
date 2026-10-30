@@ -36,7 +36,7 @@ class _Row:
 @pytest.fixture
 def row(monkeypatch):
     """Install a policy row and clear the per-request cache. Returns a setter."""
-    import shared_models.models
+    import minty_db.models
 
     holder = {"row": _Row()}
 
@@ -50,7 +50,7 @@ def row(monkeypatch):
     class _FakeModel:
         objects = _FakeQuery()
 
-    monkeypatch.setattr(shared_models.models, "BillingPolicy", _FakeModel)
+    monkeypatch.setattr(minty_db.models, "BillingPolicy", _FakeModel)
 
     def _set(**kwargs):
         holder["row"] = _Row(**kwargs) if kwargs else None
@@ -110,7 +110,7 @@ def test_no_row_yields_the_shipped_defaults(app, row):
 
 def test_an_unreadable_table_falls_back_rather_than_raising(app, monkeypatch):
     """A policy lookup must never be the thing that breaks a settings page."""
-    import shared_models.models
+    import minty_db.models
 
     class _ExplodingQuery:
         def filter(self, **_kw):
@@ -119,7 +119,7 @@ def test_an_unreadable_table_falls_back_rather_than_raising(app, monkeypatch):
     class _Exploding:
         objects = _ExplodingQuery()
 
-    monkeypatch.setattr(shared_models.models, "BillingPolicy", _Exploding)
+    monkeypatch.setattr(minty_db.models, "BillingPolicy", _Exploding)
     assert load(app) == policy.DEFAULTS
 
 

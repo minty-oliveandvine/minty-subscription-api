@@ -246,9 +246,10 @@ class Command(BaseCommand):
         case repair cannot fix: TWO Stripe customers stamped with the same ``user_id``."""
         from collections import defaultdict
 
+        from minty_db.models import UserStripeCustomer
+
         from billing.services import store
         from billing.services.stripe_client import get_stripe
-        from shared_models.models import UserStripeCustomer
 
         mapped = {row.stripe_customer_id: row.user_id for row in UserStripeCustomer.objects.all()}
         try:

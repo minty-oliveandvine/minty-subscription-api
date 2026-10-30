@@ -18,10 +18,10 @@ origin question does not arise.
 from __future__ import annotations
 
 import pytest
+from minty_db.models import EntityBillingConsent, EntityModuleSubscription
 
 from billing.tests.api.conftest import bearer, post_json
 from billing.tests.engine.conftest import seed_modules, seed_plans, seed_policy
-from shared_models.models import EntityBillingConsent, EntityModuleSubscription
 
 pytestmark = pytest.mark.django_db
 
@@ -171,7 +171,7 @@ def test_confirm_with_someone_elses_account_is_refused_before_stripe(client, use
 
     res = post_json(
         client, "/api/onboarding/billing/payment-methods/confirm",
-        {"setup_intent": "seti_1", "billing_group_id": theirs.id}, **bearer(user),
+        {"setup_intent": "seti_1", "billing_group_id": str(theirs.id)}, **bearer(user),
     )
 
     assert res.status_code == 404

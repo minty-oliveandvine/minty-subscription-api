@@ -395,14 +395,15 @@ def test_collection_is_over_past_a_running_episodes_deadline():
 
 
 def test_already_sent_means_delivered():
+    from minty_db.models import SubscriptionEmailLog
+
     from billing.services import notify
     from billing.tests.engine.conftest import make_user
-    from shared_models.models import SubscriptionEmailLog
 
     payer = make_user(f"sent-{uuid.uuid4().hex[:6]}@payer.test")
     for key, status in (("k-sent", notify.STATUS_SENT), ("k-failed", notify.STATUS_FAILED)):
         SubscriptionEmailLog.objects.create(
-            id=str(uuid.uuid4()), user_id=payer.id, event=notify.RENEWAL_FAILED,
+            id=uuid.uuid4(), user_id=payer.id, event=notify.RENEWAL_FAILED,
             dedupe_key=key, status=status,
         )
 

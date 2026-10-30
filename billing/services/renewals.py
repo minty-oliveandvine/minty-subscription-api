@@ -38,7 +38,7 @@ def _entity_names(entity_ids) -> dict[str, str]:
     """{entity_id: name} in one query — the invoice needs a name per line."""
     if not entity_ids:
         return {}
-    from shared_models.models import Entity
+    from minty_db.models import Entity
 
     rows = Entity.objects.filter(id__in=[str(e) for e in entity_ids])
     return {str(e.id): (e.name or "").strip() or str(e.id) for e in rows}

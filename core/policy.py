@@ -42,13 +42,13 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from shared_models.enums import SystemRole
-from shared_models.models import User, UserEntity
+from minty_db.enums import SystemRole
+from minty_db.models import User, UserEntity
 
 # ---------------------------------------------------------------------------
 # Vocabulary
 # ---------------------------------------------------------------------------
-# The words are the database's (shared_models/enums.SystemRole, mirroring the ``system_role``
+# The words are the database's (minty_db.enums.SystemRole, generated from the ``system_role``
 # enum in Minty's docs/schema/01_schema_rebased.sql). The constant keeps its historical name.
 SYSTEM_ROLE_NORMAL = SystemRole.NORMAL.value
 SYSTEM_ROLE_ADMIN = SystemRole.ADMIN.value

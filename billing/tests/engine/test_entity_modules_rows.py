@@ -13,6 +13,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
+from minty_db.models import EntityFunctionMap, EntityModuleSubscription
 
 from billing.services import entity_modules
 from billing.services.entity_modules import (
@@ -22,7 +23,6 @@ from billing.services.entity_modules import (
     apply_module_selections,
     set_entity_module,
 )
-from shared_models.models import EntityFunctionMap, EntityModuleSubscription
 
 from .conftest import make_entity, make_user, seed_modules
 
@@ -59,7 +59,7 @@ def test_an_insert_carries_flasks_stamps_and_the_actor_as_created_by():
     assert payload == {"modules": {"PETTY_CASH": True, "PAYMENT_REQUEST": False}}
     row = _row(entity.id, fns["PETTY_CASH"].id)
     assert row.is_enabled is True
-    assert row.created_by == str(owner.id)
+    assert row.created_by == owner.id
     assert before <= row.created_at <= after
     assert row.updated_at == row.created_at, "Flask stamps both with the same instant"
     assert row.enabled_at == row.created_at
@@ -99,7 +99,7 @@ def test_an_update_moves_only_the_flipped_stamp_and_updated_at():
     row = _row(entity.id, fns["PETTY_CASH"].id)
     assert row.is_enabled is False
     assert row.created_at == STALE
-    assert row.created_by == str(owner.id), "history is preserved on update"
+    assert row.created_by == owner.id, "history is preserved on update"
     assert row.enabled_at == STALE, "the OTHER stamp is untouched"
     assert row.disabled_at is not None and row.disabled_at > STALE
     assert row.updated_at > STALE

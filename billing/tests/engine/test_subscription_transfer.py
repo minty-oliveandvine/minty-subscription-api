@@ -13,6 +13,7 @@ is mocked.
 """
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -32,9 +33,9 @@ LAPSED = datetime(2027, 8, 10, tzinfo=UTC)
 ANCHOR = datetime(2027, 9, 1, tzinfo=UTC)
 
 # user.id is a uuid (C1); SQLite refuses a non-hex literal outright.
-OLD, NEW = "0a7d0e6e-0000-4000-8000-00000000001d", "0a7d0e6e-0000-4000-8000-00000000002e"
+OLD, NEW = uuid.UUID("0a7d0e6e-0000-4000-8000-00000000001d"), uuid.UUID("0a7d0e6e-0000-4000-8000-00000000002e")
 # entities.id is a uuid too (C2), and since C7 every subscription-table FK to it as well
-ENTITY = "0a7d0e6e-0000-4000-8000-0000000000e1"
+ENTITY = uuid.UUID("0a7d0e6e-0000-4000-8000-0000000000e1")
 # subscription_transfer.id is uuid as of u1a01_subscription_types.
 #
 # IT ALSO MUST CONTAIN HEX LETTERS. SQLAlchemy renders a uuid column on SQLite as
@@ -42,7 +43,7 @@ ENTITY = "0a7d0e6e-0000-4000-8000-0000000000e1"
 # so gets NUMERIC affinity. A uuid whose hex is all digits - 1111...1111 - is then
 # stored as a REAL and comes back as 1.1111111111141117e+31, which blows up on the
 # read with a bare AttributeError. Postgres does not care; the test database does.
-OFFER = "7a17ffe4-0000-4000-8000-00000000000a"
+OFFER = uuid.UUID("7a17ffe4-0000-4000-8000-00000000000a")
 
 @pytest.fixture
 def db_session(db):
@@ -93,8 +94,9 @@ def _trial_row(code="PETTY_CASH", phase="trial", days=14):
 def _wire(monkeypatch, db, *, rows=None, payer=OLD, dunning=(), admin=True,
           approved=True, card=True, charge=None, paid_through=PAID_THROUGH):
     """Mock what sits either side of the service; return (transfers, calls)."""
+    from minty_db.models import User, UserEntity
+
     from billing.services import checkout, clock, store, transfers
-    from shared_models.models import User, UserEntity
 
     calls = {"charges": [], "consent": [], "audit": [], "flips": [], "swept": []}
 
@@ -142,7 +144,7 @@ def _wire(monkeypatch, db, *, rows=None, payer=OLD, dunning=(), admin=True,
 
     # A real, approved admin membership for the nominee unless a test says otherwise -
     # on a real company row: user_entity.entity_id is an FK.
-    from shared_models.models import Entity
+    from minty_db.models import Entity
 
     Entity.objects.get_or_create(id=ENTITY, defaults={"name": "Handover Co", "status": "disconnected"})
     _user(User, NEW, "new@test.com", approved).save(force_insert=True)
@@ -162,7 +164,7 @@ def _wire(monkeypatch, db, *, rows=None, payer=OLD, dunning=(), admin=True,
 
 
 def _offer(db, transfers, *, status="pending", attempt=0, key=None, expires=None):
-    from shared_models.models import SubscriptionTransfer
+    from minty_db.models import SubscriptionTransfer
 
     row = SubscriptionTransfer(
         id=OFFER, entity_id=ENTITY, from_user_id=OLD, to_user_id=NEW,
@@ -286,8 +288,9 @@ def test_accepting_with_someone_elses_account_is_refused(db_session, monkeypatch
     """The account id comes from the browser. One belonging to anyone but the INCOMING
     payer - here the outgoing payer's own - answers exactly like one that does not exist,
     and nothing moves."""
+    from minty_db.models import EntityBillingGroup
+
     from billing.services import store
-    from shared_models.models import EntityBillingGroup
 
     transfers, calls = _wire(monkeypatch, db_session, card=False)
     theirs = store.create_billing_account(OLD, "pm_old")
@@ -321,8 +324,9 @@ def test_accepting_with_your_own_account_nominates_that_exact_account(db_session
     """The chosen ACCOUNT, not "an account holding its card": the recipient has two
     accounts charging the same card, and the newer one - the one they picked - is what the
     company lands on (a card-keyed nomination would take the oldest)."""
+    from minty_db.models import EntityBillingGroup
+
     from billing.services import store
-    from shared_models.models import EntityBillingGroup
 
     transfers, calls = _wire(monkeypatch, db_session, card=False)
     store.create_billing_account(NEW, "pm_shared")  # older, same card
@@ -341,8 +345,9 @@ def test_accepting_with_your_own_account_nominates_that_exact_account(db_session
 
 
 def test_a_chosen_account_replaces_an_existing_nomination(db_session, monkeypatch):
+    from minty_db.models import EntityBillingGroup
+
     from billing.services import store
-    from shared_models.models import EntityBillingGroup
 
     transfers, calls = _wire(monkeypatch, db_session)  # already nominated onto calls["group"]
     other = store.create_billing_account(NEW, "pm_2")
@@ -360,8 +365,9 @@ def test_a_chosen_account_replaces_an_existing_nomination(db_session, monkeypatc
 def test_a_trial_only_handover_still_records_the_chosen_account(db_session, monkeypatch):
     """Nothing is charged for a trial, but the trial converts on the chosen account at term
     end - dropping the choice would leave the company on no card."""
+    from minty_db.models import EntityBillingGroup
+
     from billing.services import store
-    from shared_models.models import EntityBillingGroup
 
     transfers, calls = _wire(monkeypatch, db_session, card=False, rows=[_trial_row()])
     chosen = store.create_billing_account(NEW, "pm_trial")
@@ -753,7 +759,7 @@ def test_a_row_already_winding_down_is_left_alone(db_session, monkeypatch):
 
 def _parked(db, transfers, *, collect_at=PAID_THROUGH):
     """An accepted handover whose first charge is parked on ``collect_at``."""
-    from shared_models.models import SubscriptionTransfer
+    from minty_db.models import SubscriptionTransfer
 
     row = SubscriptionTransfer(
         id=OFFER, entity_id=ENTITY, from_user_id=OLD, to_user_id=NEW,
@@ -956,7 +962,7 @@ def test_the_collection_runs_in_the_daily_pass_before_the_renewal():
 
 def _ended(db, transfers, status, *, seen=None, offer_id=OFFER):
     """A finished offer THIS payer made, seen or not."""
-    from shared_models.models import SubscriptionTransfer
+    from minty_db.models import SubscriptionTransfer
 
     row = SubscriptionTransfer(
         id=offer_id, entity_id=ENTITY, from_user_id=OLD, to_user_id=NEW,
@@ -1092,7 +1098,7 @@ def test_a_lapsed_request_is_retired_and_the_payer_who_asked_is_told(db_session,
     monkeypatch.setattr(transfers, "_notify",
                         lambda offer, kind: sent.append((offer.id, kind)))
 
-    from shared_models.models import SubscriptionTransfer
+    from minty_db.models import SubscriptionTransfer
 
     assert transfers.repair_stranded(NOW)["expired"] == [OFFER]
     assert sent == [(OFFER, "expired")]
@@ -1418,7 +1424,7 @@ REAL_ENTITY = ENTITY
 def _real_rows(db, specs):
     """Insert the company, both payers and genuine entity_module_subscription rows; return
     the model."""
-    from shared_models.models import Entity, EntityModuleSubscription, User
+    from minty_db.models import Entity, EntityModuleSubscription, User
 
     Entity.objects.get_or_create(id=REAL_ENTITY, defaults={"name": "Handover Co", "status": "disconnected"})
     for uid, email in ((OLD, "old@test.com"), (NEW, "new@test.com")):
@@ -1766,7 +1772,7 @@ def test_only_the_most_blocking_reason_reaches_the_screen(db_session, monkeypatc
     # The read model starts from a real entity row - the one ``_wire`` seeds.
 
     monkeypatch.setattr(portal, "_admin_candidates",
-                        lambda eid: [{"id": NEW, "name": "N", "email": "n@t.com"}])
+                        lambda eid: [{"id": str(NEW), "name": "N", "email": "n@t.com"}])
     payload = portal.build_subscriber_options(OLD, ENTITY)
 
     assert payload is not None
@@ -1881,8 +1887,9 @@ def test_the_flip_is_all_or_nothing(db_session, monkeypatch):
     those four commits; here a failure in the last of them leaves none of the others."""
     transfers, calls = _wire(monkeypatch, db_session)
     offer = _offer(db_session, transfers, status="charged", attempt=1, key="transfer-k-1")
+    from minty_db.models import SubscriptionTransfer
+
     from billing.services import store
-    from shared_models.models import SubscriptionTransfer
 
     def boom(*args, **kwargs):
         raise RuntimeError("consent table is unhappy")
@@ -1909,9 +1916,10 @@ def test_the_flip_is_all_or_nothing(db_session, monkeypatch):
 def _parked_on_real_store(*, card_paid_through=None):
     import uuid
 
+    from minty_db.models import SubscriptionTransfer
+
     from billing.services import store
     from billing.tests.engine.conftest import make_entity, make_user, seed_currency
-    from shared_models.models import SubscriptionTransfer
 
     old = make_user(f"old-{uuid.uuid4().hex[:6]}@payer.test")
     new = make_user(f"new-{uuid.uuid4().hex[:6]}@payer.test")

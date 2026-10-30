@@ -104,7 +104,7 @@ def _function_ids() -> dict[str, str]:
     dropping the plan and making a module unsellable.
     """
     try:
-        from shared_models.models import EntityFunction
+        from minty_db.models import EntityFunction
 
         return {
             f.function_code.upper(): str(f.id)

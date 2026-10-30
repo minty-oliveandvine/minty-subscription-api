@@ -43,7 +43,7 @@ def payer(db):
 
 
 def _account(payer, company="Acme Ltd"):
-    from shared_models.models import PayerBillingGroup
+    from minty_db.models import PayerBillingGroup
 
     return PayerBillingGroup.objects.create(
         id=new_id(), payer_user_id=payer.id, stripe_payment_method_id="pm_1",
@@ -52,7 +52,7 @@ def _account(payer, company="Acme Ltd"):
 
 
 def _invoice(payer, group=None, *, status="draft"):
-    from shared_models.models import SubscriptionInvoice
+    from minty_db.models import SubscriptionInvoice
 
     return SubscriptionInvoice.objects.create(
         id=new_id(), payer_user_id=payer.id, billing_group=group,

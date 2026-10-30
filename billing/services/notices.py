@@ -38,10 +38,11 @@ def build_subscription_notices(entity_id: str, user_id) -> dict:
     Returns ``items: []`` when there is nothing to say; callers treat that as
     "render nothing" rather than rendering an empty modal.
     """
+    from minty_db.models import User
+
     from billing.services import clock, dunning
     from billing.services import store as sub_store
     from core.policy import Permission, has_permission_by_user_id
-    from shared_models.models import User
 
     cards = entity_modules.get_module_cards(entity_id)
     now = clock.now()

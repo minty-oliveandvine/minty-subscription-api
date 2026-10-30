@@ -31,12 +31,12 @@ END = datetime(2026, 9, 18, 12, tzinfo=UTC)  # 31 days; the period before it is 
 
 def _payer(email="breakdown@payer.test"):
     """A payer with a cycle: extensions are priced against the period before the invoice."""
-    from shared_models.models import UserStripeCustomer
+    from minty_db.models import UserStripeCustomer
 
     seed_currency("HKD")  # a foreign key on Postgres (fk_usc_currency); SQLite never checks it
     payer = _user(None, email)
     UserStripeCustomer(
-        id=str(uuid.uuid4()),
+        id=uuid.uuid4(),
         user_id=str(payer.id),
         stripe_customer_id=f"cus_{uuid.uuid4().hex[:8]}",
         anchor_at=ANCHOR,
@@ -47,11 +47,11 @@ def _payer(email="breakdown@payer.test"):
 
 def _invoice(payer, *, total=0, status="paid", external_id="in_breakdown_1",
              billing_group_id=None):
-    from shared_models.models import SubscriptionInvoice
+    from minty_db.models import SubscriptionInvoice
 
     seed_currency("HKD")  # fk_si_currency, likewise
     invoice = SubscriptionInvoice(
-        id=str(uuid.uuid4()),
+        id=uuid.uuid4(),
         payer_user_id=str(payer.id),
         external_id=external_id,
         period_start=START,
@@ -70,12 +70,12 @@ def _lines(invoice, *lines):
     order they were written - spaced a second apart, because a test transaction freezes
     ``now()`` and ties would reorder them. Without the sixth item a line is one issued before
     lines recorded what they paid for (schema item 23)."""
-    from shared_models.models import SubscriptionInvoiceLine
+    from minty_db.models import SubscriptionInvoiceLine
 
     for i, (entity, product, amount, kind, at, *recorded) in enumerate(lines):
         period_start, period_end, unit_amount = recorded[0] if recorded else (None, None, None)
         SubscriptionInvoiceLine(
-            id=str(uuid.uuid4()),
+            id=uuid.uuid4(),
             invoice_id=invoice.id,
             entity_id=entity.id,
             entity_name=entity.name,

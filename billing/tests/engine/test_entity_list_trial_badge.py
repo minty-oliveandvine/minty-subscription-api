@@ -24,7 +24,7 @@ from datetime import UTC, datetime, timedelta
 from .fakes import fake_model
 
 UTC = UTC
-_EMS = "shared_models.models"
+_EMS = "minty_db.models"
 
 
 class _Row:

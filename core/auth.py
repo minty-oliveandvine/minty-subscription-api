@@ -3,11 +3,12 @@ import logging
 import jwt
 from django.conf import settings
 from django.core.exceptions import ValidationError
+from minty_db.enums import EntityRole, SystemRole
+from minty_db.models import User, UserEntity
 from minty_shared import logctx
 from ninja.security import HttpBearer
 
-from shared_models.enums import EntityRole, SystemRole, is_superadmin
-from shared_models.models import User, UserEntity
+from core.roles import is_superadmin
 
 logger = logging.getLogger("billing-api")
 

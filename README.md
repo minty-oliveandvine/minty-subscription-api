@@ -36,11 +36,11 @@ real dev-DB user).
    service checks its signature with the shared `SECRET_KEY` and looks the user up. There is
    no refresh endpoint: a lapsed token goes back through Flask's login-gated
    `GET /handoff/minty-web?next=…`. `core/auth.py`.
-2. **No migrations, `managed = False` everywhere.** Alembic in Minty owns the schema
-   (`?schema=` on `DATABASE_URL`, default `pettycashv3`); this repo has no `migrations/` directory and
-   `docker/entrypoint.sh` runs no `migrate`. A needed column is a Minty revision *and* a plan
-   amendment. `shared_models/models.py`, pinned by `billing/tests/test_models_guard.py` and
-   Minty's `docs/schema/generators/audit_models.py`.
+2. **No migrations here.** The models are minty-db's (`minty_db.models`, pinned in
+   `requirements.txt`; since 2026-10-30), generated from the schema file; its migrations are run by
+   hand (`python -m minty_db migrate`), never by this service (`MIGRATION_MODULES`), and
+   `docker/entrypoint.sh` runs no `migrate`. A needed column is a minty-db change *and* a plan
+   amendment. `billing/tests/test_models_guard.py` pins which models the code may use.
 3. **The single Stripe writer.** Only this service holds `STRIPE_SECRET_KEY` /
    `STRIPE_PUBLISHABLE_KEY`; `billing/services/stripe_client.py` is the one module that
    imports `stripe`, `billing_gateway.py` the one that charges. Flask's copy was deleted 2026-10-06.
@@ -113,7 +113,6 @@ default those three origins), `PREVIEW_ORIGIN_REGEX` (optional, see `docs/featur
 set MINTY_TEST_PG_URI=
 pytest                                        # unit suite on SQLite (tables from the models); ~1120 tests, 00:10
 set MINTY_TEST_PG_URI=postgresql://postgres:***@localhost:5432/postgres
-set MINTY_REPO=C:\Github\Minty
 pytest                                        # the same suite on a Postgres built from 01_schema_rebased.sql; 00:10
 set DATABASE_URL=postgresql://postgres@localhost:5432/postgres?schema=pettycash_alt && pytest billing/tests/test_schema_name.py   # the name is a setting
 ruff check .
@@ -134,8 +133,7 @@ against the routers (step 3, importing the engine's stubs) - `docs/features/subs
 
 ```
 config/          settings (the scheduler switch, CORS, DB, Stripe keys, mail, logging) · settings_test · urls (the four routers, /healthz)
-core/            auth (BearerAuth, SelfBearerAuth, EntityBearerAuth) · exceptions ({"error"} shape) · middleware (service scope, request log) · policy (roles/permissions) · flask_client (the ONLY caller of Flask); the log line is minty-shared-py's (`docs/features/logging.md`)
-shared_models/   the 21 mirrors, managed = False · enums (the Postgres enums) · fields (PgEnumField, CharNField)
+core/            auth (BearerAuth, SelfBearerAuth, EntityBearerAuth) · roles (is_superadmin) · exceptions ({"error"} shape) · middleware (service scope, request log) · policy (roles/permissions) · flask_client (the ONLY caller of Flask); the log line is minty-shared-py's (`docs/features/logging.md`)
 billing/         api/ (me, modules, notice, onboarding - the four routers, live; _json.py = Flask's jsonify) · services/ (THE ENGINE: the 24 modules of Minty's blueprints/subscription/services ported 1:1, plus entity_modules.py, _context.py, _log.py, and this service's own invoice_document.py + invoice_pdf.py - the invoice PDF, Figma 09-A) · static/email/ (the 9 inline images) · static/invoice/ (the PDF's Inter and Noto Sans HK fonts with their OFL licences, and 09-A's logo vector) · scheduler.py · management/commands/{subscriptions,plans,replay_scenarios,export_openapi}.py · tests/ (+ tests/engine/, the ported suite; tests/api/, the route tests)
 scripts/         replay_diff.py (Flask report vs Django report, normalised; the Flask script was deleted 2026-10-06)
 templates/email/ subscription_notice.html - Minty's, verbatim (Jinja2 backend; a render from either side was byte-identical; Minty's copy deleted 2026-10-06)
@@ -169,8 +167,10 @@ autocommit with `transaction.atomic()` in exactly three kinds of place (`docs/fe
 subscriptions-api.md` §6 - never around a Stripe call), `flask.g` → `billing.services._context`
 (a ContextVar scope: opened by `core.middleware.ServiceScopeMiddleware` per request, by every
 `manage.py subscriptions` job and by the scheduler's pass), `loguru` → `billing.services._log`
-(the same `{}` messages), uuid columns hand back hyphenated **str** (`shared_models.fields.
-MintyUUIDField`) because the services compare ids with `==`. `test_no_flask_imports.py` keeps
+(the same `{}` messages), uuid columns hand back
+**`uuid.UUID`** since minty-db (2026-10-30; they were text until then, as Flask gave them): an id
+arriving as text is converted at the edge (`store._id`), ids handed OUT keep Flask's text, and under
+test comparing a UUID with uuid text raises (root `conftest.py`). `test_no_flask_imports.py` keeps
 the Flask world out; the memory of what the port found is in `docs/features/subscriptions-api.md`.
 
 **The second golden** is the replay harness: `manage.py replay_scenarios` is Minty's

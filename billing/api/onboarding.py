@@ -23,12 +23,12 @@ which refuses a confirm naming no account).
 
 from __future__ import annotations
 
+from minty_db.models import Entity, UserEntity
 from ninja import Router
 
 from billing.api._json import body, error, respond, user_id
 from billing.services._log import logger
 from billing.services.store import _by_pk
-from shared_models.models import Entity, UserEntity
 
 onboarding_router = Router()
 

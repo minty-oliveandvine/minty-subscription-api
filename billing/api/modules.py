@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from minty_db.models import Entity, User
 from ninja import Router
 
 from billing.api._json import IsoJSONEncoder, body, error, respond
@@ -37,7 +38,6 @@ from billing.services.store import _by_pk
 from core.auth import EntityBearerAuth
 from core.exceptions import NotFoundError, PermissionDeniedError
 from core.policy import Permission, has_permission
-from shared_models.models import Entity, User
 
 modules_router = Router(auth=EntityBearerAuth())
 

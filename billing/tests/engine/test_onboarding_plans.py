@@ -42,11 +42,11 @@ class _DbShim:
 
 def _seed_catalog(db):
     """The module catalog rows the names in the plan list come from."""
-    from shared_models.models import EntityFunction
+    from minty_db.models import EntityFunction
 
     for code, name in (("PETTY_CASH", "Petty Cash"), ("PAYMENT_REQUEST", "Payment Request")):
         EntityFunction.objects.create(
-                id=str(uuid.uuid4()),
+                id=uuid.uuid4(),
                 function_code=code,
                 function_name=name,
                 description=f"{name} module",

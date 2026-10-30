@@ -23,11 +23,12 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from minty_db.models import EntityFunction
+
 from billing.services import entity_modules, money
 from billing.services._log import logger
 from billing.services.display import day as fmt_day
 from billing.services.display import day_month as fmt_day_month
-from shared_models.models import EntityFunction
 
 
 def get_module_cards(entity_id: str) -> list[dict]:
@@ -564,9 +565,10 @@ def get_trial_modules_for_entities(entity_ids: list[str]) -> dict[str, set[str]]
 
     # Imported here, not at module scope: the subscription package imports back into
     # the entity models, and this module is loaded early enough for that to bite.
+    from minty_db.models import EntityModuleSubscription
+
     from billing.services import clock
     from billing.services.constants import PHASE_SCHEDULED_CANCEL, PHASE_TRIAL
-    from shared_models.models import EntityModuleSubscription
 
     try:
         now = clock.now()

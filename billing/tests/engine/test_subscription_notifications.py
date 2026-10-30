@@ -50,7 +50,7 @@ def _company(db, label, **fields):
     """A real company row for a test label: entity_module_subscription.entity_id is a uuid FK
     to entities since C7, so the labels the tests used to write ("e1") become rows.
     ``fields`` (``business_email``, ``timezone``) are set on it."""
-    from shared_models.models import Entity
+    from minty_db.models import Entity
 
     eid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"notify-company-{label}"))
     entity, _ = Entity.objects.get_or_create(
@@ -64,9 +64,9 @@ def _company(db, label, **fields):
 
 
 def _make_payer(db, email="payer@test.com"):
-    from shared_models.models import User
+    from minty_db.models import User
 
-    uid = str(uuid.uuid4())
+    uid = uuid.uuid4()
     User.objects.create(
         id=uid,
         email=email,
@@ -161,9 +161,10 @@ def test_a_send_that_failed_is_retried_on_the_next_run(app, db_session, mail):
     """A mail outage must not silently swallow a dunning notice. The claim row is left at
     ``failed``, which the next pass picks up — unlike a successful one, which is never
     touched again."""
+    from minty_db.models import SubscriptionEmailLog
+
     from billing.services import notify
     from billing.services.notify import STATUS_FAILED, STATUS_SENT
-    from shared_models.models import SubscriptionEmailLog
 
     with app.app_context():
         payer = _make_payer(db_session)
@@ -189,8 +190,9 @@ def test_a_send_that_failed_is_retried_on_the_next_run(app, db_session, mail):
 def test_one_claim_row_per_notification_not_one_per_attempt(app, db_session, mail):
     """The unique constraint is on (event, dedupe_key). A retried send reuses its row, so
     a fortnight of SMTP trouble leaves one row, not fourteen."""
+    from minty_db.models import SubscriptionEmailLog
+
     from billing.services import notify
-    from shared_models.models import SubscriptionEmailLog
 
     with app.app_context():
         payer = _make_payer(db_session)
@@ -221,8 +223,9 @@ def test_no_mail_configured_does_not_raise(app, db_session, settings):
     """Flask's "no mail extension" is Django's console backend - the settings' own default
     when SMTP_URL is unset. Skipped, not spent: no dedupe row is written, so the notice
     still goes out on the first run that has a mail host."""
+    from minty_db.models import SubscriptionEmailLog
+
     from billing.services import notify
-    from shared_models.models import SubscriptionEmailLog
 
     settings.EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
     with app.app_context():
@@ -246,8 +249,9 @@ def test_an_smtp_backend_without_a_host_is_not_configured_either(settings):
 def test_a_payer_with_no_email_address_is_skipped_without_claiming(app, db_session, mail):
     """Checked before the claim, so an address added later still gets the email rather
     than deduping against a send that never happened."""
+    from minty_db.models import SubscriptionEmailLog, User
+
     from billing.services import notify
-    from shared_models.models import SubscriptionEmailLog, User
 
     with app.app_context():
         payer = _make_payer(db_session, email="nobody@test.com")
@@ -660,8 +664,9 @@ def test_an_unreachable_public_url_is_reported_once(app, db_session, mail, monke
 def test_a_xero_only_user_is_still_reachable(app, db_session, mail):
     """A user who signed up through Xero may have no personal ``email`` at all, and is
     just as capable of owing money as anyone else."""
+    from minty_db.models import User
+
     from billing.services import notify
-    from shared_models.models import User
 
     with app.app_context():
         payer = _make_payer(db_session)
@@ -697,7 +702,7 @@ def _billing_account(payer, *, email="accounts@olive.test", company="Olive Holdi
 def _on_account(db, payer, account, entity_id, *, paid_for=True):
     """Put a company on ``account``. ``paid_for=False`` is a company that has LEFT: its
     nomination kept as history, no module row of this payer's any more."""
-    from shared_models.models import EntityBillingGroup, EntityModuleSubscription
+    from minty_db.models import EntityBillingGroup, EntityModuleSubscription
 
     EntityBillingGroup.objects.create(
         entity_id=entity_id, payer_user_id=payer, billing_group_id=account.id,
@@ -705,7 +710,7 @@ def _on_account(db, payer, account, entity_id, *, paid_for=True):
     )
     if paid_for:
         EntityModuleSubscription.objects.create(
-            id=str(uuid.uuid4()), entity_id=entity_id, function_code="PETTY_CASH",
+            id=uuid.uuid4(), entity_id=entity_id, function_code="PETTY_CASH",
             payer_user_id=payer, phase="trial",
             trial_end=datetime(2026, 9, 1, tzinfo=UTC),
         )
@@ -906,8 +911,9 @@ def test_a_long_billing_email_is_logged_as_sent_not_sent_again(app, db_session, 
     """The log keeps 200 characters and a billing email may have 255. Uncut, the save AFTER
     a successful send failed (on Postgres), the claim stayed ``failed``, and the same email
     went out again on every run."""
+    from minty_db.models import SubscriptionEmailLog
+
     from billing.services import notify
-    from shared_models.models import SubscriptionEmailLog
 
     address = "a" * 240 + "@olive.test"
     with app.app_context():
@@ -1082,15 +1088,16 @@ def test_trials_ending_soon_are_found_in_a_one_day_window(app, db_session):
     """A daily run tiles the calendar exactly once per trial. A cumulative "within N
     days" filter would re-match the same trial every day and lean entirely on the email
     log to stay quiet."""
+    from minty_db.models import EntityModuleSubscription
+
     from billing.services import store
-    from shared_models.models import EntityModuleSubscription
 
     with app.app_context():
         now = datetime(2026, 8, 4, 12, tzinfo=UTC)
         payer = _make_payer(db_session)
         for days, code in ((3, "PAYMENT_REQUEST"), (5, "PETTY_CASH")):
             EntityModuleSubscription.objects.create(
-                id=str(uuid.uuid4()),
+                id=uuid.uuid4(),
                 entity_id=_company(db_session, f"e{days}"),
                 function_code=code,
                 payer_user_id=payer,
@@ -1116,14 +1123,14 @@ def test_the_warning_window_is_day_aligned_not_run_time_aligned(
     email has, because it is the one notification that could have prevented the lapse.
     """
     checkout = pytest.importorskip("billing.services.checkout")  # slice C
-    from shared_models.models import EntityModuleSubscription
+    from minty_db.models import EntityModuleSubscription
 
     with app.app_context():
         payer = _make_payer(db_session)
         # Ends EARLIER in the day than the job runs — the case that used to be missed.
         trial_end = datetime(2026, 8, 20, 5, 0, tzinfo=UTC)
         EntityModuleSubscription.objects.create(
-            id=str(uuid.uuid4()),
+            id=uuid.uuid4(),
             entity_id=_company(db_session, "e1"),
             function_code="PAYMENT_REQUEST",
             payer_user_id=payer,
@@ -1154,12 +1161,12 @@ def test_a_trial_that_will_convert_cleanly_is_not_warned_at_all(app, db_session,
     neither is its first charge.
     """
     checkout = pytest.importorskip("billing.services.checkout")  # slice C
-    from shared_models.models import EntityModuleSubscription
+    from minty_db.models import EntityModuleSubscription
 
     with app.app_context():
         payer = _make_payer(db_session)
         EntityModuleSubscription.objects.create(
-            id=str(uuid.uuid4()),
+            id=uuid.uuid4(),
             entity_id=_company(db_session, "e1"),
             function_code="PAYMENT_REQUEST",
             payer_user_id=payer,
@@ -1185,12 +1192,12 @@ def test_a_trial_blocked_only_on_consent_is_still_warned(app, db_session, monkey
     exactly as hard as one with no card at all, so it must still be warned — the send
     gates on ``needs_card OR needs_consent``, not on the card alone."""
     checkout = pytest.importorskip("billing.services.checkout")  # slice C
-    from shared_models.models import EntityModuleSubscription
+    from minty_db.models import EntityModuleSubscription
 
     with app.app_context():
         payer = _make_payer(db_session)
         EntityModuleSubscription.objects.create(
-            id=str(uuid.uuid4()),
+            id=uuid.uuid4(),
             entity_id=_company(db_session, "e1"),
             function_code="PAYMENT_REQUEST",
             payer_user_id=payer,
@@ -1214,14 +1221,15 @@ def test_a_cancelled_trial_is_not_warned_about(app, db_session):
     """Cancelling a trial is a deliberate act. Telling the customer the thing they asked
     to end is about to end is noise, not a service — and unlike ``due_trials``, this
     query has no row to close out, so there is no reason to include them."""
+    from minty_db.models import EntityModuleSubscription
+
     from billing.services import store
-    from shared_models.models import EntityModuleSubscription
 
     with app.app_context():
         now = datetime(2026, 8, 4, 12, tzinfo=UTC)
         payer = _make_payer(db_session)
         EntityModuleSubscription.objects.create(
-            id=str(uuid.uuid4()),
+            id=uuid.uuid4(),
             entity_id=_company(db_session, "e1"),
             function_code="PAYMENT_REQUEST",
             payer_user_id=payer,
@@ -1246,12 +1254,12 @@ def test_a_trial_whose_tile_was_MISSED_is_still_warned(app, db_session, monkeypa
     it with two days' notice instead of three.
     """
     checkout = pytest.importorskip("billing.services.checkout")  # slice C
-    from shared_models.models import EntityModuleSubscription
+    from minty_db.models import EntityModuleSubscription
 
     with app.app_context():
         payer = _make_payer(db_session)
         EntityModuleSubscription.objects.create(
-            id=str(uuid.uuid4()),
+            id=uuid.uuid4(),
             entity_id=_company(db_session, "e_missed"),
             function_code="PAYMENT_REQUEST",
             payer_user_id=payer,
@@ -1276,12 +1284,12 @@ def test_a_trial_ending_TODAY_is_left_to_the_trial_end_job(app, db_session, monk
     trial has ended" — two contradictory notices about one trial on one day.
     """
     checkout = pytest.importorskip("billing.services.checkout")  # slice C
-    from shared_models.models import EntityModuleSubscription
+    from minty_db.models import EntityModuleSubscription
 
     with app.app_context():
         payer = _make_payer(db_session)
         EntityModuleSubscription.objects.create(
-            id=str(uuid.uuid4()),
+            id=uuid.uuid4(),
             entity_id=_company(db_session, "e_today"),
             function_code="PAYMENT_REQUEST",
             payer_user_id=payer,
@@ -1313,7 +1321,7 @@ def test_a_trial_warning_reaches_a_payer_the_entity_was_handed_to(
     reassurance right up until the money leaves.
     """
     checkout = pytest.importorskip("billing.services.checkout")  # slice C
-    from shared_models.models import EntityModuleSubscription, SubscriptionEmailLog
+    from minty_db.models import EntityModuleSubscription, SubscriptionEmailLog
 
     with app.app_context():
         outgoing = _make_payer(db_session, email="outgoing@test.com")
@@ -1321,7 +1329,7 @@ def test_a_trial_warning_reaches_a_payer_the_entity_was_handed_to(
 
         trial_end = datetime(2026, 8, 20, 5, 0, tzinfo=UTC)
         row = EntityModuleSubscription(
-            id=str(uuid.uuid4()), entity_id=_company(db_session, "e1"), function_code="PAYMENT_REQUEST",
+            id=uuid.uuid4(), entity_id=_company(db_session, "e1"), function_code="PAYMENT_REQUEST",
             payer_user_id=outgoing, phase="trial", trial_end=trial_end,
         )
         row.save(force_insert=True)
@@ -1353,12 +1361,12 @@ def test_the_same_payer_is_still_only_warned_once(app, db_session, mail, monkeyp
     re-matches the same trial on every day it spans, and the log is the only thing
     keeping that quiet."""
     checkout = pytest.importorskip("billing.services.checkout")  # slice C
-    from shared_models.models import EntityModuleSubscription, SubscriptionEmailLog
+    from minty_db.models import EntityModuleSubscription, SubscriptionEmailLog
 
     with app.app_context():
         payer = _make_payer(db_session)
         EntityModuleSubscription.objects.create(
-            id=str(uuid.uuid4()), entity_id=_company(db_session, "e1"), function_code="PAYMENT_REQUEST",
+            id=uuid.uuid4(), entity_id=_company(db_session, "e1"), function_code="PAYMENT_REQUEST",
             payer_user_id=payer, phase="trial",
             trial_end=datetime(2026, 8, 20, 5, 0, tzinfo=UTC),
         )
@@ -1499,9 +1507,9 @@ def test_a_failed_read_still_sends_and_is_recorded_once(app, db_session, mail,
     went out again on every run. Each read is its own savepoint, so it is undone, logged,
     and the email sent without the date."""
     from django.db import connection
+    from minty_db.models import SubscriptionEmailLog
 
     from billing.services import notify, store
-    from shared_models.models import SubscriptionEmailLog
 
     def _broken(group_id):
         with connection.cursor() as cursor:

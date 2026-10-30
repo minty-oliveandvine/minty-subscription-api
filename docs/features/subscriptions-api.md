@@ -304,7 +304,7 @@ deliberate command, dry unless `--apply`.
 
 ## 4. The data — what this service writes
 
-Thirteen tables, this service the only writer once live (`shared_models/models.py`, section K
+Thirteen tables, this service the only writer once live (minty-db's `minty_db.models` since 2026-10-30, section K
 of `Minty/docs/schema/01_schema_rebased.sql`):
 
 | Table | Holds |

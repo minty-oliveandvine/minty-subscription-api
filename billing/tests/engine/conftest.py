@@ -40,8 +40,8 @@ def _now():
     return datetime.now(UTC)
 
 
-def new_id() -> str:
-    return str(uuid.uuid4())
+def new_id() -> uuid.UUID:
+    return uuid.uuid4()
 
 
 class _AppShim:
@@ -89,7 +89,7 @@ def snapshot(row, *fields):
 
 
 def seed_currency(code="HKD", *, symbol="$", decimal_places=2):
-    from shared_models.models import CurrencyInfo
+    from minty_db.models import CurrencyInfo
 
     row = CurrencyInfo.objects.filter(currency_code=code).first()
     if row is None:
@@ -101,7 +101,7 @@ def seed_currency(code="HKD", *, symbol="$", decimal_places=2):
 
 
 def seed_country(currency=None, code="HK"):
-    from shared_models.models import CountryInfo
+    from minty_db.models import CountryInfo
 
     row, _ = CountryInfo.objects.get_or_create(
         country_code=code,
@@ -115,7 +115,7 @@ def seed_country(currency=None, code="HK"):
 
 
 def seed_module(code="PETTY_CASH", name="Petty Cash"):
-    from shared_models.models import EntityFunction
+    from minty_db.models import EntityFunction
 
     row = EntityFunction.objects.filter(function_code=code).first()
     if row is None:
@@ -134,7 +134,7 @@ def seed_modules():
 
 
 def seed_plan(code="PETTY_CASH", amount=28000, currency="HKD", display_name=None, *, interval_months=1):
-    from shared_models.models import BillingPlan
+    from minty_db.models import BillingPlan
 
     seed_currency(currency)
     row = BillingPlan.objects.filter(code=code).first()
@@ -156,7 +156,7 @@ def seed_plans():
 
 
 def seed_policy(**overrides):
-    from shared_models.models import BillingPolicy
+    from minty_db.models import BillingPolicy
 
     values = {
         "trial_days": 30, "paid_cancel_access_days": 30, "past_due_window_days": 15,
@@ -175,7 +175,7 @@ def seed_policy(**overrides):
 
 
 def make_user(email="user@test.com", *, system_role=None, first_name="Test", last_name="User"):
-    from shared_models.models import User
+    from minty_db.models import User
 
     row = User.objects.create(
         id=new_id(),
@@ -194,7 +194,7 @@ def make_entity(owner, *, name="Acme Shop", role="admin", currency=None, country
                 modules=("PETTY_CASH",), status="disconnected"):
     """An entity the owner belongs to, with the given modules switched on (the map rows
     written as the app writes them: ``created_by`` the owner, explicit stamps)."""
-    from shared_models.models import Entity, EntityFunctionMap, UserEntity
+    from minty_db.models import Entity, EntityFunctionMap, UserEntity
 
     if country is None:
         country = seed_country(currency)

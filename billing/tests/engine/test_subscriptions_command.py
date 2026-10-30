@@ -10,9 +10,9 @@ from io import StringIO
 
 import pytest
 from django.core.management import CommandError, call_command
+from minty_db.models import EntityModuleSubscription
 
 from billing.services import _context
-from shared_models.models import EntityModuleSubscription
 
 from .conftest import make_entity, make_user, seed_modules, seed_plans
 
@@ -116,7 +116,7 @@ def test_revoke_ungranted_dry_lists_and_apply_writes():
 
     out = run("revoke-ungranted", "--apply")
     assert "Switched off 1 module grant(s)" in out
-    from shared_models.models import EntityFunctionMap
+    from minty_db.models import EntityFunctionMap
 
     assert EntityFunctionMap.objects.get(entity_id=bare.id, entity_function_id=fns["PETTY_CASH"].id).is_enabled is False
 

@@ -153,7 +153,7 @@ def _dunning_pair(window, offsets) -> tuple[int, tuple[int, ...]]:
 def _load() -> Policy:
     """Read and validate the row. Never raises — policy must not break a page."""
     try:
-        from shared_models.models import BillingPolicy
+        from minty_db.models import BillingPolicy
 
         row = BillingPolicy.objects.filter(pk=1).first()
     except Exception:
