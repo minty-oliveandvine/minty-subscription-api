@@ -63,10 +63,12 @@ def _imported_models() -> set[str]:
 
 
 def test_no_migrations_directory_and_minty_db_never_migrates_here():
-    from django.conf import settings
+    # The service's own settings module, not the live settings: pytest --no-migrations (CI)
+    # replaces settings.MIGRATION_MODULES with a stand-in for the run.
+    from config import settings as service
 
     assert not list(ROOT.glob("*/migrations")), "this service ships no DDL"
-    assert settings.MIGRATION_MODULES.get("minty_db", "unset") is None
+    assert service.MIGRATION_MODULES.get("minty_db", "unset") is None
 
 
 def test_the_code_uses_only_the_domain_tables_and_the_read_only_rows():
