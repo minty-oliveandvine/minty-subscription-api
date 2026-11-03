@@ -296,8 +296,7 @@ def modules_phrase(codes) -> str:
 
 
 def _module_name(code: str) -> str:
-    # BILL is the plan word (billing_plan.code); PAYMENT_REQUEST the module code.
-    pretty = {"PETTY_CASH": "Petty Cash", "PAYMENT_REQUEST": "Payment Request", "BILL": "Payment Request"}
+    pretty = {"PETTY_CASH": "Petty Cash", "PAYMENT_REQUEST": "Payment Request"}
     key = str(code or "").strip().upper()
     return pretty.get(key, key.title().replace("_", " "))
 

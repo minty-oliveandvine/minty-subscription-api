@@ -460,7 +460,7 @@ def trial_disclosure(entity_id, to_user_id) -> list[dict]:
 def _plan_label(codes) -> str:
     """What this set of modules is called — the plan's own name where one prices them.
 
-    ``{PETTY_CASH, BILL}`` is "Super Minty", not two modules listed with an "and". The
+    ``{PETTY_CASH, PAYMENT_REQUEST}`` is "Super Minty", not two modules listed with an "and". The
     bundle IS a product, it is what the invoice line says, and naming it any other way
     describes a purchase the customer will not recognise on their statement.
     """

@@ -290,5 +290,5 @@ def test_the_grouped_total_is_the_same_whichever_card_the_dialog_opened_from(mon
     )
 
     assert from_petty["amount"] == 4258
-    assert from_bill["amount"] == 9935, "BILL sorts first, so it carries the 280"
+    assert from_bill["amount"] == 9935, "PAYMENT_REQUEST sorts first, so it carries the 280"
     assert from_petty["leaving_total"] == from_bill["leaving_total"] == 14193
