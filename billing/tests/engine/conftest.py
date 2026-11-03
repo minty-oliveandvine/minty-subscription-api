@@ -150,9 +150,8 @@ def seed_plans():
     """The real catalogue's shape: two singles at 28000 and the bundle at 40000 (HKD)."""
     return {
         "PETTY_CASH": seed_plan("PETTY_CASH", 28000, display_name="Petty Cash"),
-        "PAYMENT_REQUEST": seed_plan("PAYMENT_REQUEST", 28000, display_name="Payment Request"),
-        "PAYMENT_REQUEST+PETTY_CASH": seed_plan(
-            "PAYMENT_REQUEST+PETTY_CASH", 40000, display_name="Super Minty"),
+        "BILL": seed_plan("BILL", 28000, display_name="Payment Request"),
+        "BILL+PETTY_CASH": seed_plan("BILL+PETTY_CASH", 40000, display_name="Super Minty"),
     }
 
 

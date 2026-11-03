@@ -32,7 +32,8 @@ from shared_models.models import EntityFunction, EntityFunctionMap
 
 # Canonical module codes: the ``module_code`` enum (schema item 20). The Payment Request
 # module's code is PAYMENT_REQUEST; ``MODULE_BILL`` keeps its historical name so the call
-# sites read as they did in Flask.
+# sites read as they did in Flask. ``billing_plan.code`` still says ``BILL`` by decision -
+# ``billing.services.billing.plan_code`` maps it.
 MODULE_PETTY_CASH = ModuleCode.PETTY_CASH.value
 MODULE_BILL = ModuleCode.PAYMENT_REQUEST.value
 MODULE_CODES: tuple[str, ...] = (MODULE_PETTY_CASH, MODULE_BILL)

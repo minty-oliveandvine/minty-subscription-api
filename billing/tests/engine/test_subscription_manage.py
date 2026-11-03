@@ -357,11 +357,11 @@ def test_a_pair_leaving_together_splits_the_BUNDLE_by_code_order(monkeypatch):
     checkout.cancel_module(_FakeEntity(), _FakeUser(), "PAYMENT_REQUEST")
 
     written = dict(calls["rows"])["PAYMENT_REQUEST"]
-    assert written["extension_amount"] == 9935, "PAYMENT_REQUEST sorts first: 28000 x 11/31"
+    assert written["extension_amount"] == 9935, "BILL sorts first: 28000 x 11/31"
 
 
 def test_the_price_does_not_depend_on_the_order_of_the_two_clicks(monkeypatch):
-    """Cancel PAYMENT_REQUEST then PETTY_CASH, or the reverse: the same two figures.
+    """Cancel BILL then PETTY_CASH, or PETTY_CASH then BILL: the same two figures.
 
     The allocation is by ``sorted()`` precisely so that it cannot depend on the order the
     customer happened to click in. This is the invariant the old
@@ -477,7 +477,7 @@ def test_uncancelling_one_module_RE_PRICES_the_one_still_leaving(monkeypatch):
     again and goes back to its own 280 — otherwise it keeps a pair's price for days it
     now spends by itself."""
     rows = [
-        # The state a pair leaving together actually reaches: PAYMENT_REQUEST sorts first and holds
+        # The state a pair leaving together actually reaches: BILL sorts first and holds
         # the standalone 280, PETTY_CASH the 120 step. Two equal 4258s is not producible.
         _Row("PAYMENT_REQUEST", phase="scheduled_cancel", ext_state="pending", ext_amount=9935,
              app_access_until=datetime(2027, 2, 19, 13, tzinfo=UTC)),

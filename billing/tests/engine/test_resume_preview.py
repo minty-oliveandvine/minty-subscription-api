@@ -261,6 +261,6 @@ def test_resuming_BOTH_quotes_what_the_two_renew_calls_will_actually_charge(monk
     checkout.preview_reinstate_modules(entity, user, ["PAYMENT_REQUEST", "PETTY_CASH"])
 
     assert [s["before"] for s in seen] == [set(), {"PAYMENT_REQUEST"}], (
-        "PAYMENT_REQUEST joins an empty line; PETTY_CASH is then a step up from it"
+        "BILL joins an empty line; PETTY_CASH is then a step up from BILL"
     )
     assert [s["after"] for s in seen] == [{"PAYMENT_REQUEST"}, {"PAYMENT_REQUEST", "PETTY_CASH"}]
