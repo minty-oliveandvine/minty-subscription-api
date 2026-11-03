@@ -383,7 +383,7 @@ def test_buying_is_collected_by_an_in_house_invoice(monkeypatch):
 
 
 def test_adding_a_second_module_is_priced_as_an_upgrade(monkeypatch):
-    """The entity already bills BILL. Adding PETTY_CASH must be priced from what it
+    """The entity already bills PAYMENT_REQUEST. Adding PETTY_CASH must be priced from what it
     already bills to the bundle — the MARGINAL 120 — not at PETTY_CASH's own 280."""
     checkout, calls = _wire(monkeypatch, card="pm_saved", billed_codes={"PAYMENT_REQUEST"})
 
@@ -414,7 +414,7 @@ def test_an_uncollected_in_house_purchase_tells_the_user(monkeypatch):
 
 
 def test_checkout_rejects_already_active_module(monkeypatch):
-    """Double-buy guard: the entity already bills BILL, so buying it again is refused."""
+    """Double-buy guard: the entity already bills PAYMENT_REQUEST, so buying it again is refused."""
     checkout, calls = _wire(
         monkeypatch, module_rows={("e1", "PAYMENT_REQUEST"): _ModuleRow("active")}
     )

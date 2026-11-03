@@ -14,9 +14,9 @@ a change of interface. The two Stripe-only fields are gone:
   and no caller ever sent it back to Stripe: the gateway builds invoices from amounts,
   never from a stored price id.
 
-``billing_plan`` is keyed by the sorted SET of module codes — ``BILL``, ``PETTY_CASH``,
-``BILL+PETTY_CASH`` (the plan words; the module code is PAYMENT_REQUEST, see
-``billing.plan_code``). A single-module plan is one code; a bundle is two or more. That is
+``billing_plan`` is keyed by the sorted SET of module codes — ``PAYMENT_REQUEST``,
+``PETTY_CASH``, ``PAYMENT_REQUEST+PETTY_CASH`` (see ``billing.plan_code``). A
+single-module plan is one code; a bundle is two or more. That is
 the whole distinction between the two views below.
 """
 from __future__ import annotations
@@ -147,7 +147,6 @@ def _build_available_plans() -> list[PlanView]:
     ids = _function_ids()
     plans = []
     for plan in _single_plans():
-        # the MODULE code (PAYMENT_REQUEST), whatever word the plan row uses (BILL)
         (code,) = plan_modules(plan.code) or ("",)
         interval, count = _interval(plan)
         plans.append(
