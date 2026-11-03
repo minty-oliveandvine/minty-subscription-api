@@ -51,7 +51,7 @@ from minty_db.models import (
 
 from billing.services import invoice_number
 from billing.services._log import logger
-from billing.services.billing import plan_code
+from billing.services.billing import legacy_plan_code, plan_code
 from billing.services.constants import (
     EXT_INVOICED,
     EXT_PENDING,
@@ -358,7 +358,11 @@ def billing_plan_for_codes(codes) -> BillingPlan | None:
         code = plan_code(codes)
     except ValueError:
         return None
-    return BillingPlan.objects.filter(code=code, is_active=True).first()
+    # Either spelling while the rows are renamed (see billing.MODULE_BY_PLAN_WORD); the
+    # module word wins if a database briefly holds both.
+    rows = {p.code: p for p in BillingPlan.objects.filter(
+        code__in={code, legacy_plan_code(codes)}, is_active=True)}
+    return rows.get(code) or rows.get(legacy_plan_code(codes))
 
 
 def active_billing_plans() -> list[BillingPlan]:

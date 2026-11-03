@@ -28,9 +28,9 @@ class _Plan:
 
 
 PLANS = {
-    "BILL": _Plan("Payment Request", 28000),
+    "PAYMENT_REQUEST": _Plan("Payment Request", 28000),
     "PETTY_CASH": _Plan("Petty Cash", 28000),
-    "BILL+PETTY_CASH": _Plan("Super Minty", 40000),
+    "PAYMENT_REQUEST+PETTY_CASH": _Plan("Super Minty", 40000),
 }
 
 
@@ -39,7 +39,7 @@ def _wire(monkeypatch, plans=None):
     catalog = PLANS if plans is None else plans
     monkeypatch.setattr(
         store, "billing_plan_for_codes",
-        # keyed by plan words (BILL), asked with module codes (PAYMENT_REQUEST): plan_code maps
+        # keyed by plan_code, which is the module codes themselves
         lambda codes: catalog.get(plan_code(codes)),
     )
     return changes
@@ -112,7 +112,7 @@ def test_no_change_bills_nothing(monkeypatch):
 
 def test_an_unpriceable_TARGET_is_refused_not_guessed(monkeypatch):
     """Summing standalone prices would silently overcharge by the bundle discount."""
-    changes = _wire(monkeypatch, plans={"BILL": PLANS["BILL"]})
+    changes = _wire(monkeypatch, plans={"PAYMENT_REQUEST": PLANS["PAYMENT_REQUEST"]})
     period = Period(datetime(2026, 9, 8, 13, tzinfo=UTC),
                     datetime(2026, 10, 8, 13, tzinfo=UTC))
 
@@ -125,7 +125,7 @@ def test_an_unpriceable_TARGET_is_refused_not_guessed(monkeypatch):
 def test_an_unpriceable_CURRENT_set_is_refused_too(monkeypatch):
     """Without the old price there is no way to know what to credit — billing the full
     new price on top of one the customer already paid would double-charge them."""
-    changes = _wire(monkeypatch, plans={"BILL+PETTY_CASH": PLANS["BILL+PETTY_CASH"]})
+    changes = _wire(monkeypatch, plans={"PAYMENT_REQUEST+PETTY_CASH": PLANS["PAYMENT_REQUEST+PETTY_CASH"]})
     period = Period(datetime(2026, 9, 8, 13, tzinfo=UTC),
                     datetime(2026, 10, 8, 13, tzinfo=UTC))
 

@@ -2196,10 +2196,11 @@ def _leaving_marginal(leaving: set[str], code: str) -> int:
     in sorted code order — the first code takes its standalone price, each later one
     takes what it ADDS to the codes before it.
 
-        {PETTY_CASH}          PETTY_CASH  280 - 0   = 280
-        {BILL}                BILL        280 - 0   = 280
-        {BILL, PETTY_CASH}    BILL        280 - 0   = 280
-                              PETTY_CASH  400 - 280 = 120   -> 400 together
+        {PETTY_CASH}          PETTY_CASH       280 - 0   = 280
+        {PAYMENT_REQUEST}     PAYMENT_REQUEST  280 - 0   = 280
+        {PAYMENT_REQUEST, PETTY_CASH}
+                              PAYMENT_REQUEST  280 - 0   = 280
+                              PETTY_CASH       400 - 280 = 120   -> 400 together
 
     The shares telescope, so they always sum to the plan price of the whole set. That is
     the property this exists for: a pair leaving together held the BUNDLE until they

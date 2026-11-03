@@ -40,9 +40,9 @@ class _Plan:
 
 
 PLANS = {
-    "BILL": _Plan("Payment Request", 28000),
+    "PAYMENT_REQUEST": _Plan("Payment Request", 28000),
     "PETTY_CASH": _Plan("Petty Cash", 28000),
-    "BILL+PETTY_CASH": _Plan("Super Minty", 40000),
+    "PAYMENT_REQUEST+PETTY_CASH": _Plan("Super Minty", 40000),
 }
 
 
@@ -71,7 +71,7 @@ def _wire(app, monkeypatch, *, anchor=_ANCHOR, plans=None):
     catalog = PLANS if plans is None else plans
     monkeypatch.setattr(
         store, "billing_plan_for_codes",
-        # keyed by plan words (BILL), asked with module codes (PAYMENT_REQUEST): plan_code maps
+        # keyed by plan_code, which is the module codes themselves
         lambda codes: catalog.get(plan_code(codes)),
     )
     monkeypatch.setattr(
@@ -220,7 +220,7 @@ def test_order_is_by_date_not_by_card_order(app, monkeypatch):
         [_card("PETTY_CASH", at=_LATER), _card("PAYMENT_REQUEST", at=_CONVERTS_AT)],
     )
 
-    assert out["PAYMENT_REQUEST"] == 28000, "BILL converts first, so BILL anchors at a full period"
+    assert out["PAYMENT_REQUEST"] == 28000, "Payment Request converts first, so it anchors at a full period"
     assert 0 < out["PETTY_CASH"] < 28000
 
 
@@ -258,7 +258,7 @@ def test_a_trial_that_will_not_convert_is_skipped_and_does_not_anchor(app, monke
     )
 
     assert "PETTY_CASH" not in out
-    assert out["PAYMENT_REQUEST"] == 28000, "BILL is the first real conversion, so it anchors"
+    assert out["PAYMENT_REQUEST"] == 28000, "Payment Request is the first real conversion, so it anchors"
 
 
 # --- the quiet cases -----------------------------------------------------------
@@ -307,9 +307,9 @@ def test_a_downgrade_forecasts_nothing(app, monkeypatch):
     """build_change refuses to credit unused time the customer still gets, so there is
     nothing to collect and nothing to warn about."""
     cheaper = {
-        "BILL": _Plan("Payment Request", 28000),
+        "PAYMENT_REQUEST": _Plan("Payment Request", 28000),
         "PETTY_CASH": _Plan("Petty Cash", 28000),
-        "BILL+PETTY_CASH": _Plan("Super Minty", 20000),  # cheaper than either alone
+        "PAYMENT_REQUEST+PETTY_CASH": _Plan("Super Minty", 20000),  # cheaper than either alone
     }
     modules = _wire(app, monkeypatch, plans=cheaper)
 

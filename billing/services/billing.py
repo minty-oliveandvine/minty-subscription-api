@@ -65,12 +65,13 @@ class Period:
         return int((self.end - at).total_seconds())
 
 
-#: ``billing_plan.code`` keeps the word BILL for the Payment Request module by decision
-#: (schema item 20), while ``entity_function.function_code`` says PAYMENT_REQUEST. The
-#: plan key is derived from module codes, so the module word is mapped to the plan word
-#: here - in exactly one place - and back in ``plan_modules``.
-PLAN_WORD_BY_MODULE = {"PAYMENT_REQUEST": "BILL"}
-MODULE_BY_PLAN_WORD = {v: k for k, v in PLAN_WORD_BY_MODULE.items()}
+#: ``billing_plan.code`` is being renamed from BILL to PAYMENT_REQUEST (schema item 20,
+#: reversed 2026-11-03), and until November development and production read the same
+#: rows, so a database may still hold the old word. ``plan_modules`` reads it back as the
+#: module and ``legacy_plan_code`` spells a key the old way for the lookup.
+#: Remove both once every database is renamed.
+MODULE_BY_PLAN_WORD = {"BILL": "PAYMENT_REQUEST"}
+PLAN_WORD_BY_MODULE = {v: k for k, v in MODULE_BY_PLAN_WORD.items()}
 
 
 def plan_code(codes) -> str:
@@ -78,20 +79,26 @@ def plan_code(codes) -> str:
 
     Sorting is what makes it canonical - {PETTY_CASH, PAYMENT_REQUEST} and the reverse are
     the same plan and must not become two catalog rows. Derived in exactly one place so
-    a lookup and a write can never disagree about the spelling. Module codes are mapped to
-    the plan's words (``PAYMENT_REQUEST`` -> ``BILL``); an already-mapped word passes through,
-    so a caller holding ``plan.code.split("+")`` gets the same key.
+    a lookup and a write can never disagree about the spelling. The key is the module
+    codes themselves (``PAYMENT_REQUEST+PETTY_CASH``); the old plan word BILL is read as
+    PAYMENT_REQUEST, so a caller holding a legacy ``plan.code.split("+")`` gets the same key.
 
     Lives here, not on the model, so it can be imported without pulling in ``models.db``.
     """
     wanted = sorted({
-        PLAN_WORD_BY_MODULE.get(w, w)
+        MODULE_BY_PLAN_WORD.get(w, w)
         for w in (str(c).strip().upper() for c in (codes or []))
         if w
     })
     if not wanted:
         raise ValueError("a plan needs at least one module code")
     return "+".join(wanted)
+
+
+def legacy_plan_code(codes) -> str:
+    """``plan_code`` in the old plan words (``BILL+PETTY_CASH``), for a database whose
+    ``billing_plan`` rows are not renamed yet. Remove with ``MODULE_BY_PLAN_WORD``."""
+    return "+".join(sorted(PLAN_WORD_BY_MODULE.get(w, w) for w in plan_code(codes).split("+")))
 
 
 def plan_modules(code: str) -> tuple[str, ...]:
@@ -284,12 +291,13 @@ def cancel_access_end(period_end: datetime, at: datetime, *, extension_days: int
 
 
 def marginal_amount(line_amount: int, remaining_amount: int | None) -> int:
-    """What the cancelled module was actually worth on the line.
+    """What one module adds on top of ``remaining_amount``: the line price less what the
+    rest is worth on its own, never below 0.
 
-    A bundled module is not worth its standalone price. Dropping Petty Cash from a 400
-    bundle leaves Bill at 280, so Petty Cash's marginal value is 120 — charging 280 for
-    the extension would bill the customer more than the module ever cost them. With no
-    survivor, the whole line price is marginal.
+    ``checkout._leaving_marginal`` calls it with the plan for the LEAVING modules up to
+    and including this one, and the plan for those before it in sorted order: Payment
+    Request and Petty Cash leaving together give 400 - 280 = 120 for Petty Cash. With
+    nothing before it (``remaining_amount`` falsy), the whole line price is marginal.
     """
     if not remaining_amount:
         return max(0, int(line_amount))
