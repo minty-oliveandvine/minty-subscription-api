@@ -32,7 +32,7 @@ pytestmark = pytest.mark.django_db
 PERIOD = Period(START, END)
 # Where the cancelled module's paid extension ran out: what the reinstatement bills from.
 COVERED_TO = datetime(2027, 3, 20, 12, tzinfo=UTC)
-AFTER = {"PAYMENT_REQUEST", "PETTY_CASH"}
+AFTER = {"BILL", "PETTY_CASH"}
 
 
 def _world_for_changes(monkeypatch):
@@ -49,7 +49,7 @@ def _attempt(payer, entity, account):
     from billing.services import changes
 
     return changes.issue_change(
-        CUSTOMER, entity.id, "Refresh Co", {"PAYMENT_REQUEST"}, AFTER, PERIOD, COVERED_TO,
+        CUSTOMER, entity.id, "Refresh Co", {"BILL"}, AFTER, PERIOD, COVERED_TO,
         group=account, attempts_of=payer.id,
     )
 

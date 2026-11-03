@@ -311,7 +311,7 @@ of `Minty/docs/schema/01_schema_rebased.sql`):
 
 | Table | Holds |
 |---|---|
-| `billing_plan` | the price catalog (`code` = the module code, or the bundle `PAYMENT_REQUEST+PETTY_CASH`; minor units). Being renamed from the old plan word `BILL` / `BILL+PETTY_CASH` (2026-11-03): until every database is renamed, `store.billing_plan_for_codes` finds a plan under either spelling, the module word first (`billing.legacy_plan_code`) |
+| `billing_plan` | the price catalog (`code` = module or the bundle `BILL+PETTY_CASH`; minor units) |
 | `billing_policy` | the singleton of windows: trial days, post-cancel access days, past-due window, retry offsets `1..13` |
 | `payer_billing_group` | a billing ACCOUNT: payer, its name (`billing_company`) and `billing_email`, the card it charges, `paid_through`, dunning state. Several per payer, all renewing on the payer's one anchor; opened, renamed, re-carded and given companies from the portal (§2) |
 | `billing_account_payment_method` | the account's cards, one default |
