@@ -100,8 +100,8 @@ A host that injects `PORT` (Render) is honoured: the image runs gunicorn on `${P
 The environment (`.env.example` is the full list): `APP_ENV` (`development` | `production`, the
 default; `DEBUG` follows it), `SECRET_KEY`, `ALLOWED_HOSTS`, `DATABASE_URL` (`?schema=`, default
 `pettycashv3`; `config/dburl.py`), `SMTP_URL` (`smtp://` STARTTLS / `smtps://` SSL, `?timeout=`;
-unset = console backend; `config/smtpurl.py`), `MAIL_FROM`, `SUBSCRIPTION_EMAIL` /
-`ONBOARDING_EMAIL` (optional, default `MAIL_FROM`), `STRIPE_SECRET_KEY`,
+unset = console backend; `config/smtpurl.py`), `SUBSCRIPTION_FROM` /
+`ONBOARDING_FROM` (both required, no fallback), `STRIPE_SECRET_KEY`,
 `STRIPE_PUBLISHABLE_KEY`, `PETTY_CASH_URL`, `PETTY_CASH_PUBLIC_URL` (optional, default
 `PETTY_CASH_URL`), `MINTY_WEB_URL`, `PAYMENT_REQUEST_WEB_URL`, `CORS_ALLOWED_ORIGINS` (optional,
 default those three origins), `PREVIEW_ORIGIN_REGEX` (optional, see `docs/features/authentication.md`),

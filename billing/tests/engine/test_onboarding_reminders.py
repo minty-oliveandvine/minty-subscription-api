@@ -22,8 +22,8 @@ from django.core.management import call_command
 def mail(settings):
     settings.EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"
     settings.PETTY_CASH_PUBLIC_URL = "https://app.minty.test"
-    settings.DEFAULT_FROM_EMAIL = "noreply@minty.test"
-    settings.ONBOARDING_EMAIL = "onboarding@minty.test"
+    settings.SUBSCRIPTION_FROM = "subscription@minty.test"
+    settings.ONBOARDING_FROM = "onboarding@minty.test"
     django_mail.outbox = []
     return django_mail
 
@@ -199,11 +199,8 @@ def test_a_company_with_nothing_left_still_reads_right(mail):
 def test_billing_mail_keeps_its_own_sender(mail, settings):
     from billing.services import notify
 
-    settings.SUBSCRIPTION_EMAIL = "subscription@minty.test"
     assert notify.sender_for(notify.PAYMENT_RECOVERED) == "subscription@minty.test"
     assert notify.sender_for(notify.ONBOARDING_REMINDER) == "onboarding@minty.test"
-    settings.ONBOARDING_EMAIL = None
-    assert notify.sender_for(notify.ONBOARDING_REMINDER) == "noreply@minty.test"
 
 
 # --- Wiring ---------------------------------------------------------------------------

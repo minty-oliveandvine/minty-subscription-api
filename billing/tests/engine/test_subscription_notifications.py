@@ -96,8 +96,8 @@ class _Mail:
 @pytest.fixture
 def mail(settings, monkeypatch):
     """Install the failing-on-demand outbox and a public base url for the duration of a
-    test. ``SUBSCRIPTION_EMAIL`` is cleared so the sender tests below start from the
-    fallback whatever the developer's shell exports."""
+    test. ``SUBSCRIPTION_FROM`` is pinned so the sender tests below never read the
+    developer's shell."""
     from django.core.mail.backends import locmem
 
     fake = _Mail()
@@ -111,8 +111,7 @@ def mail(settings, monkeypatch):
     monkeypatch.setattr(locmem.EmailBackend, "send_messages", send_messages)
     settings.EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"
     settings.PETTY_CASH_PUBLIC_URL = "https://app.minty.test"
-    settings.DEFAULT_FROM_EMAIL = "noreply@minty.test"
-    settings.SUBSCRIPTION_EMAIL = None
+    settings.SUBSCRIPTION_FROM = "subscription@minty.test"
     django_mail.outbox = []
     return fake
 
@@ -579,24 +578,9 @@ def test_billing_mail_comes_from_its_own_address(app, db_session, mail, settings
 
     with app.app_context():
         payer = _make_payer(db_session)
-        settings.SUBSCRIPTION_EMAIL = "subscription@minty.test"
         notify.notify(payer, notify.PAYMENT_RECOVERED, dedupe_key="k", context={})
 
         assert mail.sent[0].sender == "subscription@minty.test"
-
-
-def test_billing_mail_falls_back_to_the_shared_address(app, db_session, mail, settings):
-    """An environment that has not yet verified the dedicated sender with the relay keeps
-    sending. An unverified From is rejected or spam-filed and ``notify`` swallows SMTP
-    errors by design, so failing over to the working address beats failing invisibly."""
-    from billing.services import notify
-
-    with app.app_context():
-        payer = _make_payer(db_session)
-        settings.SUBSCRIPTION_EMAIL = None
-        notify.notify(payer, notify.PAYMENT_RECOVERED, dedupe_key="k", context={})
-
-        assert mail.sent[0].sender == settings.DEFAULT_FROM_EMAIL
 
 
 def test_an_inline_logo_makes_the_message_related_not_mixed(app):

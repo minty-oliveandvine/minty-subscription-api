@@ -772,8 +772,8 @@ redirected send, and refuses to start if the value is not one email address. Uns
 delivery. This API only: Flask's sign-in codes and invites are not redirected.
 
 Mail: `SMTP_URL` (parsed into Django's `EMAIL_*` settings by `config/smtpurl.py`) on the same
-Brevo SMTP Minty uses, sender `SUBSCRIPTION_EMAIL` (fallback `MAIL_FROM`, the setting
-`DEFAULT_FROM_EMAIL`; the setup reminder's is `ONBOARDING_EMAIL`, production
+Brevo SMTP Minty uses, sender `SUBSCRIPTION_FROM` (required, no fallback - owner, 2026-11-05; also Django's
+`DEFAULT_FROM_EMAIL`); the setup reminder's is `ONBOARDING_FROM`, production
 `onboarding@dailyminty.com`, same fallback - `notify.sender_for`); each SMTP step times out after `?timeout=` seconds (`settings.EMAIL_TIMEOUT`, default 10; Django's
 own default blocks forever, inside the pass that holds the scheduler lock). `notify.mail_configured()` is false for the console and dummy backends
 and for SMTP with no host (`SMTP_URL` unset), and it is checked BEFORE the dedupe claim — an unconfigured
@@ -855,8 +855,8 @@ as `recipient_for`, so a replay never mails a real billing address. Pinned in
 `.env.example` is the list. `APP_ENV` (`development` | `production`, the default; `DEBUG`
 follows it); the scheduler switches; `SECRET_KEY` (shared, verify only); `DATABASE_URL` with
 `?schema=` (default `pettycashv3`, a setting never a literal — `config/dburl.py`,
-`billing/tests/test_schema_name.py`); `STRIPE_*`; `SMTP_URL` / `MAIL_FROM` /
-`SUBSCRIPTION_EMAIL` / `ONBOARDING_EMAIL`; `PETTY_CASH_URL` (the forwarded call);
+`billing/tests/test_schema_name.py`); `STRIPE_*`; `SMTP_URL` /
+`SUBSCRIPTION_FROM` / `ONBOARDING_FROM`; `PETTY_CASH_URL` (the forwarded call);
 `PETTY_CASH_PUBLIC_URL` (the address a PERSON reaches Minty at — every link in an email;
 defaults to `PETTY_CASH_URL`, which in the docker stack is the internal service name, so set it
 there); `MINTY_WEB_URL` / `PAYMENT_REQUEST_WEB_URL` / `CORS_ALLOWED_ORIGINS` (the browser

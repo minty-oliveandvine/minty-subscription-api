@@ -3,6 +3,9 @@ import os
 # The placeholder SECRET_KEY refuses to boot outside development; the real test key is set
 # below, after the import that would otherwise trip the guard.
 os.environ.setdefault("APP_ENV", "development")
+# The two required senders (settings.py); tests that look at one pin their own.
+os.environ.setdefault("SUBSCRIPTION_FROM", "subscription@minty.test")
+os.environ.setdefault("ONBOARDING_FROM", "onboarding@minty.test")
 
 from config.dburl import parse_database_url  # noqa: E402
 from config.settings import *  # noqa: E402, F401, F403

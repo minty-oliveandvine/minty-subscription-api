@@ -183,9 +183,10 @@ STRIPE_PUBLISHABLE_KEY = os.environ.get("STRIPE_PUBLISHABLE_KEY", "")
 # ---------------------------------------------------------------------------
 # Mail - the eight subscription notices and the setup reminder, on the same Brevo SMTP
 # Minty uses: SMTP_URL (config/smtpurl.py). Without it every send is logged and skipped
-# rather than failing the pass that raised it (Flask's rule, kept). MAIL_FROM is the default
-# sender; the billing sender is SUBSCRIPTION_EMAIL, as in Flask, and the setup reminder's
-# ONBOARDING_EMAIL - both default to MAIL_FROM.
+# rather than failing the pass that raised it (Flask's rule, kept). Two senders, both
+# required, with no fallback and no shared MAIL_FROM (owner, 2026-11-05): SUBSCRIPTION_FROM for
+# the eight billing notices, ONBOARDING_FROM for the setup reminder. Each must be a verified
+# sender in Brevo.
 # ---------------------------------------------------------------------------
 _SMTP = parse_smtp_url(os.environ.get("SMTP_URL"))
 EMAIL_BACKEND = _SMTP["EMAIL_BACKEND"]
@@ -199,10 +200,23 @@ EMAIL_USE_SSL = _SMTP["EMAIL_USE_SSL"]
 # block forever - and the notices go out inside the billing pass, which holds the scheduler
 # lock while it waits.
 EMAIL_TIMEOUT = _SMTP["EMAIL_TIMEOUT"]
-DEFAULT_FROM_EMAIL = os.environ.get("MAIL_FROM") or "noreply@example.com"
-SUBSCRIPTION_EMAIL = os.environ.get("SUBSCRIPTION_EMAIL") or DEFAULT_FROM_EMAIL
+
+
+def _sender(name: str) -> str:
+    value = (os.environ.get(name) or "").strip()
+    if not value:
+        raise ImproperlyConfigured(
+            f"{name} is not set. Refusing to start rather than send mail from another address."
+        )
+    return value
+
+
+SUBSCRIPTION_FROM = _sender("SUBSCRIPTION_FROM")
 # The "finish setting up your company" reminder's sender (notify.onboarding_sender).
-ONBOARDING_EMAIL = os.environ.get("ONBOARDING_EMAIL") or DEFAULT_FROM_EMAIL
+ONBOARDING_FROM = _sender("ONBOARDING_FROM")
+# Django's own default sender, so nothing ever goes out as webmaster@localhost; every notice
+# names its sender (notify.sender_for), so this is never chosen over one.
+DEFAULT_FROM_EMAIL = SUBSCRIPTION_FROM
 # TESTING ONLY (owner, 2026-11-05): every email goes to this ONE address instead of its
 # recipient, its subject naming who it was for (``notify.redirected``). Unset = normal
 # delivery. A redirected email is logged as sent, so the real recipient never gets it later.

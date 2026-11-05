@@ -359,31 +359,23 @@ def _warn_once_if_unreachable(value: str) -> None:
         )
 
 
-def billing_sender() -> str | None:
-    """The From address for billing mail.
+def billing_sender() -> str:
+    """The From address for billing mail: ``SUBSCRIPTION_FROM``.
 
-    Its own address rather than the account-wide sender (``MAIL_FROM``, here
-    ``settings.DEFAULT_FROM_EMAIL``): an invitation comes from a colleague, a dunning notice comes
-    from the company about to switch your access off. Recipients filter and search on the
-    sender, so those should not share one.
-
-    Falls back to ``DEFAULT_FROM_EMAIL`` when unset. An environment that has not yet
-    verified the dedicated sender with the relay keeps sending rather than silently
-    failing — an unverified From is rejected or spam-filed, and ``notify`` swallows SMTP
-    errors by design, so the failure would be invisible.
+    Its own address rather than one shared with the other emails: an invitation comes from a
+    colleague, a dunning notice comes from the company about to switch your access off.
+    Recipients filter and search on the sender, so those should not share one. Required at
+    start (config/settings.py), with no fallback (owner, 2026-11-05).
     """
-    return (getattr(settings, "SUBSCRIPTION_EMAIL", None)
-            or getattr(settings, "DEFAULT_FROM_EMAIL", None))
+    return settings.SUBSCRIPTION_FROM
 
 
-def onboarding_sender() -> str | None:
-    """The From address for the setup reminder: ``ONBOARDING_EMAIL``, else
-    ``DEFAULT_FROM_EMAIL`` - the same fallback, for the same reason, as ``billing_sender``."""
-    return (getattr(settings, "ONBOARDING_EMAIL", None)
-            or getattr(settings, "DEFAULT_FROM_EMAIL", None))
+def onboarding_sender() -> str:
+    """The From address for the setup reminder: ``ONBOARDING_FROM`` (required, no fallback)."""
+    return settings.ONBOARDING_FROM
 
 
-def sender_for(event: str) -> str | None:
+def sender_for(event: str) -> str:
     """Who an email comes from: the setup reminder its own address, the rest billing's."""
     return onboarding_sender() if event == ONBOARDING_REMINDER else billing_sender()
 

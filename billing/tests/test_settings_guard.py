@@ -10,11 +10,14 @@ import sys
 import pytest
 from django.core.exceptions import ImproperlyConfigured
 
+#: The two senders this service requires (owner, 2026-11-05: no fallback, no MAIL_FROM).
+SENDERS = {"SUBSCRIPTION_FROM": "subscription@minty.example", "ONBOARDING_FROM": "onboarding@minty.example"}
 
-def _load_settings(monkeypatch, env):
-    for k in ("SECRET_KEY", "APP_ENV"):
+
+def _load_settings(monkeypatch, env, *, senders=SENDERS):
+    for k in ("SECRET_KEY", "APP_ENV", "MAIL_FROM", "SUBSCRIPTION_EMAIL", "ONBOARDING_EMAIL", *SENDERS):
         monkeypatch.delenv(k, raising=False)
-    for k, v in env.items():
+    for k, v in {**senders, **env}.items():
         monkeypatch.setenv(k, v)
     # load_dotenv() must not put a real key back from .env for this test.
     monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **kw: False)
@@ -50,7 +53,7 @@ def test_a_real_key_boots_in_production(monkeypatch):
 
 
 def test_urls_and_senders_come_from_the_canonical_names(monkeypatch):
-    for k in ("PETTY_CASH_PUBLIC_URL", "SUBSCRIPTION_EMAIL", "ONBOARDING_EMAIL", "CORS_ALLOWED_ORIGINS"):
+    for k in ("PETTY_CASH_PUBLIC_URL", "CORS_ALLOWED_ORIGINS"):
         monkeypatch.delenv(k, raising=False)
     mod = _load_settings(
         monkeypatch,
@@ -60,7 +63,6 @@ def test_urls_and_senders_come_from_the_canonical_names(monkeypatch):
             "MINTY_WEB_URL": "https://hub.example/",
             "PAYMENT_REQUEST_WEB_URL": "https://pay.example",
             "PETTY_CASH_WEB_URL": "https://pettycash.example/",
-            "MAIL_FROM": "noreply@minty.example",
             "SMTP_URL": "smtps://u:p@smtp.example",
             "DATABASE_URL": "postgres://u@db/minty?schema=pettycash_alt",
         },
@@ -73,7 +75,8 @@ def test_urls_and_senders_come_from_the_canonical_names(monkeypatch):
         "https://pettycash.example",
         "http://minty:8010",
     ]
-    assert mod.DEFAULT_FROM_EMAIL == mod.SUBSCRIPTION_EMAIL == mod.ONBOARDING_EMAIL == "noreply@minty.example"
+    assert mod.SUBSCRIPTION_FROM == mod.DEFAULT_FROM_EMAIL == "subscription@minty.example"
+    assert mod.ONBOARDING_FROM == "onboarding@minty.example"
     assert (mod.EMAIL_HOST, mod.EMAIL_PORT, mod.EMAIL_USE_SSL) == ("smtp.example", 465, True)
     assert mod.DB_SCHEMA == "pettycash_alt"
     assert mod.DATABASES["default"]["NAME"] == "minty"
@@ -113,3 +116,31 @@ def test_a_mail_redirect_is_read_and_trimmed(monkeypatch):
 def test_no_mail_redirect_by_default(monkeypatch):
     monkeypatch.delenv("MAIL_REDIRECT_TO", raising=False)
     assert _load_settings(monkeypatch, {"APP_ENV": "development"}).MAIL_REDIRECT_TO == ""
+
+
+@pytest.mark.parametrize("missing", sorted(SENDERS))
+def test_each_sender_is_required(monkeypatch, missing):
+    """No fallback (owner, 2026-11-05): a missing sender stops the service at start, rather
+    than mail going out from another address or failing one notice at a time."""
+    senders = {k: v for k, v in SENDERS.items() if k != missing}
+    with pytest.raises(ImproperlyConfigured, match=missing):
+        _load_settings(monkeypatch, {"APP_ENV": "development"}, senders=senders)
+
+
+def test_the_old_sender_names_are_not_read(monkeypatch):
+    """MAIL_FROM and SUBSCRIPTION_EMAIL set nothing: a host still carrying only them fails."""
+    with pytest.raises(ImproperlyConfigured, match="SUBSCRIPTION_FROM"):
+        _load_settings(
+            monkeypatch,
+            {"APP_ENV": "development", "MAIL_FROM": "a@minty.example", "SUBSCRIPTION_EMAIL": "b@minty.example"},
+            senders={"ONBOARDING_FROM": "onboarding@minty.example"},
+        )
+
+
+def test_the_old_onboarding_name_is_not_read(monkeypatch):
+    with pytest.raises(ImproperlyConfigured, match="ONBOARDING_FROM"):
+        _load_settings(
+            monkeypatch,
+            {"APP_ENV": "development", "ONBOARDING_EMAIL": "c@minty.example"},
+            senders={"SUBSCRIPTION_FROM": "subscription@minty.example"},
+        )
