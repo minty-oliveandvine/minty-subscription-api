@@ -98,3 +98,18 @@ def _restore_settings_module():
     # Put the test settings module back for the rest of the suite.
     sys.modules.pop("config.settings", None)
     importlib.import_module("config.settings_test")
+
+
+def test_a_mail_redirect_must_be_an_email_address(monkeypatch):
+    with pytest.raises(ImproperlyConfigured, match="MAIL_REDIRECT_TO"):
+        _load_settings(monkeypatch, {"APP_ENV": "development", "MAIL_REDIRECT_TO": "not-an-address"})
+
+
+def test_a_mail_redirect_is_read_and_trimmed(monkeypatch):
+    mod = _load_settings(monkeypatch, {"APP_ENV": "development", "MAIL_REDIRECT_TO": " tester@minty.test "})
+    assert mod.MAIL_REDIRECT_TO == "tester@minty.test"
+
+
+def test_no_mail_redirect_by_default(monkeypatch):
+    monkeypatch.delenv("MAIL_REDIRECT_TO", raising=False)
+    assert _load_settings(monkeypatch, {"APP_ENV": "development"}).MAIL_REDIRECT_TO == ""

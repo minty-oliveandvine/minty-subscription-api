@@ -995,6 +995,15 @@ def recipient_for(user_id) -> tuple[str | None, str]:
     return (address or None), (user.first_name or "").strip()
 
 
+def redirected(address: str, subject: str) -> tuple[str, str]:
+    """``(address, subject)`` as sent: unchanged, or - while ``MAIL_REDIRECT_TO`` is set
+    (testing only) - that one address, the subject prefixed with who it was for."""
+    target = getattr(settings, "MAIL_REDIRECT_TO", "")
+    if not target:
+        return address, subject
+    return target, f"[to: {address}] {subject}"
+
+
 def address_for(user_id, event: str, context: dict | None) -> tuple[str | None, str]:
     """``(email, first_name)`` for ONE email - the only place ``notify`` asks who it goes to.
 
@@ -1208,6 +1217,9 @@ def notify(user_id, event: str, *, dedupe_key: str, context: dict | None = None)
             return False
 
         message = build_message(event, context, address=address, first_name=first_name)
+        intended = address
+        address, message.subject = redirected(address, message.subject)
+        message.to = [address]
         # Cut to the column. A billing email may be 255 characters and the log keeps 200:
         # uncut, the save AFTER a successful send failed, the claim stayed ``failed``, and
         # the same email went out again on every run.
@@ -1226,7 +1238,11 @@ def notify(user_id, event: str, *, dedupe_key: str, context: dict | None = None)
 
         row.status = STATUS_SENT
         row.save(update_fields=["recipient", "status"])
-        logger.info("notify: sent {} to {} ({})", event, address, dedupe_key)
+        if address != intended:
+            logger.warning("notify: sent {} to {} INSTEAD OF {} (MAIL_REDIRECT_TO) ({})",
+                           event, address, intended, dedupe_key)
+        else:
+            logger.info("notify: sent {} to {} ({})", event, address, dedupe_key)
         return True
     except Exception:
         # The outermost guard. Nothing about a notification may propagate into a caller

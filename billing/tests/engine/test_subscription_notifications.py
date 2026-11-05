@@ -931,6 +931,50 @@ def test_a_long_billing_email_is_logged_as_sent_not_sent_again(app, db_session, 
         assert row.recipient == address[: notify.RECIPIENT_MAX]
 
 
+def test_a_test_redirect_sends_every_email_to_one_address(app, db_session, mail, settings):
+    """``MAIL_REDIRECT_TO`` (testing only, owner 2026-11-05): every email goes to that one
+    address instead - the payer's, a billing account's, a business email - and its subject
+    names who it was for. The log records where it actually went, and counts it as sent."""
+    from minty_db.models import SubscriptionEmailLog
+
+    from billing.services import notify
+
+    settings.MAIL_REDIRECT_TO = "tester@minty.test"
+    with app.app_context():
+        payer = _make_payer(db_session)
+        account = _billing_account(payer)
+        company = _company(db_session, "e1", business_email="hello@olive.test")
+
+        notify.notify(payer, notify.RENEWAL_FAILED, dedupe_key="m",
+                      context={**DECLINE, "billing_group_id": account.id})
+        notify.notify(payer, notify.TRIAL_ENDING, dedupe_key="t", context={
+            "entity_id": company, "entity_name": "Olive Ltd", "codes": ["PETTY_CASH"],
+            "trial_end": datetime(2026, 9, 1, tzinfo=UTC), "needs_card": True,
+        })
+        notify.notify(payer, notify.SUBSCRIBER_TRANSFER_DECLINED, dedupe_key="h")
+
+        assert [m.to for m in mail.sent] == [["tester@minty.test"]] * 3
+        assert [m.cc + m.bcc for m in mail.sent] == [[]] * 3
+        assert [m.subject.split("] ")[0] for m in mail.sent] == [
+            "[to: accounts@olive.test", "[to: hello@olive.test", "[to: payer@test.com",
+        ]
+        rows = SubscriptionEmailLog.objects.filter(user_id=str(payer))
+        assert {(r.status, r.recipient) for r in rows} == {
+            (notify.STATUS_SENT, "tester@minty.test")}
+
+
+def test_without_a_redirect_the_subject_is_untouched(app, db_session, mail, settings):
+    from billing.services import notify
+
+    settings.MAIL_REDIRECT_TO = ""
+    with app.app_context():
+        payer = _make_payer(db_session)
+        notify.notify(payer, notify.RENEWAL_FAILED, dedupe_key="k", context=DECLINE)
+
+        assert mail.sent[0].to == ["payer@test.com"]
+        assert not mail.sent[0].subject.startswith("[to:")
+
+
 def test_the_replay_redirect_also_catches_a_billing_address(app, db_session, mail,
                                                              monkeypatch):
     """A replay mails whoever is reading it, never the inbox the data names - a billing

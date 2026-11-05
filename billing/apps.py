@@ -23,6 +23,11 @@ class BillingConfig(AppConfig):
         subscriptions run-daily`` would run the pass twice, and one inside pytest would
         bill somebody.
         """
+        from django.conf import settings
+
+        if settings.MAIL_REDIRECT_TO:
+            logger.warning("mail: MAIL_REDIRECT_TO is set - every email goes to %s, not "
+                           "its recipient (testing only)", settings.MAIL_REDIRECT_TO)
         if _is_management_command() or _is_autoreloader_parent():
             return
         from billing.scheduler import start_scheduler

@@ -763,6 +763,14 @@ for a handover that is over.
 - a deferred trial's module card says `trial_closing` for its first six hours
   (`TRIAL_CLOSING_WINDOW`) and trial expired after that, while its access stays on for the grace.
 
+**Test redirect (owner, 2026-11-05; temporary, for testing on dev and production):**
+`MAIL_REDIRECT_TO`, when set, sends EVERY email from this API to that one address - To
+replaced, no Cc/Bcc - its subject prefixed `[to: <intended recipient>] ` (`notify.redirected`).
+The log row records the address it actually went to and counts it as SENT, so the real
+recipient never gets that email later. The service logs a warning at startup and on every
+redirected send, and refuses to start if the value is not one email address. Unset = normal
+delivery. This API only: Flask's sign-in codes and invites are not redirected.
+
 Mail: `SMTP_URL` (parsed into Django's `EMAIL_*` settings by `config/smtpurl.py`) on the same
 Brevo SMTP Minty uses, sender `SUBSCRIPTION_EMAIL` (fallback `MAIL_FROM`, the setting
 `DEFAULT_FROM_EMAIL`; the setup reminder's is `ONBOARDING_EMAIL`, production

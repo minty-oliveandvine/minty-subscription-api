@@ -203,6 +203,16 @@ DEFAULT_FROM_EMAIL = os.environ.get("MAIL_FROM") or "noreply@example.com"
 SUBSCRIPTION_EMAIL = os.environ.get("SUBSCRIPTION_EMAIL") or DEFAULT_FROM_EMAIL
 # The "finish setting up your company" reminder's sender (notify.onboarding_sender).
 ONBOARDING_EMAIL = os.environ.get("ONBOARDING_EMAIL") or DEFAULT_FROM_EMAIL
+# TESTING ONLY (owner, 2026-11-05): every email goes to this ONE address instead of its
+# recipient, its subject naming who it was for (``notify.redirected``). Unset = normal
+# delivery. A redirected email is logged as sent, so the real recipient never gets it later.
+MAIL_REDIRECT_TO = (os.environ.get("MAIL_REDIRECT_TO") or "").strip()
+if MAIL_REDIRECT_TO and (MAIL_REDIRECT_TO.count("@") != 1 or any(c.isspace() for c in MAIL_REDIRECT_TO)
+                         or "." not in MAIL_REDIRECT_TO.split("@")[1]):
+    raise ImproperlyConfigured(
+        "MAIL_REDIRECT_TO must be one email address (or unset). Refusing to start rather "
+        "than send every email to an address that does not exist."
+    )
 
 # ---------------------------------------------------------------------------
 # Logging - one line format for every Minty backend (minty_shared.logctx):
