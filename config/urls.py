@@ -44,6 +44,7 @@ api = NinjaAPI(
 
 register_exception_handlers(api)
 
+from billing import internal  # noqa: E402
 from billing.api.me import me_router  # noqa: E402
 from billing.api.modules import modules_router  # noqa: E402
 from billing.api.notice import notice_router  # noqa: E402
@@ -68,4 +69,9 @@ def healthz(request):
 urlpatterns = [
     path("healthz", healthz, name="healthz"),
     path("api/", api.urls),
+    # Read-only facts for minty-accounts-api's hub (assertion-scoped; billing/internal.py).
+    path("api/internal/subscriptions/attention", internal.attention, name="internal_attention"),
+    path("api/internal/subscriptions/entities/<str:entity_id>", internal.entity_facts, name="internal_entity_facts"),
+    path("api/internal/subscriptions/payers/<str:user_id>/entities", internal.payer_entities,
+         name="internal_payer_entities"),
 ]

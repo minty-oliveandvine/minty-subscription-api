@@ -1193,3 +1193,38 @@ happening.**
 | 4c+ | DONE 2026-09-25: **billing accounts in the portal** — `GET /billing/accounts` (`portal.build_billing_accounts`), `update` / `default-card` / `move` (`billing/services/billing_accounts.py`), the account fields on `confirm`, `account` on `invoices` and `remove`, `next_billing` on `subscriptions`. Five silent failures fixed on the way: the landing's "Next Billing Date" was the anchor (the FIRST charge); the removal guard stopped at the first account on a shared card; card-keyed nomination raised on a shared card (`_group_for_card`, oldest wins); a company moved onto an emptied account lost access (`_carry_paid_days`' idle branch); a blanked address field was dropped by the SDK instead of cleared. Flask not mirrored (dark there; Django replaces it). **Same day, later: `next_bill` per account** (08-B's "Amount (estimated)") - `portal.next_bill_for_account` prices the account's next renewal with `renewals.build_renewal(..., converting_by=period.start)`: the runner's own invoice for the period starting on the next billing date, plus the trials that will have converted by then (`renewals._trial_converts` - the trial-end job's conjunction of customer, card for the company and consent, read from the database alone, never Stripe). `converting_by` is the forecast's only; the runner never passes it, so what it bills is unchanged. A figure that cannot be priced is null and logged, never a failed page. **Later still: schema item 23** - `subscription_invoice_line` records what each line PAID FOR (`period_start` / `period_end` / `unit_amount`), written by BOTH engines at issue: `billing.Line` carries them from whatever priced the line (`paid_from` holds a mid-period start to the period as `prorate` does), and an extension's come from `checkout.pending_extension_terms` - the paid-through date to the access end, and the rate only when re-deriving it piece by piece (`_extension_pieces`, which `_segmented_extension` now sums) reproduces the billed amount at ONE rate; never a blend, never a failed renewal. The breakdown reads them first. Minty migration `x1a01_invoice_line_span` ALTERs a database already up; both local ones have it, Supabase does not yet. **And 08-C's address became Stripe's own form** (the user's call): `?countries=1` also answers `publishable_key`, `update` takes `cardholder` (written with the address in one `billing_details` update, the account's card required as for the address), and every field is held to 255 characters. **2026-09-28: 08-K** - `POST /invoices/{invoice_id}/retry` and `retryable` on the invoice rows (above); `retry_now` gained `group_id` / `expect_invoice` in BOTH engines. And the engine now recognises a REPLAY-SCOPED renewal key (`dunning._names_period`: `<key>` or `<key>-<suffix>` - `replay_scenarios` scopes every key it issues so same-day runs do not collide at Stripe) where it picks the current period's invoice and where it settles one, so the dev database's lived past-due accounts can be retried and settle; production keys are never scoped. NOT covered: the renewal runner's duplicate guard (`_already_invoiced`) still matches keys exactly, so the live scheduler re-bills a replay-lived period (seen 2026-09-28 07:00 UTC on the catalogue's two 'Failed' accounts). **2026-09-29: the invoice PDF (Figma 09-A)** - `GET /invoices/{invoice_id}/pdf` and `has_pdf` on the invoice rows (above; Django only, Flask never had the portal's invoice actions); and in BOTH engines, a declined reinstatement voids the invoice it left open, and every Stripe item carries its own line's days (§6) |
 | 5 | DONE in code 2026-10-06: Flask's copies deleted (engine, payer portal, CLI, scheduler, notice route; no Flask code reads the Stripe keys); minty-onboarding-api proxies its money routes here and its own `finalize` calls `trials/start`; Flask's dashboard and minty-payment-request-web read the notice from here |
 | 7 | deployed beside the phase-C builds (on a test site since before 2026-10-01; the dark switch the plan's step 7/8b relied on was removed that day) |
+
+## Read-only facts for the hub (`billing/internal.py`, 2026-11-06)
+
+minty-accounts-api's hub asks this service about a company's subscription, instead of reading
+the tables itself as Flask's `store_ro.py` did (the owner's choice, Phase 5 of the Flask
+retirement). These are three plain Django views, outside the ninja API: they are not in
+`docs/openapi.json` and they never write.
+
+**Who may ask:** a backend's 60-second assertion (HS256, `SECRET_KEY`) with
+`scope = subscription-facts`. Anything else is 401 `{"error": "Unauthorized"}`.
+
+**`POST /api/internal/subscriptions/attention`** `{entity_ids}` (at most 500; anything else is 422)
+answers `{attention: {id: {trials: {code: ISO end}, payment_failed}}}`. It feeds the entity
+list's badges.
+- Trials follow `cards.get_trial_modules_for_entities`'s rule. A trial ends at
+  `app_access_until`, else `trial_end`.
+- `payment_failed` means the card says past due: access is still granted (until the promise, or
+  until paid-through plus the past-due window) and the customer was told
+  (`dunning.told_of_failure`).
+- It reads the database only. The card itself also reads Stripe, which is too much for a list.
+- A company with no module rows is absent from the answer.
+
+**`GET /api/internal/subscriptions/entities/<id>`** answers
+`{payer, payers, pending_transfer_to, billed_modules}`:
+- `payer` comes from `store.payer_for_entity`.
+- `payers` lists every payer any row names. The removal guard uses it and refuses on a split.
+- `pending_transfer_to` is the nominee of an open handover.
+- `billed_modules` are active or past due, or a scheduled cancel that was billed. A billed module
+  locks the manual switch.
+
+**`GET /api/internal/subscriptions/payers/<user_id>/entities`** answers `{entities: [{id, name}]}`:
+every company whose bill this person carries, in any phase. It backs the guard on whether they
+may leave.
+
+Tests: `billing/tests/test_internal_facts.py`.
