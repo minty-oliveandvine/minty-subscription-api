@@ -83,6 +83,7 @@ def test_the_output_is_a_one_page_pdf():
 
     assert data.startswith(b"%PDF-") and data.rstrip().endswith(b"%%EOF")
     assert {mark.page for mark in marks} == {1}
+    assert b"/Author (Daily Minty Limited)" in data  # the operator, in the document's own details
 
 
 def test_the_page_is_drawn_where_the_frame_draws_it():
@@ -122,7 +123,8 @@ def test_the_page_is_drawn_where_the_frame_draws_it():
     assert total.x + total.width == pytest.approx(RIGHT)
     assert _text(marks, "Amount").y == total.y  # the label shares the figure's baseline
 
-    footer = _text(marks, "DailyMinty Limited, Level 5, K11 Atelier, 728 King’s Road, Quarry Bay, Hong Kong.")
+    # the operator, Daily Minty Limited (owner, 2026-11-09)
+    footer = _text(marks, "Daily Minty Limited, Unit 30, 5/F, 657 King’s Road, Quarry Bay, Hong Kong.")
     assert (footer.x, _top(footer)) == (52, pytest.approx(1039))
     mailbox = _text(marks, "billing@dailyminty.com")
     assert mailbox.color == (0x2E, 0x9B, 0x9B)

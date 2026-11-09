@@ -188,7 +188,7 @@ def _new_pdf(doc: InvoiceDocument, *, fallback: bool):
     pdf.set_margins(0, 0, 0)
     pdf.c_margin = 0  # or every right-aligned figure shifts by the cell's padding
     pdf.set_title(f"Invoice {doc.reference}")
-    pdf.set_author("DailyMinty Limited")
+    pdf.set_author("Daily Minty Limited")
     pdf.set_creator("Minty")
     for (family, style), path in FONT_FILES.items():
         pdf.add_font(family, style, str(path))

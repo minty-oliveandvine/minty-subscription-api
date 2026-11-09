@@ -44,7 +44,8 @@ PLAN_LABELS = {
 #: Suffixed to a heading that carries on from the previous page.
 CONTINUED = " (continued)"
 
-SELLER_LINE = "DailyMinty Limited, Level 5, K11 Atelier, 728 King’s Road, Quarry Bay, Hong Kong."
+#: The seller - Minty's operator, Daily Minty Limited (owner, 2026-11-09).
+SELLER_LINE = "Daily Minty Limited, Unit 30, 5/F, 657 King’s Road, Quarry Bay, Hong Kong."
 CONTACT_EMAIL = "billing@dailyminty.com"
 NOTE = (
     "The amount due will be debited from the payment details you have provided to us on or "
