@@ -3,7 +3,7 @@
 This service **verifies tokens; it never mints them** (`core/auth.py`). Minty (Flask) signs
 the person in — email OTP or Xero — mints the module JWT (`_generate_module_token`, 30
 minutes) and hands it to `minty-web` in the launch URL (`/landing?token=…`); `minty-web` then
-sends it here as a bearer. The system-wide picture is `Minty/docs/features/authentication.md`.
+sends it here as a bearer. The system-wide picture is `minty-accounts-api/docs/features/authentication.md`.
 
 ## The bearer token
 
