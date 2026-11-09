@@ -110,7 +110,7 @@ def mail(settings, monkeypatch):
 
     monkeypatch.setattr(locmem.EmailBackend, "send_messages", send_messages)
     settings.EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"
-    settings.PETTY_CASH_PUBLIC_URL = "https://app.minty.test"
+    settings.ACCOUNTS_API_PUBLIC_URL = "https://app.minty.test"
     settings.SUBSCRIPTION_FROM = "subscription@minty.test"
     django_mail.outbox = []
     return fake
@@ -475,7 +475,7 @@ def test_links_are_dropped_rather_than_pointed_at_localhost(app, db_session, mai
 
     with app.app_context():
         payer = _make_payer(db_session)
-        settings.PETTY_CASH_PUBLIC_URL = None
+        settings.ACCOUNTS_API_PUBLIC_URL = None
         notify.notify(payer, notify.TRIAL_ENDING, dedupe_key="k", context={
             "entity_id": _company(db_session, "e1"), "entity_name": "Olive Ltd",
             "codes": ["PAYMENT_REQUEST"], "trial_end": datetime(2026, 9, 1, tzinfo=UTC),
@@ -491,10 +491,10 @@ def test_links_are_dropped_rather_than_pointed_at_localhost(app, db_session, mai
 
 def test_the_images_travel_with_the_message_not_over_http(app, db_session, mail):
     """A remote <img> is a broken grey box whenever the client blocks images — which
-    Gmail and Outlook both do by default — or whenever PETTY_CASH_PUBLIC_URL isn't publicly
+    Gmail and Outlook both do by default — or whenever ACCOUNTS_API_PUBLIC_URL isn't publicly
     reachable. The first live send went out with a logo pointing at localhost:8010.
 
-    Attached, they render offline, behind image blocking, and whatever PETTY_CASH_PUBLIC_URL says.
+    Attached, they render offline, behind image blocking, and whatever ACCOUNTS_API_PUBLIC_URL says.
     Both parts get the same treatment: the masthead logo and the event's illustration.
     """
     from billing.services import notify
@@ -619,7 +619,7 @@ def test_a_real_enclosure_stays_mixed(app):
 
 
 def test_an_unreachable_public_url_is_reported_once(app, db_session, mail, monkeypatch, settings):
-    """A developer's PETTY_CASH_PUBLIC_URL reaching production mail is otherwise silent: every
+    """A developer's ACCOUNTS_API_PUBLIC_URL reaching production mail is otherwise silent: every
     message looks perfect and every button lands on a host only the sender can resolve.
 
     Once per process, not per send — a nightly run mailing forty payers must not print
@@ -633,7 +633,7 @@ def test_an_unreachable_public_url_is_reported_once(app, db_session, mail, monke
     )
 
     with app.app_context():
-        settings.PETTY_CASH_PUBLIC_URL = "https://localhost:8010"
+        settings.ACCOUNTS_API_PUBLIC_URL = "https://localhost:8010"
         payer = _make_payer(db_session)
         for index in range(3):
             notify.notify(

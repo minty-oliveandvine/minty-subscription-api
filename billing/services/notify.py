@@ -74,7 +74,7 @@ PORTED FROM FLASK (Part 2 step 2). The copy, the builders and the three rules ar
 layer underneath them - Flask-Mail became Django's mail framework (``InlineImageMessage``
 keeps the ``multipart/related`` wire shape), ``render_template`` became the Jinja2
 template backend rendering the SAME template (``templates/email/``), ``PUBLIC_URL``
-became ``PETTY_CASH_PUBLIC_URL``, and the links a person receives go to minty-web through
+became ``ACCOUNTS_API_PUBLIC_URL``, and the links a person receives go to minty-web through
 Flask's re-handoff (``settings_url`` / ``portal_url``) instead of to Flask's own pages.
 """
 from __future__ import annotations
@@ -311,8 +311,8 @@ def _module_name(code: str) -> str:
 def base_url() -> str:
     """Public origin for links, WITHOUT a request to derive it from.
 
-    ``PETTY_CASH_PUBLIC_URL`` — the address a PERSON reaches Minty at. Distinct from
-    ``PETTY_CASH_URL``, which in the docker stack is the internal service
+    ``ACCOUNTS_API_PUBLIC_URL`` — the address a PERSON reaches Minty at. Distinct from
+    ``ACCOUNTS_API_URL``, which in the docker stack is the internal service
     name (``http://minty:8010``) and would ship a button nobody outside the network can
     press. One setting for every link a customer receives, so a domain change has one
     place to land.
@@ -321,7 +321,7 @@ def base_url() -> str:
     is no request to build an absolute URL from. An unset value drops the button rather
     than shipping a dead one.
     """
-    value = (getattr(settings, "PETTY_CASH_PUBLIC_URL", "") or "").rstrip("/")
+    value = (getattr(settings, "ACCOUNTS_API_PUBLIC_URL", "") or "").rstrip("/")
     _warn_once_if_unreachable(value)
     return value
 
@@ -333,7 +333,7 @@ _warned_unreachable = False
 def _warn_once_if_unreachable(value: str) -> None:
     """Say something when the buttons in these emails cannot possibly work.
 
-    A developer's ``PETTY_CASH_PUBLIC_URL`` reaching production mail is a silent failure otherwise:
+    A developer's ``ACCOUNTS_API_PUBLIC_URL`` reaching production mail is a silent failure otherwise:
     every message goes out looking perfect and every button lands on a host only the
     sender can resolve. Cheap to detect, and worth one loud line per process — the alert
     emails are the ones whose whole purpose is getting somebody to click through.
@@ -348,13 +348,13 @@ def _warn_once_if_unreachable(value: str) -> None:
     if not value:
         _warned_unreachable = True
         logger.warning(
-            "notify: PETTY_CASH_PUBLIC_URL is unset — billing emails will go out with no "
+            "notify: ACCOUNTS_API_PUBLIC_URL is unset — billing emails will go out with no "
             "action buttons at all."
         )
     elif any(host in lowered for host in _LOCAL_HOSTS):
         _warned_unreachable = True
         logger.warning(
-            "notify: PETTY_CASH_PUBLIC_URL is {!r}, which no recipient can reach. Billing emails "
+            "notify: ACCOUNTS_API_PUBLIC_URL is {!r}, which no recipient can reach. Billing emails "
             "will ship buttons that go nowhere.", value,
         )
 
@@ -427,7 +427,7 @@ def handoff_path(next_path: str, *, entity_id=None) -> str:
 
 
 def handoff_url(next_path: str, *, entity_id=None) -> str:
-    """``{PETTY_CASH_PUBLIC_URL}`` + ``handoff_path`` — a link into minty-web that Flask
+    """``{ACCOUNTS_API_PUBLIC_URL}`` + ``handoff_path`` — a link into minty-web that Flask
     authenticates on the way through. Empty when there is no public origin, like every
     other link here."""
     root = base_url()
@@ -451,13 +451,13 @@ def portal_url(next_path: str = "/subscription/subscriptions") -> str:
 #
 #   1. most clients — Gmail and Outlook included — block remote images by default until
 #      the reader clicks "show images", so the masthead is a grey box on first open;
-#   2. the host has to be publicly reachable. ``PETTY_CASH_PUBLIC_URL`` is a developer's
+#   2. the host has to be publicly reachable. ``ACCOUNTS_API_PUBLIC_URL`` is a developer's
 #      ``https://localhost:8010`` far more often than anyone intends, and mail sent that
 #      way carries a logo nobody outside that machine can load. That is exactly what the
 #      first live send did.
 #
 # A CID attachment is part of the message, so it renders offline, behind image blocking,
-# and whatever ``PETTY_CASH_PUBLIC_URL`` says. The cost is ~14KB per email, which is nothing next to
+# and whatever ``ACCOUNTS_API_PUBLIC_URL`` says. The cost is ~14KB per email, which is nothing next to
 # a masthead that is broken by default.
 
 LOGO_CID = "minty-logo"

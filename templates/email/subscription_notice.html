@@ -124,7 +124,7 @@
             {# ``logo_src`` is a cid: reference to a part attached to this very message —
                see notify.image_bytes. A remote <img> is a broken box whenever the client
                blocks images (Gmail and Outlook both do, by default) or
-               PETTY_CASH_PUBLIC_URL isn't publicly reachable, which is worse than no logo at all. Left unset there is
+               ACCOUNTS_API_PUBLIC_URL isn't publicly reachable, which is worse than no logo at all. Left unset there is
                no <img> whatsoever, never a dangling reference. Kept as a plain src rather
                than a bare CID so a preview harness can hand it a data: URI instead. #}
             {% if logo_src %}
@@ -181,7 +181,7 @@
               </tr>
             {% endif %}
 
-            {# No URL means PETTY_CASH_PUBLIC_URL is unset — drop the button rather than ship
+            {# No URL means ACCOUNTS_API_PUBLIC_URL is unset — drop the button rather than ship
                a link to localhost. See notify.base_url. #}
             {% if cta_url and cta_label %}
               <tr>

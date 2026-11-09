@@ -99,13 +99,16 @@ SUBSCRIPTION_SCHEDULER_FULL_HOUR = int(os.environ.get("SUBSCRIPTION_SCHEDULER_FU
 # Cross-service: the Flask app. Identity and the company are Flask's until Part 3, so
 # the portal's invite-admin forwards there (core/flask_client.py - the only module that
 # calls Flask), and the links this service puts in emails point at minty-web via Flask's
-# login-gated re-handoff (``{PETTY_CASH_PUBLIC_URL}/handoff/minty-web?next=...``).
+# login-gated re-handoff (``{ACCOUNTS_API_PUBLIC_URL}/handoff/minty-web?next=...``).
 # ---------------------------------------------------------------------------
-PETTY_CASH_URL = (os.environ.get("PETTY_CASH_URL") or "http://localhost:8010").rstrip("/")
-# The address a PERSON reaches Minty at - the links in emails. Distinct from PETTY_CASH_URL,
+# Required outside development (no silent default): locally it is accounts-api on 8002.
+ACCOUNTS_API_URL = (os.environ.get("ACCOUNTS_API_URL") or ("http://localhost:8002" if DEBUG else "")).strip().rstrip("/")
+if not ACCOUNTS_API_URL:
+    raise ImproperlyConfigured("ACCOUNTS_API_URL is required and is not set")
+# The address a PERSON reaches Minty at - the links in emails. Distinct from ACCOUNTS_API_URL,
 # which in the docker stack is the internal service name; defaults to it so a single-host
 # setup needs one variable.
-PETTY_CASH_PUBLIC_URL = (os.environ.get("PETTY_CASH_PUBLIC_URL") or PETTY_CASH_URL).rstrip("/")
+ACCOUNTS_API_PUBLIC_URL = (os.environ.get("ACCOUNTS_API_PUBLIC_URL") or ACCOUNTS_API_URL).rstrip("/")
 # Seconds a forwarded call to Flask may take (core/flask_client.py).
 FLASK_PROXY_TIMEOUT = 20
 
@@ -114,7 +117,7 @@ FLASK_PROXY_TIMEOUT = 20
 # settings page), and - since the sidebar with My Profile was copied into them on
 # 2026-09-30 - minty-payment-request-web and Flask's own pages, whose My Profile shows the
 # Subscriptions Overview from ``/api/me/subscriptions``; and minty-petty-cash-web, whose
-# launch page shows the subscription notice (2026-10-19). Flask (``PETTY_CASH_PUBLIC_URL``, the
+# launch page shows the subscription notice (2026-10-19). Flask (``ACCOUNTS_API_PUBLIC_URL``, the
 # address a person's browser reaches it at) and minty-onboarding-api also call it server-side,
 # which needs no CORS.
 #
@@ -132,7 +135,7 @@ CORS_ALLOWED_ORIGINS = [
     origin.strip().rstrip("/")
     for origin in (
         os.environ.get("CORS_ALLOWED_ORIGINS")
-        or f"{MINTY_WEB_URL},{PAYMENT_REQUEST_WEB_URL},{PETTY_CASH_WEB_URL},{PETTY_CASH_PUBLIC_URL}"
+        or f"{MINTY_WEB_URL},{PAYMENT_REQUEST_WEB_URL},{PETTY_CASH_WEB_URL},{ACCOUNTS_API_PUBLIC_URL}"
     ).split(",")
     if origin.strip()
 ]

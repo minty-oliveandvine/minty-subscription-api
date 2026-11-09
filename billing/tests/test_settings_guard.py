@@ -15,7 +15,7 @@ SENDERS = {"SUBSCRIPTION_FROM": "subscription@minty.example", "ONBOARDING_FROM":
 
 
 def _load_settings(monkeypatch, env, *, senders=SENDERS):
-    for k in ("SECRET_KEY", "APP_ENV", "MAIL_FROM", "SUBSCRIPTION_EMAIL", "ONBOARDING_EMAIL", *SENDERS):
+    for k in ("SECRET_KEY", "APP_ENV", "ACCOUNTS_API_URL", "ACCOUNTS_API_PUBLIC_URL", "MAIL_FROM", "SUBSCRIPTION_EMAIL", "ONBOARDING_EMAIL", *SENDERS):
         monkeypatch.delenv(k, raising=False)
     for k, v in {**senders, **env}.items():
         monkeypatch.setenv(k, v)
@@ -46,20 +46,34 @@ def test_placeholder_key_is_tolerated_in_development(monkeypatch):
     assert mod.DEBUG is True
 
 
+#: What production needs besides the senders (ACCOUNTS_API_URL has no default there).
+PROD = {"APP_ENV": "production", "SECRET_KEY": "x" * 64, "ACCOUNTS_API_URL": "https://accounts-api.example"}
+
+
 def test_a_real_key_boots_in_production(monkeypatch):
-    mod = _load_settings(monkeypatch, {"APP_ENV": "production", "SECRET_KEY": "x" * 64})
+    mod = _load_settings(monkeypatch, PROD)
     assert mod.SECRET_KEY == "x" * 64
     assert mod.DEBUG is False
 
 
+def test_accounts_api_url_is_required_outside_development(monkeypatch):
+    with pytest.raises(ImproperlyConfigured, match="ACCOUNTS_API_URL is required"):
+        _load_settings(monkeypatch, {**PROD, "ACCOUNTS_API_URL": ""})
+
+
+def test_accounts_api_url_defaults_to_local_accounts_api_in_development(monkeypatch):
+    mod = _load_settings(monkeypatch, {"APP_ENV": "development"})
+    assert mod.ACCOUNTS_API_URL == mod.ACCOUNTS_API_PUBLIC_URL == "http://localhost:8002"
+
+
 def test_urls_and_senders_come_from_the_canonical_names(monkeypatch):
-    for k in ("PETTY_CASH_PUBLIC_URL", "CORS_ALLOWED_ORIGINS"):
+    for k in ("ACCOUNTS_API_PUBLIC_URL", "CORS_ALLOWED_ORIGINS"):
         monkeypatch.delenv(k, raising=False)
     mod = _load_settings(
         monkeypatch,
         {
             "APP_ENV": "development",
-            "PETTY_CASH_URL": "http://minty:8010/",
+            "ACCOUNTS_API_URL": "http://minty:8010/",
             "MINTY_WEB_URL": "https://hub.example/",
             "PAYMENT_REQUEST_WEB_URL": "https://pay.example",
             "PETTY_CASH_WEB_URL": "https://pettycash.example/",
@@ -67,8 +81,8 @@ def test_urls_and_senders_come_from_the_canonical_names(monkeypatch):
             "DATABASE_URL": "postgres://u@db/minty?schema=pettycash_alt",
         },
     )
-    assert mod.PETTY_CASH_URL == "http://minty:8010"
-    assert mod.PETTY_CASH_PUBLIC_URL == "http://minty:8010"
+    assert mod.ACCOUNTS_API_URL == "http://minty:8010"
+    assert mod.ACCOUNTS_API_PUBLIC_URL == "http://minty:8010"
     assert mod.CORS_ALLOWED_ORIGINS == [
         "https://hub.example",
         "https://pay.example",
@@ -87,7 +101,7 @@ def test_preview_origins_are_off_unless_set(monkeypatch):
     monkeypatch.delenv("PREVIEW_ORIGIN_REGEX", raising=False)
     assert _load_settings(monkeypatch, {"APP_ENV": "development"}).CORS_ALLOWED_ORIGIN_REGEXES == []
     regex = r"^https://pr-[a-z0-9-]+-(?:my|payment-request)\.dailyminty\.com$"
-    mod = _load_settings(monkeypatch, {"APP_ENV": "production", "SECRET_KEY": "x" * 64, "PREVIEW_ORIGIN_REGEX": regex})
+    mod = _load_settings(monkeypatch, {**PROD, "PREVIEW_ORIGIN_REGEX": regex})
     assert mod.CORS_ALLOWED_ORIGIN_REGEXES == [regex]
 
 

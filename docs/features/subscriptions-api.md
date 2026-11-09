@@ -786,7 +786,7 @@ this one is the only template); the ten inline images (the logo and nine illustr
 `InlineImageMessage` keeps the `multipart/related; type="multipart/alternative"` wire shape
 with `Content-ID` parts; dedup stays in `subscription_email_log`. Links in emails point at
 minty-web through Flask's login-gated re-handoff (`notify.settings_url` →
-`{PETTY_CASH_PUBLIC_URL}/handoff/minty-web?next=/entities/{id}/company/settings/modules&entity_id={id}`,
+`{ACCOUNTS_API_PUBLIC_URL}/handoff/minty-web?next=/entities/{id}/company/settings/modules&entity_id={id}`,
 `notify.portal_url` → `…?next=/subscription/subscriptions[/incoming]`), so no token ever
 travels in a link from here — Flask stays the only minter. Flask's `/handoff/minty-web` exists
 and minty-web is live (2026-09-30), so those links work.
@@ -856,11 +856,12 @@ as `recipient_for`, so a replay never mails a real billing address. Pinned in
 follows it); the scheduler switches; `SECRET_KEY` (shared, verify only); `DATABASE_URL` with
 `?schema=` (default `pettycashv3`, a setting never a literal — `config/dburl.py`,
 `billing/tests/test_schema_name.py`); `STRIPE_*`; `SMTP_URL` /
-`SUBSCRIPTION_FROM` / `ONBOARDING_FROM`; `PETTY_CASH_URL` (the forwarded call);
-`PETTY_CASH_PUBLIC_URL` (the address a PERSON reaches Minty at — every link in an email;
-defaults to `PETTY_CASH_URL`, which in the docker stack is the internal service name, so set it
+`SUBSCRIPTION_FROM` / `ONBOARDING_FROM`; `ACCOUNTS_API_URL` (the forwarded call;
+required outside development, default `http://localhost:8002` there);
+`ACCOUNTS_API_PUBLIC_URL` (the address a PERSON reaches Minty at — every link in an email;
+defaults to `ACCOUNTS_API_URL`, which in the docker stack is the internal service name, so set it
 there); `MINTY_WEB_URL` / `PAYMENT_REQUEST_WEB_URL` / `CORS_ALLOWED_ORIGINS` (the browser
-origins, default those two plus `PETTY_CASH_PUBLIC_URL`; `x-entity-id` is allowed). The
+origins, default those two plus `ACCOUNTS_API_PUBLIC_URL`; `x-entity-id` is allowed). The
 onboarding web URL is not read (2026-10-01): its only reader was the deleted onboarding setup
 Checkout. In the docker stack it is the `subscription-api` service on 8000.
 

@@ -109,7 +109,7 @@ def test_calls_to_flask_carry_the_trace(monkeypatch, settings):
 
     from core import flask_client
 
-    settings.PETTY_CASH_URL = "http://flask.test"
+    settings.ACCOUNTS_API_URL = "http://flask.test"
     sent = {}
 
     def fake_request(method, url, headers=None, **kwargs):
