@@ -786,15 +786,17 @@ def _subscriber_transfer_expired(ctx: dict) -> dict:
 
 #: The setup reminder's "Still to do" blocks: (first wizard step, last wizard step, title,
 #: line). The wizard's own numbering (onboarding ``lib/wizardSteps.ts``): 1 basic info, 2
-#: modules, 3 invite, 4 Xero, 5-8 the accounting settings, 9 "All set" (which finishes).
+#: modules, 3 invite, 4 Accounting Setup (Minty on its own, or Xero), 5-8 the accounting
+#: settings, 9 "All set" (which finishes). Step 4's words fit both paths, so the email need not
+#: know which one a company took (2026-11-10; Figma frame 2969:1368 still says "Connect Xero").
 #: Step 1 has no block - the company exists, so it is done.
 ONBOARDING_STEPS = (
     (2, 2, "Choose your modules",
      "Pick Petty Cash, Payment Request or both, and add a card for after your free trial."),
     (3, 3, "Invite your team (optional)",
      "Add the colleagues who will submit and approve expenses."),
-    (4, 4, "Connect Xero",
-     "Link your Xero organisation so Minty can publish to your books."),
+    (4, 4, "Choose how you keep your books",
+     "Use Minty on its own or connect Xero, and pick the accounts Minty uses."),
     (5, 8, "Set up your accounts",
      "Choose the account codes and settings Minty uses for your company."),
 )

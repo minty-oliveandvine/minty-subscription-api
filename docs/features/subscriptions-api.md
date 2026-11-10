@@ -817,8 +817,10 @@ admin on `user_entity`, skipped (not replaced) when that user is inactive - at t
 never the company's business email. Dedupe key `{entity}:{user}:{updated_at}:{day}`: each
 reminder once per quiet spell, and a fresh series after they come back and stop again. It stops
 once `finalize` moves the company off `onboarding`. The body lists the steps still to do from
-`onboarding_saved_step` (`notify.ONBOARDING_STEPS`/`remaining_steps`: 2 modules, 3 invite, 4 Xero,
-5-8 accounts; the saved step itself counts as not done, NULL shows all four) under the template's
+`onboarding_saved_step` (`notify.ONBOARDING_STEPS`/`remaining_steps`: 2 modules, 3 invite, 4
+"Choose how you keep your books" (worded for both Minty on its own and Xero since 2026-11-10; the
+Figma frame still reads "Connect Xero"), 5-8 accounts; the saved step itself counts as not done,
+NULL shows all four) under the template's
 optional `steps` block, and both "Continue setup" buttons open Flask's login-gated `/entity/{id}`
 (`notify.setup_url`), which sends a company in setup into the wizard at its saved step - the
 wizard's own one-hour token never goes in an email. No unsubscribe link: three emails at most,

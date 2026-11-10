@@ -177,7 +177,9 @@ def test_the_email_lists_what_is_left_and_links_back_into_setup(mail):
     assert message.from_email == "onboarding@minty.test"
     html = message.html
     assert f'href="https://app.minty.test/entity/{eid}"' in html
-    assert "Connect Xero" in html and "Set up your accounts" in html
+    assert "Choose how you keep your books" in html and "Set up your accounts" in html
+    # Step 4 reads true for a company keeping its books in Minty as well as one using Xero.
+    assert "Connect Xero" not in html and "on its own or connect Xero" in html
     assert "Choose your modules" not in html and "Invite your team" not in html
     assert "Olive &amp; Vine Ltd" in html
     assert "these reminders stop" in html
