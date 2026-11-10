@@ -684,6 +684,75 @@ def test_a_cancelled_trial_expires_instead_of_converting(monkeypatch):
     assert calls["access"] == [("e1", "PAYMENT_REQUEST", False)]  # free days used up, access ends
 
 
+def test_a_trial_untick_is_reversible_without_limit(monkeypatch):
+    """R2 (owner, 2026-11-10): tick -> untick -> tick -> untick on a running trial each lands,
+    with no terminal state before trial_end. Untick (``cancel_module``) only marks the row
+    "won't convert" (``scheduled_cancel``, the internal flag); re-tick (``reactivate_module``)
+    puts it back to ``trial``. Access stays on throughout, and after the last re-tick the
+    trial-end job converts it rather than expiring it."""
+    checkout, calls = _setup(monkeypatch, now=_NOW, anchor=_ANCHOR)
+    from billing.services import store
+
+    trial_end = _NOW + timedelta(days=2)
+    row = _Row(phase="trial", trial_end=trial_end)
+    monkeypatch.setattr(store, "module_row", lambda eid, code: row)
+    monkeypatch.setattr(store, "record_action", lambda **kw: None)
+
+    def _upsert(e, code, payer=None, **f):
+        calls["writes"].append((e, code, payer, f))
+        row.phase = f.get("phase", row.phase)
+        return row
+
+    monkeypatch.setattr(store, "upsert_module_row", _upsert)
+
+    phases = []
+    for _ in range(2):
+        result = checkout.cancel_module(_FakeEntity(), _FakeUser(), "PAYMENT_REQUEST")
+        assert result == {"access_end": trial_end, "extension_state": None}
+        phases.append(row.phase)
+        checkout.reactivate_module(_FakeEntity(), _FakeUser(), "PAYMENT_REQUEST")
+        phases.append(row.phase)
+
+    assert phases == ["scheduled_cancel", "trial", "scheduled_cancel", "trial"]
+    # Never revoked: un-ticking leaves the free days running, re-ticking re-asserts access.
+    assert all(enabled for _e, _c, enabled in calls["access"])
+
+    # The trial end arrives: the re-ticked trial converts, it does not expire.
+    monkeypatch.setattr(store, "due_trials", lambda now, limit=None: [row])
+    result = checkout.convert_or_expire_due_trials()
+    assert result["expired"] == []
+    assert result["converted"] == [{"entity_id": "e1", "code": "PAYMENT_REQUEST"}]
+
+
+@pytest.mark.parametrize("phase, act", [("trial", "cancel_module"),
+                                        ("scheduled_cancel", "reactivate_module")])
+def test_an_unconfirmed_trial_cannot_be_unticked_or_reticked(monkeypatch, phase, act):
+    """Owner, 2026-11-10: a trial is only ever stopped after a subscriber confirmed it; one
+    nobody confirmed simply ends on its last day. So with no subscriber on the row, ``cancel``
+    and ``renew`` are refused 409 with NOTHING written - before this, the phase write landed
+    and the audit insert then failed on the missing payer (``str(None)`` as a uuid), so the
+    caller got a 500 for a change that had in fact been made."""
+    checkout, calls = _setup(monkeypatch, now=_NOW)
+    from billing.services import store
+
+    row = _Row(payer=None, phase=phase, trial_end=_NOW + timedelta(days=5))
+    monkeypatch.setattr(store, "module_row", lambda eid, code: row)
+
+    def _no_audit(**kw):
+        raise AssertionError("nothing is recorded for a refused change")
+
+    monkeypatch.setattr(store, "record_action", _no_audit)
+
+    with pytest.raises(checkout.CheckoutError) as refused:
+        getattr(checkout, act)(_FakeEntity(), _FakeUser(), "PAYMENT_REQUEST")
+
+    assert refused.value.status == 409
+    assert refused.value.message == checkout.TRIAL_NOT_CONFIRMED
+    assert "cancel" not in refused.value.message.lower()
+    assert calls["writes"] == [] and calls["access"] == []
+    assert row.phase == phase
+
+
 def test_due_trial_without_a_customer_expires(monkeypatch):
     """A payer who never added a card has no Stripe customer at all — expire, don't crash."""
     checkout, calls = _setup(monkeypatch, now=_NOW, anchor=_ANCHOR)

@@ -281,9 +281,13 @@ def _module_state(row, *, now, paid_through, grace_days, told=True) -> dict:
         # Cancelled while still free vs cancelled after paying are the same phase and
         # very different sentences: one keeps its free days, the other keeps days it was
         # charged for. ``never_billed`` is what separates them.
+        #
+        # And the free one is still a TRIAL (owner, 2026-11-10): unticking it only stops it
+        # continuing on a paid plan - the phase is the internal "won't convert" flag, not a
+        # cancellation - so it reads as the trial it is, and the admin can tick it again.
         if never_billed and trial_end is not None:
             return {
-                "status": STATUS_CANCELLED,
+                "status": STATUS_TRIALING,
                 "date": trial_end,
                 "date_label": "Trial ends",
             }

@@ -235,6 +235,26 @@ is `("past_due", "pending_cancel")` and doubles as the list of kinds: an emitted
 there makes the sort raise, which the route turns into an empty notice. The trial-ending EMAIL
 (`notify.py`, event `trial_ending`) is unchanged and is what tells a payer about their trial.
 
+**A trial unticked is still a trial (owner, 2026-11-10).** During a free trial the tick means
+"continue on a paid plan when the trial ends"; unticking only clears that. `cancel` on a running
+trial writes `phase = scheduled_cancel` (kept as the internal "won't convert" flag - no schema
+change), the free days and access run on, and `renew` puts it back to `trial`, as many times as
+the admin likes until `trial_end` (`test_a_trial_untick_is_reversible_without_limit`). The
+module card keeps its flags (`trial_cancelled`, and `pending_cancel`/`cancel_at_period_end`,
+which `panel.py`'s billing-forward check and the notices read), and the subscriptions list
+(`portal._module_state`) answers `trialing` / "Trial ends" for it, never `cancelled`. minty-web
+reads `trial_cancelled` first: the card stays "Trial", the box unticked, and ticking it posts
+`renew`.
+
+**Only a confirmed trial can be unticked (owner, 2026-11-10).** A trial nobody has confirmed (no
+subscriber on its row) simply ends on its last day, so `cancel` and `renew` on one are refused
+**409** `checkout.TRIAL_NOT_CONFIRMED` ("This free trial hasn't been confirmed, so it simply ends
+on its last day. Activate the subscription to keep it.") with nothing written. The app never
+sends either (such a trial is never ticked, and confirming a change on a company with no
+subscriber activates it first); before the refusal a direct call wrote the phase and then failed
+the audit insert on the missing payer, answering 500 for a change it had made
+(`test_an_unconfirmed_trial_cannot_be_unticked_or_reticked`).
+
 **Live since step 3 slice C (2026-09-22)** — `billing/api/notice.py`. Its auth class is
 `EntityBearerAuth` plus Flask's one fallback: a token that names NO company (minty-payment-request-web's
 refresh path mints through minty-payment-request-api and sends only the bearer, never `X-Entity-Id`) is
@@ -1118,7 +1138,8 @@ refuses a rename that comes before its company's last move.
   - The recipe, if it is ever wanted: buy; nominate FAILING at -8; nominate onto a working card at
     -2; buy the other module at -1.
 - **N22a, N22b.** `will_convert` is computed once per company, so two trials are confirmed together
-  or not at all. A cancelled trial renders CANCELLATION_PENDING, so it doesn't help.
+  or not at all. A cancelled (unticked) trial renders as a trial that will not continue (since
+  2026-11-10; it read CANCELLATION_PENDING before), so it doesn't help.
 
 **Where it differs from the drawings, knowingly:**
 - Cards read Visa 4242 (`tok_visa`) instead of 4121.

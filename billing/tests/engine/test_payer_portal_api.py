@@ -105,14 +105,17 @@ def test_cancelled_paid_module_expires_on_its_bought_days(app):
 def test_cancelled_trial_keeps_its_free_days_and_says_so(app):
     """Same phase as the case above and a different sentence. Nothing was bought, so the
     date is the trial's own end — printing "Expires" against a paid-through it never had
-    would invent a purchase."""
+    would invent a purchase.
+
+    And it is still a TRIAL (owner, 2026-11-10): unticking a trial only stops it continuing
+    on a paid plan; nothing is being cancelled, so the row never reads "cancelled"."""
     from billing.services import portal
 
     ends = NOW + timedelta(days=5)
     state = _state(
         _row("PAYMENT_REQUEST", "scheduled_cancel", trial_end=ends, app_access_until=ends)
     )
-    assert state["status"] == portal.STATUS_CANCELLED
+    assert state["status"] == portal.STATUS_TRIALING
     assert state["date_label"] == "Trial ends"
     assert state["date"] == ends
 

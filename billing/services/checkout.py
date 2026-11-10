@@ -74,6 +74,22 @@ HTTP_OK = 200
 #: 402 with /choose a (card|billing account)/i, so the wording is load-bearing.
 NO_ACCOUNT_FOR_COMPANY = "Choose a billing account for this company."
 
+#: The refusal for unticking or re-ticking a trial nobody has confirmed (owner, 2026-11-10). A
+#: trial's tick means "continue on a paid plan when it ends", and only a subscriber can promise
+#: that: a trial with none simply ends on its last day, so there is nothing to stop or resume.
+#: The app never sends it (such a trial is never ticked); a direct call gets this, not a write.
+TRIAL_NOT_CONFIRMED = (
+    "This free trial hasn't been confirmed, so it simply ends on its last day. "
+    "Activate the subscription to keep it."
+)
+
+
+def _refuse_unconfirmed_trial(row) -> None:
+    """409 for a never-billed trial row with no subscriber - before anything is written."""
+    if row is not None and row.first_billed_at is None and row.payer_user_id is None:
+        raise CheckoutError(TRIAL_NOT_CONFIRMED, status=409)
+
+
 #: The refusal when two admins activate one company at the same moment and this caller
 #: lost. Never a silent success: both would walk away believing they are being charged.
 SOMEONE_ELSE_ACTIVATED = (
@@ -2678,6 +2694,7 @@ def cancel_module(entity, user, function_code: str, reason=None) -> dict:
     # converting it (see ``_convert_due_trials``), and the user can change their mind any
     # time before that date (``renew_module``).
     if row is not None and row.phase == PHASE_TRIAL:
+        _refuse_unconfirmed_trial(row)
         now = clock.now()
         access_end = row.trial_end
         if access_end is None or access_end <= now:
@@ -3215,6 +3232,7 @@ def reactivate_module(entity, user, function_code: str) -> None:
     # ``trial_end is not None`` half is gone because it is true of every row — a paid
     # module that began as a trial keeps its trial_end forever.
     if row.first_billed_at is None:
+        _refuse_unconfirmed_trial(row)
         _reactivate_trial(entity, user, code, row)
         return
 
