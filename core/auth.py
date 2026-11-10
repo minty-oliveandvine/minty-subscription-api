@@ -4,7 +4,7 @@ import jwt
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from minty_db.enums import EntityRole, SystemRole
-from minty_db.models import User, UserEntity
+from minty_db.models import Entity, User, UserEntity
 from minty_shared import logctx
 from ninja.security import HttpBearer
 
@@ -34,6 +34,18 @@ def get_entity_role(user_id: str, entity_id: str) -> str | None:
         )
     except (ValidationError, ValueError):
         return None
+
+
+def entity_archived(entity_id: str) -> bool:
+    """An archived company (``entities.archived_at`` set) is closed to everyone, superusers
+    included: the door treats it as a company the caller holds no role on. A malformed id is
+    not archived (the role lookup refuses it on its own)."""
+    if not entity_id:
+        return False
+    try:
+        return Entity.objects.filter(id=entity_id, archived_at__isnull=False).exists()
+    except (ValidationError, ValueError):
+        return False
 
 
 def _holds_super_admin_anywhere(user_id) -> bool:
@@ -132,6 +144,15 @@ class BearerAuth(HttpBearer):
                     )
                     return self._attach_unscoped(request, user, jwt_system_role)
                 logger.warning("Auth rejected: no entity_id in header or token")
+                return None
+
+            if entity_archived(entity_id):
+                # No virtual super_admin role either: nobody opens an archived company.
+                if not self.require_entity_role:
+                    return self._attach_unscoped(request, user, jwt_system_role, entity_id)
+                logger.warning(
+                    "Auth rejected: entity_id=%s is archived (user_id=%s)", entity_id, user_id
+                )
                 return None
 
             entity_role = self._get_entity_role(user.id, entity_id)

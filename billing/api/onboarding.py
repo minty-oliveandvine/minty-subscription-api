@@ -70,6 +70,8 @@ def _entity_for_member(request, entity_id: str) -> Entity:
     entity = _by_pk(Entity, entity_id)
     if entity is None:
         raise _Refused(error("Entity not found", 404))
+    if entity.archived_at is not None:  # archived: closed to members too, same answer as a stranger
+        raise _Refused(error("You don't have access to this entity", 403))
     return entity
 
 

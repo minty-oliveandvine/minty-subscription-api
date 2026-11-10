@@ -169,6 +169,9 @@ def entity_facts(request: HttpRequest, entity_id: str) -> JsonResponse:
         "payers": sorted({str(r.payer_user_id) for r in rows if r.payer_user_id}),
         "pending_transfer_to": str(offer.to_user_id) if offer is not None and offer.to_user_id else None,
         "billed_modules": sorted({(r.function_code or "").upper() for r in rows if _billed(r)}),
+        # Paid and running (active or past due): minty-accounts-api refuses to archive the company.
+        "paid_modules": sorted({(r.function_code or "").upper() for r in rows
+                                if r.phase in (PHASE_ACTIVE, PHASE_PAST_DUE)}),
     })
 
 

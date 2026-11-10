@@ -331,6 +331,24 @@ def test_the_payer_portal_answers_for_a_payer_with_nothing_yet(shop):
     assert body["billing"]["paid_through"] is None
 
 
+def test_an_archived_companys_trial_neither_converts_nor_expires(shop, monkeypatch):
+    """Archiving stops a trial where it is: the close-out passes the row by (no charge to the card
+    on file, no expiry), so a restore finds it as it was. Needs minty-db's ``entities.archived_at``."""
+    owner, entity = shop
+    start_trial(owner, entity)
+    _payer_with_a_card(owner, entity)
+    install_fake_stripe(monkeypatch, pays=True)
+    from minty_db.models import Entity
+
+    Entity.objects.filter(id=entity.id).update(archived_at=datetime(2026, 11, 10, tzinfo=UTC))
+    set_clock(monkeypatch, module_row(entity.id).trial_end + timedelta(minutes=1))
+    from billing.services import checkout
+
+    outcome = checkout.convert_or_expire_due_trials()
+    assert (outcome["converted"], outcome["expired"]) == ([], [])
+    assert str(module_row(entity.id).phase) == "trial"
+
+
 def test_the_payer_portal_lists_the_converted_company(shop, monkeypatch):
     owner, entity = shop
     start_trial(owner, entity)

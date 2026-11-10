@@ -1139,6 +1139,23 @@ def test_trials_ending_soon_are_found_in_a_one_day_window(app, db_session):
         assert [row.function_code for row in found] == ["PAYMENT_REQUEST"]
 
 
+def test_an_archived_companys_trial_gets_no_ending_soon_warning(app, db_session):
+    """Needs minty-db's ``entities.archived_at``."""
+    from minty_db.models import EntityModuleSubscription
+
+    from billing.services import store
+
+    with app.app_context():
+        now = datetime(2026, 8, 4, 12, tzinfo=UTC)
+        payer = _make_payer(db_session)
+        EntityModuleSubscription.objects.create(
+            id=uuid.uuid4(), entity_id=_company(db_session, "archived", archived_at=now),
+            function_code="PETTY_CASH", payer_user_id=payer, phase="trial", trial_end=now + timedelta(days=3))
+
+        start = now + timedelta(days=3)
+        assert store.trials_ending_between(start, start + timedelta(days=1)) == []
+
+
 def test_the_warning_window_is_day_aligned_not_run_time_aligned(
     app, db_session, mail, monkeypatch
 ):

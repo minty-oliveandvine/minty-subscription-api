@@ -110,3 +110,43 @@ def test_system_superadmin_reads_any_company(client, other_user, entity):
         **_bearer(make_token(other_user.id, entity_id=entity.id, system_role="superadmin")),
     )
     assert res.status_code == MODULE_PAGE_ACCEPTED
+
+
+# ---- an archived company: closed to everyone ----------------------------------------------
+# Needs minty-db's ``entities.archived_at`` (the pin after v0.4).
+
+
+def _archive(entity):
+    from django.utils import timezone
+
+    entity.archived_at = timezone.now()
+    entity.save(update_fields=["archived_at"])
+
+
+def test_a_member_is_refused_an_archived_companys_module_page(client, user, entity):
+    _archive(entity)
+    res = client.get(f"/api/entities/{entity.id}/modules", **_bearer(make_token(user.id, entity_id=entity.id)))
+    assert res.status_code == 401  # the same door as a company they hold no role on
+
+
+def test_the_header_route_is_refused_for_an_archived_company(client, user, entity):
+    _archive(entity)
+    res = client.get(f"/api/entities/{entity.id}/modules", HTTP_X_ENTITY_ID=str(entity.id),
+                     **_bearer(make_token(user.id)))
+    assert res.status_code == 401
+
+
+def test_a_superadmin_gets_no_virtual_role_on_an_archived_company(client, other_user, entity):
+    other_user.system_role = "superadmin"
+    other_user.save(update_fields=["system_role"])
+    _archive(entity)
+    res = client.get(f"/api/entities/{entity.id}/modules",
+                     **_bearer(make_token(other_user.id, entity_id=entity.id, system_role="superadmin")))
+    assert res.status_code == 401
+
+
+def test_the_portal_still_answers_with_a_token_scoped_to_an_archived_company(client, user, entity):
+    # SelfBearerAuth: the person is not in doubt; the archived company is simply not their context.
+    _archive(entity)
+    res = client.get("/api/me/subscriptions", **_bearer(make_token(user.id, entity_id=entity.id)))
+    assert res.status_code == PORTAL_ACCEPTED

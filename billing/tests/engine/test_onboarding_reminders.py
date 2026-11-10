@@ -113,6 +113,18 @@ def test_a_finished_company_is_never_reminded(mail):
     assert mail.outbox == []
 
 
+@pytest.mark.django_db
+def test_an_archived_company_in_setup_is_never_reminded(mail):
+    """Needs minty-db's ``entities.archived_at``."""
+    from minty_db.models import Entity
+
+    eid, _, updated = _company()
+    Entity.objects.filter(id=eid).update(archived_at=updated)
+
+    assert _run(updated + timedelta(days=1))["reminded"] == []
+    assert mail.outbox == []
+
+
 # --- Who ------------------------------------------------------------------------------
 
 

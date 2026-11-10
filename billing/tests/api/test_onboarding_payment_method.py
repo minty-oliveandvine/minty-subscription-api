@@ -62,6 +62,20 @@ def test_payment_method_status_endpoint_requires_membership(client, user):
     assert res.status_code == 403
 
 
+@pytest.mark.parametrize("path", [
+    "/api/onboarding/billing/authorize",
+    "/api/onboarding/trials/start",
+])
+def test_a_member_gets_the_strangers_answer_for_an_archived_company(client, user, entity, path):
+    """Needs minty-db's ``entities.archived_at``."""
+    from django.utils import timezone
+
+    entity.archived_at = timezone.now()
+    entity.save(update_fields=["archived_at"])
+    res = post_json(client, path, {"entity_id": str(entity.id)}, **bearer(user))
+    assert (res.status_code, res.json()) == (403, {"error": "You don't have access to this entity"})
+
+
 def test_the_company_routes_need_an_entity_id(client, user):
     res = post_json(client, "/api/onboarding/billing/authorize", {}, **bearer(user))
     assert res.status_code == 400

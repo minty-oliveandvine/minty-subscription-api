@@ -1217,15 +1217,35 @@ list's badges.
 - A company with no module rows is absent from the answer.
 
 **`GET /api/internal/subscriptions/entities/<id>`** answers
-`{payer, payers, pending_transfer_to, billed_modules}`:
+`{payer, payers, pending_transfer_to, billed_modules, paid_modules}`:
 - `payer` comes from `store.payer_for_entity`.
 - `payers` lists every payer any row names. The removal guard uses it and refuses on a split.
 - `pending_transfer_to` is the nominee of an open handover.
 - `billed_modules` are active or past due, or a scheduled cancel that was billed. A billed module
   locks the manual switch.
+- `paid_modules` are active or past due only: paid and still running. minty-accounts-api refuses
+  to archive a company while any is listed ("Cancel this company's subscription first."). A
+  cancelled paid module (`scheduled_cancel`) and a trial don't block.
 
 **`GET /api/internal/subscriptions/payers/<user_id>/entities`** answers `{entities: [{id, name}]}`:
 every company whose bill this person carries, in any phase. It backs the guard on whether they
 may leave.
 
 Tests: `billing/tests/test_internal_facts.py`.
+
+### Archived companies (`entities.archived_at`, owner 2026-11-10)
+
+An archived company is closed: hidden from people's lists by minty-accounts-api, and closed here too.
+- **The door:** `BearerAuth` (`core/auth.py` `entity_archived`) treats a token or `X-Entity-Id`
+  naming an archived company like a company the caller holds no role on: 401 on company routes,
+  superusers included (no virtual `super_admin` role). The person-level `/api/me/*` routes carry
+  on with no company. The onboarding router's `_entity_for_member` answers a member with the
+  stranger's 403 "You don't have access to this entity".
+- **The jobs pass it by:** no setup reminder (`onboarding_reminders`), no access sweep (its grants
+  stay as they were, like a mid-wizard company's), and its trials neither convert, expire nor
+  warn (`store.due_trials`, `store.trials_ending_between`). A restore finds everything where it
+  was, and a trial past its end closes out on the next run.
+- **Kept on purpose:** the payer portal's lists and invoices, `attention` (it answers for the ids
+  it is given) and `payers/<id>/entities` (a paid-for company still strands its payer). Renewals
+  and dunning can't reach one: archiving is refused while a module is paid and running.
+- Needs minty-db with `entities.archived_at` (after v0.4); the tests that set it wait for that pin.

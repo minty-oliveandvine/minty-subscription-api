@@ -106,12 +106,26 @@ def test_the_company_facts_name_the_payer_the_billed_modules_and_the_handover(en
     body = Client().get(f"{BASE}/entities/{entity.id}", **assertion()).json()
 
     assert body == {"payer": str(user.id), "payers": [str(user.id)], "pending_transfer_to": str(other_user.id),
-                    "billed_modules": [PC]}
+                    "billed_modules": [PC], "paid_modules": [PC]}
 
 
 def test_a_company_with_no_subscription_has_no_payer(entity):
     assert Client().get(f"{BASE}/entities/{entity.id}", **assertion()).json() == {
-        "payer": None, "payers": [], "pending_transfer_to": None, "billed_modules": []}
+        "payer": None, "payers": [], "pending_transfer_to": None, "billed_modules": [], "paid_modules": []}
+
+
+def test_paid_modules_are_the_running_paid_ones_only(entity, user):
+    """Archiving is refused while any module is paid and running: active or past due. A paid module
+    already cancelled (``scheduled_cancel``) and a trial are not."""
+    row(entity, PC, phase="past_due", payer=user, billed=NOW - timedelta(days=40))
+    row(entity, BILL, phase="scheduled_cancel", payer=user, billed=NOW - timedelta(days=40))
+    body = Client().get(f"{BASE}/entities/{entity.id}", **assertion()).json()
+    assert (body["billed_modules"], body["paid_modules"]) == ([BILL, PC], [PC])
+
+
+def test_a_trial_is_not_paid(entity):
+    row(entity, PC, trial_end=NOW + timedelta(days=5))
+    assert Client().get(f"{BASE}/entities/{entity.id}", **assertion()).json()["paid_modules"] == []
 
 
 # ---- one payer -------------------------------------------------------------------------------

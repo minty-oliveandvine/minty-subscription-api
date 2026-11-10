@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from datetime import UTC, timedelta
 
-from django.db.models import Exists, OuterRef
+from django.db.models import Exists, OuterRef, Q
 from django.db.models.functions import Now
 from minty_db.enums import ModuleCode
 from minty_db.models import Entity, EntityFunction, EntityFunctionMap, EntityModuleSubscription
@@ -57,7 +57,9 @@ def revoke_ungranted_module_access(*, dry_run: bool = True) -> list[dict]:
     found: list[dict] = []
     for fn_id, code in functions.items():
         backed = EntityModuleSubscription.objects.filter(entity_id=OuterRef("entity_id"), function_code=code)
-        onboarding = Entity.objects.filter(id=OuterRef("entity_id"), status="onboarding")
+        # Mid-wizard and archived companies are exempt: an archived one keeps its grants for a restore.
+        onboarding = Entity.objects.filter(Q(status="onboarding") | Q(archived_at__isnull=False),
+                                           id=OuterRef("entity_id"))
         rows = (
             EntityFunctionMap.objects.filter(entity_function_id=fn_id, is_enabled=True)
             .annotate(backed=Exists(backed), onboarding=Exists(onboarding))
@@ -328,7 +330,9 @@ def _sweep_scope(payer_user_id, sub_store):
     # judge the head of the batch by a different rule than the tail. Unfiltered by
     # entity_ids on purpose: the set of in-flight onboardings is small, and an IN
     # clause over every enabled entity is the part that would not scale.
+    # Archived companies are exempt the same way (their access stays as it was, for a restore).
     onboarding_ids = {
-        str(entity_id) for entity_id in Entity.objects.filter(status="onboarding").values_list("id", flat=True)
+        str(entity_id) for entity_id in Entity.objects.filter(
+            Q(status="onboarding") | Q(archived_at__isnull=False)).values_list("id", flat=True)
     }
     return entity_ids, onboarding_ids

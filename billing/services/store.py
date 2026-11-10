@@ -33,7 +33,7 @@ import uuid
 from datetime import UTC, datetime
 
 from django.db import IntegrityError, transaction
-from django.db.models import Q
+from django.db.models import Exists, OuterRef, Q
 from django.db.models.functions import Now
 from minty_db.models import (
     BillingAccountPaymentMethod,
@@ -1689,6 +1689,14 @@ def entities_paid_for_by(user_id) -> list[tuple[str, str]]:
     return sorted((eid, named.get(eid, eid)) for eid in ids)
 
 
+def _archived_entity() -> Exists:
+    """A row whose company is archived (``entities.archived_at`` set). An ``Exists`` rather than a
+    join, so a row whose company row is missing behaves as it always did."""
+    from minty_db.models import Entity
+
+    return Exists(Entity.objects.filter(id=OuterRef("entity_id"), archived_at__isnull=False))
+
+
 def due_trials(now, limit: int | None = None) -> list[EntityModuleSubscription]:
     """App-level trials whose ``trial_end`` has passed and that still need closing out.
 
@@ -1727,7 +1735,7 @@ def due_trials(now, limit: int | None = None) -> list[EntityModuleSubscription]:
         | Q(phase=PHASE_SCHEDULED_CANCEL, first_billed_at__isnull=True),
         trial_end__isnull=False,
         trial_end__lte=now,
-    ).order_by("trial_end")
+    ).exclude(_archived_entity()).order_by("trial_end")  # an archived company's trial waits
     if limit:
         query = query[:limit]
     return list(query)
@@ -1756,7 +1764,7 @@ def trials_ending_between(start, end, limit: int | None = None
         trial_end__gte=start,
         trial_end__lt=end,
         phase=PHASE_TRIAL,
-    ).order_by("trial_end")
+    ).exclude(_archived_entity()).order_by("trial_end")  # nobody is warned about an archived company
     if limit:
         query = query[:limit]
     return list(query)

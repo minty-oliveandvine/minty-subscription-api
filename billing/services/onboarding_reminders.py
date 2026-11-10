@@ -66,7 +66,7 @@ def notify_unfinished_onboarding(now: datetime | None = None,
     now = now or clock.now()
     due = list(
         Entity.objects
-        .filter(status=EntityStatus.ONBOARDING,
+        .filter(status=EntityStatus.ONBOARDING, archived_at__isnull=True,
                 updated_at__gt=now - timedelta(days=LAST_DAY),
                 updated_at__lte=now - timedelta(days=STAGES[0][0]))
         .order_by("updated_at")

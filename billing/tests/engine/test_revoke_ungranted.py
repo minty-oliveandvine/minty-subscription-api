@@ -93,3 +93,15 @@ def test_nothing_is_ever_granted(world):
 
 def test_an_empty_catalog_is_an_empty_answer(db):
     assert revoke_ungranted_module_access(dry_run=True) == []
+
+
+def test_an_archived_company_keeps_its_grants(world):
+    """Archived companies are exempt like mid-wizard ones: a restore finds its modules as they
+    were. Needs minty-db's ``entities.archived_at``."""
+    fns, backed, bare, wizard, off = world
+    Entity.objects.filter(pk=bare.id).update(archived_at=datetime(2026, 11, 10, tzinfo=UTC))
+
+    assert revoke_ungranted_module_access(dry_run=True) == [
+        {"entity_id": str(backed.id), "code": "PAYMENT_REQUEST"}]
+    revoke_ungranted_module_access(dry_run=False)
+    assert _map(bare.id, fns["PETTY_CASH"].id).is_enabled is True
