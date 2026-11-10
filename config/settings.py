@@ -101,8 +101,8 @@ SUBSCRIPTION_SCHEDULER_FULL_HOUR = int(os.environ.get("SUBSCRIPTION_SCHEDULER_FU
 # calls Flask), and the links this service puts in emails point at minty-web via Flask's
 # login-gated re-handoff (``{ACCOUNTS_API_PUBLIC_URL}/handoff/minty-web?next=...``).
 # ---------------------------------------------------------------------------
-# Required outside development (no silent default): locally it is accounts-api on 8002.
-ACCOUNTS_API_URL = (os.environ.get("ACCOUNTS_API_URL") or ("http://localhost:8002" if DEBUG else "")).strip().rstrip("/")
+# Required outside development (no silent default): locally it is accounts-api on 8000.
+ACCOUNTS_API_URL = (os.environ.get("ACCOUNTS_API_URL") or ("http://localhost:8000" if DEBUG else "")).strip().rstrip("/")
 if not ACCOUNTS_API_URL:
     raise ImproperlyConfigured("ACCOUNTS_API_URL is required and is not set")
 # The address a PERSON reaches Minty at - the links in emails. Distinct from ACCOUNTS_API_URL,

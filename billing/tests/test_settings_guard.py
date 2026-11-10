@@ -63,7 +63,7 @@ def test_accounts_api_url_is_required_outside_development(monkeypatch):
 
 def test_accounts_api_url_defaults_to_local_accounts_api_in_development(monkeypatch):
     mod = _load_settings(monkeypatch, {"APP_ENV": "development"})
-    assert mod.ACCOUNTS_API_URL == mod.ACCOUNTS_API_PUBLIC_URL == "http://localhost:8002"
+    assert mod.ACCOUNTS_API_URL == mod.ACCOUNTS_API_PUBLIC_URL == "http://localhost:8000"
 
 
 def test_urls_and_senders_come_from_the_canonical_names(monkeypatch):
