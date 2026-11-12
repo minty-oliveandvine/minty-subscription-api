@@ -38,12 +38,28 @@ let a superuser browsing a customer's half-finished onboarding change it.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from enum import Enum
 from typing import Any
 
 from minty_db.enums import SystemRole
 from minty_db.models import User, UserEntity
+
+# The rules themselves - roles, permissions, the rank ladder, the superuser's read-only list and the
+# strict role-management rule - are minty_shared.policy (v0.5, owner 2026-11-12: one copy, not five).
+# This module keeps only how this service finds a person's membership, and the gate built on them.
+# Re-exported: callers import them from here.
+from minty_shared.policy import (  # noqa: F401
+    PERMISSION_RULES,
+    READONLY_ALLOWED_PERMISSIONS,
+    ROLE_ALIASES,
+    ROLE_RANK,
+    Permission,
+    PermissionRule,
+    Role,
+    assignable_roles,
+    can_manage_role_assignment,
+    normalize_role,
+    role_at_least,
+)
 
 # ---------------------------------------------------------------------------
 # Vocabulary
@@ -61,147 +77,9 @@ SYSTEM_ROLE_VALUES = tuple(SystemRole.values)
 LEGACY_SUPERUSER_ROLES = frozenset({"admin", "super_admin"})
 
 
-class Role(str, Enum):
-    ENTITY_BASE = "entity_base"
-    CASHIER = "cashier"
-    SHOP_MANAGER = "shop_manager"
-    ACCOUNTANT = "accountant"
-    ADMIN = "admin"
-    SUPER_ADMIN = "super_admin"
-
-
-class Permission(str, Enum):
-    USER_INVITE = "user_invite"
-    USER_VIEW_ALL = "user_view_all"
-    USER_ROLE_ASSIGN = "user_role_assign"
-    USER_ROLE_DELETE = "user_role_delete"
-    ENTITY_CREATE = "entity_create"
-    ENTITY_VIEW = "entity_view"
-    ENTITY_UPDATE = "entity_update"
-    ENTITY_RENAME = "entity_rename"
-    ENTITY_DELETE = "entity_delete"
-    MODULE_VIEW = "module_view"
-    MODULE_MANAGE = "module_manage"
-    SUBSCRIPTION_VIEW = "subscription_view"
-    SALES_METHOD_VIEW = "sales_method_view"
-    SALES_METHOD_CREATE = "sales_method_create"
-    SALES_METHOD_UPDATE = "sales_method_update"
-    SALES_METHOD_DELETE = "sales_method_delete"
-    SALES_METHOD_REORDER = "sales_method_reorder"
-    COA_VIEW = "coa_view"
-    COA_CREATE = "coa_create"
-    COA_UPDATE = "coa_update"
-    COA_DELETE = "coa_delete"
-    XERO_SETTINGS_VIEW = "xero_settings_view"
-    XERO_SETTINGS_UPDATE = "xero_settings_update"
-    REPORT_VIEW_OWN = "report_view_own"
-    REPORT_VIEW_ENTITY = "report_view_entity"
-    REPORT_EDIT_OWN = "report_edit_own"
-    REPORT_EDIT_ENTITY = "report_edit_entity"
-    REPORT_DELETE_OWN = "report_delete_own"
-    REPORT_DELETE_ENTITY = "report_delete_entity"
-    REPORT_PUBLISH = "report_publish"
-    CONTACT_CREATE = "contact_create"
-
-
-ROLE_RANK: dict[str, int] = {
-    Role.ENTITY_BASE.value: 0,
-    Role.CASHIER.value: 1,
-    Role.SHOP_MANAGER.value: 2,
-    Role.ACCOUNTANT.value: 3,
-    Role.ADMIN.value: 4,
-    Role.SUPER_ADMIN.value: 5,
-}
-
-#: Spellings seen in real rows. An unrecognised role normalises to ENTITY_BASE
-#: (rank 0), never to a guess -- an unknown value must not be granted anything.
-ROLE_ALIASES: dict[str, str] = {
-    "user": Role.ENTITY_BASE.value,
-    "no_role": Role.ENTITY_BASE.value,
-    "none": Role.ENTITY_BASE.value,
-    "entity base": Role.ENTITY_BASE.value,
-    "entity-base": Role.ENTITY_BASE.value,
-    "client": Role.CASHIER.value,
-    "shop manager": Role.SHOP_MANAGER.value,
-    "shop-manager": Role.SHOP_MANAGER.value,
-    "super admin": Role.SUPER_ADMIN.value,
-    "super-admin": Role.SUPER_ADMIN.value,
-}
-
-
-@dataclass(frozen=True)
-class PermissionRule:
-    min_role: Role
-    entity_scoped: bool = True
-
-
-PERMISSION_RULES: dict[Permission, PermissionRule] = {
-    Permission.USER_INVITE: PermissionRule(Role.SHOP_MANAGER),
-    Permission.USER_VIEW_ALL: PermissionRule(Role.SHOP_MANAGER),
-    Permission.USER_ROLE_ASSIGN: PermissionRule(Role.SHOP_MANAGER),
-    Permission.USER_ROLE_DELETE: PermissionRule(Role.ACCOUNTANT),
-    Permission.ENTITY_CREATE: PermissionRule(Role.ENTITY_BASE, entity_scoped=False),
-    Permission.ENTITY_VIEW: PermissionRule(Role.CASHIER),
-    Permission.ENTITY_UPDATE: PermissionRule(Role.ACCOUNTANT),
-    Permission.ENTITY_RENAME: PermissionRule(Role.ADMIN),
-    Permission.ENTITY_DELETE: PermissionRule(Role.ADMIN),
-    # Seeing which modules an entity subscribes to is read-only information every
-    # entity member needs; changing them is admin-only.
-    Permission.MODULE_VIEW: PermissionRule(Role.CASHIER),
-    Permission.MODULE_MANAGE: PermissionRule(Role.ADMIN),
-    # Seeing a company on Manage Subscriptions, whoever pays for it (owner, 2026-11-12):
-    # admins and accountants. Changing it is the subscriber's alone, on top of
-    # MODULE_MANAGE (``store.may_manage_subscription``).
-    Permission.SUBSCRIPTION_VIEW: PermissionRule(Role.ACCOUNTANT),
-    Permission.SALES_METHOD_VIEW: PermissionRule(Role.CASHIER),
-    Permission.SALES_METHOD_CREATE: PermissionRule(Role.ACCOUNTANT),
-    Permission.SALES_METHOD_UPDATE: PermissionRule(Role.ACCOUNTANT),
-    Permission.SALES_METHOD_DELETE: PermissionRule(Role.ACCOUNTANT),
-    Permission.SALES_METHOD_REORDER: PermissionRule(Role.ACCOUNTANT),
-    Permission.COA_VIEW: PermissionRule(Role.CASHIER),
-    Permission.COA_CREATE: PermissionRule(Role.ACCOUNTANT),
-    Permission.COA_UPDATE: PermissionRule(Role.ACCOUNTANT),
-    Permission.COA_DELETE: PermissionRule(Role.ACCOUNTANT),
-    Permission.XERO_SETTINGS_VIEW: PermissionRule(Role.CASHIER),
-    Permission.XERO_SETTINGS_UPDATE: PermissionRule(Role.ACCOUNTANT),
-    Permission.REPORT_VIEW_OWN: PermissionRule(Role.CASHIER),
-    Permission.REPORT_VIEW_ENTITY: PermissionRule(Role.CASHIER),
-    Permission.REPORT_EDIT_OWN: PermissionRule(Role.CASHIER),
-    Permission.REPORT_EDIT_ENTITY: PermissionRule(Role.SHOP_MANAGER),
-    Permission.REPORT_DELETE_OWN: PermissionRule(Role.CASHIER),
-    Permission.REPORT_DELETE_ENTITY: PermissionRule(Role.SHOP_MANAGER),
-    Permission.REPORT_PUBLISH: PermissionRule(Role.ACCOUNTANT),
-    Permission.CONTACT_CREATE: PermissionRule(Role.CASHIER),
-}
-
-#: What a superuser may do on an entity they hold no membership on. Views only --
-#: every write is refused even though their effective role resolves to super_admin.
-READONLY_ALLOWED_PERMISSIONS: frozenset[Permission] = frozenset({
-    Permission.USER_VIEW_ALL,
-    Permission.ENTITY_VIEW,
-    Permission.MODULE_VIEW,
-    Permission.SALES_METHOD_VIEW,
-    Permission.COA_VIEW,
-    Permission.XERO_SETTINGS_VIEW,
-    Permission.REPORT_VIEW_OWN,
-    Permission.REPORT_VIEW_ENTITY,
-})
-
-
 # ---------------------------------------------------------------------------
 # Normalisation
 # ---------------------------------------------------------------------------
-def normalize_role(role: Any) -> str:
-    if role is None:
-        return Role.ENTITY_BASE.value
-    role_text = str(role).strip().lower()
-    if role_text in ROLE_ALIASES:
-        return ROLE_ALIASES[role_text]
-    if role_text in ROLE_RANK:
-        return role_text
-    return Role.ENTITY_BASE.value
-
-
 def normalize_system_role(system_role: Any) -> str:
     if system_role is None:
         return SYSTEM_ROLE_NORMAL
@@ -219,12 +97,6 @@ def legacy_role_to_system_role(role: Any) -> str:
         SYSTEM_ROLE_SUPERUSER
         if normalized in LEGACY_SUPERUSER_ROLES
         else SYSTEM_ROLE_NORMAL
-    )
-
-
-def role_at_least(role: Any, minimum_role: Any) -> bool:
-    return ROLE_RANK.get(normalize_role(role), 0) >= ROLE_RANK.get(
-        normalize_role(minimum_role), 0
     )
 
 
@@ -332,18 +204,6 @@ def has_permission_by_user_id(
     if not user:
         return False
     return has_permission(user, permission, entity_id=entity_id)
-
-
-def can_manage_role_assignment(actor_role: Any, target_role: Any) -> bool:
-    """You may only act on a role at or below your own, and never below shop_manager.
-
-    Group E needs this to refuse cancelling an invite for a role above the canceller's.
-    """
-    actor = normalize_role(actor_role)
-    target = normalize_role(target_role)
-    if not role_at_least(actor, Role.SHOP_MANAGER.value):
-        return False
-    return ROLE_RANK.get(actor, 0) >= ROLE_RANK.get(target, 0)
 
 
 def can_manage_role_assignment_for_entity(
