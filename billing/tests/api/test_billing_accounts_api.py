@@ -173,6 +173,58 @@ def test_a_card_free_trial_is_placed_by_the_same_route(client, user, entity, wal
     assert str(store.nomination_for_entity(entity.id, user.id).billing_group_id) == str(beta.id)
 
 
+@pytest.mark.parametrize("role", [None, "cashier", "accountant"])
+def test_a_company_nobody_pays_for_is_placed_only_by_its_admin(
+    client, user, other_user, entity, wallet, role,  # noqa: F811
+):
+    """Placing a company with no subscriber is the act that makes the caller its payer, so
+    it is an admin's alone (owner, 2026-11-12): a stranger, a cashier or an accountant gets
+    the same 404 as a company that does not exist, and nothing is written."""
+    from minty_db.models import UserEntity
+
+    from billing.services import store
+
+    if role:
+        UserEntity.objects.create(
+            user_id=other_user.id, entity_id=entity.id, role=role, approved=True
+        )
+    theirs = _open(other_user, "pm_x", company="Theirs Ltd")
+    store.upsert_module_row(entity.id, "PETTY_CASH", phase="trial")
+    wallet["methods"] = [_card("pm_x")]
+
+    response = post_json(
+        client, f"{ACCOUNTS}/move",
+        {"entity": str(entity.id), "account": str(theirs.id)}, **bearer(other_user),
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {"error": "That company couldn't be found."}
+    assert store.nomination_for_entity(entity.id, other_user.id) is None
+
+
+@pytest.mark.parametrize("role", ["admin", "accountant"])
+def test_a_company_someone_else_pays_for_is_never_moved_by_a_member(
+    client, user, other_user, entity, wallet, role,  # noqa: F811
+):
+    from minty_db.models import UserEntity
+
+    from billing.services import store
+
+    UserEntity.objects.create(
+        user_id=other_user.id, entity_id=entity.id, role=role, approved=True
+    )
+    store.upsert_module_row(entity.id, "PETTY_CASH", user.id, phase="trial")
+    theirs = _open(other_user, "pm_x", company="Theirs Ltd")
+    wallet["methods"] = [_card("pm_x")]
+
+    response = post_json(
+        client, f"{ACCOUNTS}/move",
+        {"entity": str(entity.id), "account": str(theirs.id)}, **bearer(other_user),
+    )
+
+    assert response.status_code == 404
+
+
 # --- confirm: the account is checked before the card is attached ----------------------
 
 

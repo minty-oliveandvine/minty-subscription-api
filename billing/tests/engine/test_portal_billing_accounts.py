@@ -834,10 +834,15 @@ def test_a_company_with_no_subscriber_at_all_is_placed_too(app, wallet):  # noqa
     It writes the NOMINATION only. The module rows are stamped by the confirm that follows in
     the same request (``modules._activate_subscription``), which is why nothing here claims the
     company has a subscriber yet."""
+    from minty_db.models import UserEntity
+
     from billing.services import billing_accounts, store
 
     payer, _acme, beta, _moving = _two_accounts(wallet)
     loose = _entity(None, "Nobody's Co")
+    # Placing makes the caller its subscriber, so they have to be its admin (2026-11-12;
+    # ``test_billing_accounts_api`` pins the refusal for everyone else).
+    UserEntity.objects.create(user_id=payer.id, entity_id=loose.id, role="admin", approved=True)
     store.upsert_module_row(loose.id, "PETTY_CASH", phase="trial")
     assert store.payer_for_entity(loose.id) is None
 

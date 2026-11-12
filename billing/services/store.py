@@ -197,6 +197,23 @@ def module_rows_without_payer(entity_ids) -> list[EntityModuleSubscription]:
     )
 
 
+def module_rows_for_entities(entity_ids) -> list[EntityModuleSubscription]:
+    """Every module row of these entities, whoever pays for them (or nobody).
+
+    Manage Subscriptions' read-only half: the companies a viewer is an admin or
+    accountant of are listed whatever their payer, so it asks for all their rows at once
+    rather than one ``module_rows_for_entity`` per company.
+    """
+    ids = [str(e) for e in (entity_ids or []) if e]
+    if not ids:
+        return []
+    return list(
+        EntityModuleSubscription.objects.filter(entity_id__in=ids).order_by(
+            "entity_id", "function_code"
+        )
+    )
+
+
 def payer_for_entity(entity_id) -> str | None:
     """The payer user id for an entity, from any of its mirror rows that HAS one.
 

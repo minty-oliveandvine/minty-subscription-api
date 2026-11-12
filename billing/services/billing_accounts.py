@@ -240,6 +240,18 @@ def update(
 # --- moving a company between accounts ("Change billing account") ------------------------
 
 
+def _may_establish(user_id, entity_id) -> bool:
+    """Whether ``user_id`` may become the subscriber of a company nobody pays for: an admin
+    of it (``MODULE_MANAGE`` on an approved membership), the same bar the module page's
+    Activate Subscription sets."""
+    from minty_db.models import User
+
+    from core.policy import Permission, has_permission
+
+    user = User.objects.filter(id=str(user_id)).first()
+    return user is not None and has_permission(user, Permission.MODULE_MANAGE, str(entity_id))
+
+
 def move_company(user_id, entity_id, account_id) -> dict:
     """Put one company on one of the payer's accounts. Returns the accounts, plus ``moved`` —
     what went where (``from_account`` null for a first placement), or None when it was
@@ -255,11 +267,12 @@ def move_company(user_id, entity_id, account_id) -> dict:
 
     THAT COMPANY ALSO HAS NO SUBSCRIBER, since a trial establishes none, so the placement
     is made with ``establish_payer=True`` — without it ``_payer_of`` would refuse 409 and
-    the promise above would be unreachable. It widens who may place a company, to any
-    member of one that nobody pays for, which is the same rule the rest of the
-    subscription obeys (``store.may_manage_subscription``); ``_payer_of`` still answers
-    404 the moment somebody else IS the payer, so this is never a way past one that
-    exists. Placing nominates for a payer the module rows do not yet carry: the caller
+    the promise above would be unreachable. It widens who may place a company to an ADMIN
+    of one that nobody pays for (``Permission.MODULE_MANAGE``, checked here: the route is
+    person-scoped, so nothing upstream proved membership - before 2026-11-12 anyone at all
+    could place such a company), which is the rule the rest of the subscription obeys
+    (``store.may_manage_subscription``); ``_payer_of`` still answers 404 the moment
+    somebody else IS the payer, so this is never a way past one that exists. Placing nominates for a payer the module rows do not yet carry: the caller
     confirms billing in the SAME request (``modules._activate_subscription``), which
     stamps that same user, so the two cannot be left disagreeing.
 
@@ -275,6 +288,10 @@ def move_company(user_id, entity_id, account_id) -> dict:
     * a target account whose card Stripe no longer holds — its next bill could not be paid.
     """
     payer = _payer_of(user_id, entity_id, establish_payer=True)
+    if sub_store.payer_for_entity(entity_id) is None and not _may_establish(user_id, entity_id):
+        # Same words as a company that does not exist: whether the caller belongs to it is
+        # not this endpoint's to disclose.
+        raise PaymentMethodError("That company couldn't be found.", status=404)
     target = account_of(user_id, account_id)
     nomination = sub_store.nomination_for_entity(entity_id, payer)
     company = _company_name(entity_id)

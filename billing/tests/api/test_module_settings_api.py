@@ -87,6 +87,12 @@ def cashier(other_user, entity):
 
 
 @pytest.fixture
+def accountant(other_user, entity):
+    UserEntity.objects.create(user_id=other_user.id, entity_id=entity.id, role="accountant", approved=True)
+    return other_user
+
+
+@pytest.fixture
 def co_admin(other_user, entity):
     UserEntity.objects.create(user_id=other_user.id, entity_id=entity.id, role="admin", approved=True)
     return other_user
@@ -261,6 +267,31 @@ def test_activating_a_company_somebody_else_pays_for_is_refused(
 
     assert response.status_code == 403
     assert services["calls"] == []
+
+
+@pytest.mark.parametrize("paid", [True, False])
+@pytest.mark.parametrize("action", MONEY_ACTIONS)
+def test_an_accountant_only_views_the_subscription(
+    client, user, entity, accountant, payer_is, services, action, paid
+):
+    """Admins and accountants SEE a company's subscription; only its subscriber changes it,
+    and with nobody paying yet only an admin may become one (owner, 2026-11-12)."""
+    payer_is(user.id if paid else None)
+
+    response = _act(client, accountant, entity, action, {"codes": ["PETTY_CASH"], "code": "PETTY_CASH"})
+
+    assert response.status_code == 403, action
+    assert services["calls"] == [], action
+
+
+@pytest.mark.parametrize("paid", [True, False])
+def test_an_accountant_reads_the_page_without_the_buttons(client, user, entity, accountant, payer_is, paid):
+    payer_is(user.id if paid else None)
+
+    response = client.get(_page(entity), **_scoped(accountant, entity))
+
+    assert response.status_code == 200
+    assert response.json()["can_manage_modules"] is False
 
 
 def test_the_page_needs_only_module_view(client, entity, cashier, payer_is):

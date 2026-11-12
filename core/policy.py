@@ -82,6 +82,7 @@ class Permission(str, Enum):
     ENTITY_DELETE = "entity_delete"
     MODULE_VIEW = "module_view"
     MODULE_MANAGE = "module_manage"
+    SUBSCRIPTION_VIEW = "subscription_view"
     SALES_METHOD_VIEW = "sales_method_view"
     SALES_METHOD_CREATE = "sales_method_create"
     SALES_METHOD_UPDATE = "sales_method_update"
@@ -148,6 +149,10 @@ PERMISSION_RULES: dict[Permission, PermissionRule] = {
     # entity member needs; changing them is admin-only.
     Permission.MODULE_VIEW: PermissionRule(Role.CASHIER),
     Permission.MODULE_MANAGE: PermissionRule(Role.ADMIN),
+    # Seeing a company on Manage Subscriptions, whoever pays for it (owner, 2026-11-12):
+    # admins and accountants. Changing it is the subscriber's alone, on top of
+    # MODULE_MANAGE (``store.may_manage_subscription``).
+    Permission.SUBSCRIPTION_VIEW: PermissionRule(Role.ACCOUNTANT),
     Permission.SALES_METHOD_VIEW: PermissionRule(Role.CASHIER),
     Permission.SALES_METHOD_CREATE: PermissionRule(Role.ACCOUNTANT),
     Permission.SALES_METHOD_UPDATE: PermissionRule(Role.ACCOUNTANT),

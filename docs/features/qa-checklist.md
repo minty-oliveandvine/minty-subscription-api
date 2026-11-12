@@ -181,6 +181,9 @@ Stripe card.
       trial-ending mail is skipped with `reason: "no_subscriber"` rather than sent to nobody.
 - [ ] Manage Subscriptions lists the company while it has no subscriber, with Activate
       Subscription on the row; a cashier on the same company does not see it at all.
+- [ ] An accountant, and an admin who does not pay, see the company on Manage Subscriptions
+      read-only (`can_manage` false, the subscriber named, no actions); an accountant cannot
+      activate a company nobody pays for; a cashier does not see it at all (2026-11-12).
 - [ ] Companies that already had a payer before this shipped are untouched: same payer, same
       list, same conversion at trial end.
 - [ ] **The wizard's happy path**: complete step 2's billing sheet, then finish. After finalize
