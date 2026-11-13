@@ -153,6 +153,12 @@ def transfer_blockers(entity_id, *, from_user_id, to_user_id) -> list[str]:
 
     reasons += _blockers_caller(entity_id, from_user_id)
 
+    # BEFORE BILLING IS CONFIRMED (no payer) the handover moves only who holds the
+    # subscription (owner, 2026-11-13: the subscriber can always hand it over), so the money
+    # and something-to-hand-over checks have nothing to ask. The recipient's still must pass.
+    if store.payer_for_entity(entity_id) is None:
+        return reasons + _blockers_recipient(entity_id, to_user_id)
+
     reasons += _blockers_money_settled(rows, from_user_id, to_user_id)
 
     # 4. A TRIAL IS NO LONGER A REFUSAL. It used to be, for three reasons, and all three
@@ -184,7 +190,8 @@ def transfer_blockers(entity_id, *, from_user_id, to_user_id) -> list[str]:
 #: own (a debt is settled, a trial converts), so the offer is left standing.
 _FATAL_PREFIXES = (
     "Only the person currently being billed",
-    "Nobody is being billed",
+    "Only the company's subscriber",
+    "This company's subscriber hasn't been set",
     "That person needs to be an admin",
     "That account isn't active",
 )
@@ -322,6 +329,11 @@ def incoming_transfers_payload(user_id) -> list[dict]:
                 # read it — deciding is not the same as managing.
                 "settings_path": f"/entity/settings/module/{offer.entity_id}",
                 "from_name": _display_name(asker),
+                # False when nobody has confirmed this company's billing yet (owner,
+                # 2026-11-13): accepting only makes the recipient its subscriber - no billing
+                # account is asked for, nothing is charged, and they confirm billing when they
+                # activate it.
+                "billing_confirmed": store.payer_for_entity(offer.entity_id) is not None,
                 "quote": quote,
                 # What they inherit that is not being charged for today — free days now,
                 # a charge on their card at its own date. Accepting commits them to it.
@@ -724,6 +736,13 @@ def _accept(
 
     entity_id = offer.entity_id
 
+    # BEFORE BILLING IS CONFIRMED (no payer yet) a handover moves only who holds the
+    # subscription (owner, 2026-11-13): nobody is billed, so there is no window to buy, no
+    # consent to record and no card to move, and every module stays as it is. The recipient
+    # confirms billing themselves when they activate.
+    if store.payer_for_entity(entity_id) is None:
+        return _complete_unconfirmed(offer, actor_user_id=user_id, now=now)
+
     # THE ACCOUNT THEY CHOSE, checked before anything moves. It came from the browser, so
     # it must be the INCOMING payer's own - another payer's account answers exactly like
     # one that does not exist (``payment_methods.account_of``).
@@ -966,6 +985,57 @@ def _complete(offer, *, actor_user_id, now) -> tuple[bool, str, dict | None]:
     logger.info(
         "transfer: entity {} moved from payer {} to {} (covered to {})",
         entity_id, from_user_id, to_user_id, offer.accepted_billed_through,
+    )
+    return True, "You're now the subscriber for this company.", _as_dict(offer)
+
+
+def _complete_unconfirmed(offer, *, actor_user_id, now) -> tuple[bool, str, dict | None]:
+    """The handover of a company whose billing nobody has confirmed: move
+    ``entities.subscriber_user_id`` to the recipient, and nothing else.
+
+    A compare-and-set on the outgoing subscriber, in one transaction with the offer's
+    ``accepted``: if the company changed hands (or was activated) since the blockers were read,
+    nothing moves and the offer stays open for the blockers to settle on the next try.
+    """
+    from minty_db.models import Entity
+
+    entity_id = offer.entity_id
+    from_user_id = offer.from_user_id
+    to_user_id = offer.to_user_id
+    codes = [row.function_code for row in store.rows_for_entity(entity_id)]
+
+    with transaction.atomic():
+        moved = Entity.objects.filter(
+            id=str(entity_id), subscriber_user_id=str(from_user_id)
+        ).update(subscriber_user_id=str(to_user_id))
+        if moved != 1 or store.payer_for_entity(entity_id) is not None:
+            transaction.set_rollback(True)
+            logger.warning(
+                "transfer: entity {} was not handed from {} to {} - its subscriber changed "
+                "or it was activated meanwhile", entity_id, from_user_id, to_user_id,
+            )
+            return False, "That handover can't go ahead any more. Please try again.", None
+        offer.status = STATUS_ACCEPTED
+        offer.responded_at = now
+        offer.save(update_fields=["status", "responded_at"])
+
+    for code in codes:
+        store.record_action(
+            entity_id=entity_id,
+            function_code=code,
+            payer_user_id=from_user_id,
+            action=AUDIT_TRANSFER_ACCEPTED,
+            outcome=OUTCOME_SUCCEEDED,
+            actor_user_id=actor_user_id,
+            payer_before=from_user_id,
+            payer_after=to_user_id,
+        )
+
+    _notify(offer, "accepted")
+
+    logger.info(
+        "transfer: entity {} (billing not confirmed) handed from subscriber {} to {}",
+        entity_id, from_user_id, to_user_id,
     )
     return True, "You're now the subscriber for this company.", _as_dict(offer)
 
@@ -1678,14 +1748,21 @@ def _blockers_money_settled(rows, from_user_id, to_user_id) -> list[str]:
     return reasons
 
 def _blockers_caller(entity_id, from_user_id) -> list[str]:
-    """Whether the caller is the person entitled to give the bill away."""
+    """Whether the caller is the person entitled to give the subscription away."""
     reasons: list[str] = []
-    # 1. Only the established payer may give the bill away. Strict identity, NOT
-    #    ``may_manage_subscription`` — that answers True when there is no payer at all,
-    #    which is the one case where there is nothing to hand over.
+    # 1. Only the SUBSCRIBER may give it away (owner, 2026-11-13): the payer once billing is
+    #    confirmed, before that whoever entities.subscriber_user_id names - the company's
+    #    creator, or whoever it was handed to. A company with no subscriber at all has
+    #    nobody to hand it over.
     payer = store.payer_for_entity(entity_id)
-    if payer is None:
-        reasons.append("Nobody is being billed for this company yet, so there's nothing to hand over.")
-    elif str(payer) != str(from_user_id):
-        reasons.append("Only the person currently being billed can hand this company over.")
+    subscriber = store.subscriber_for_entity(entity_id)
+    if subscriber is None:
+        reasons.append(
+            "This company's subscriber hasn't been set yet, so there's nothing to hand over."
+        )
+    elif str(subscriber) != str(from_user_id):
+        if payer is not None:
+            reasons.append("Only the person currently being billed can hand this company over.")
+        else:
+            reasons.append("Only the company's subscriber can hand this company over.")
     return reasons

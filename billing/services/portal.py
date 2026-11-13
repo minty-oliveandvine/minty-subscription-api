@@ -411,7 +411,8 @@ def _person(user, user_id=None) -> dict:
 
 
 def _member_companies(user_id) -> dict[str, dict]:
-    """``{entity_id: {"rows": {code: row}, "payer": id | None, "can_manage": bool}}`` for the
+    """``{entity_id: {"rows": {code: row}, "payer": id | None, "subscriber": id | None,
+    "can_manage": bool}}`` for the
     companies this user is an admin or accountant of, whoever pays for them (owner,
     2026-11-12: every admin and accountant SEES the subscription, only the subscriber
     changes it).
@@ -420,8 +421,9 @@ def _member_companies(user_id) -> dict[str, dict]:
     viewer's own APPROVED memberships bound the query, then ``SUBSCRIPTION_VIEW``
     (accountant and up) is asked per company - a cashier is not shown a bill. ``can_manage``
     is the rule the module page answers (``store.may_manage_subscription`` on top of
-    ``MODULE_MANAGE``): the payer, or any admin while nobody pays - activating is what makes
-    them the subscriber.
+    ``MODULE_MANAGE``): only the SUBSCRIBER - the payer, or before billing is confirmed the person
+    ``entities.subscriber_user_id`` names (owner, 2026-11-13). Nobody may change a company whose
+    subscriber is not assigned.
 
     Advisory, like the handover reads further down: a failure here answers {} and the
     payer's own companies still render. The list losing a row is worth less than the page
@@ -461,10 +463,16 @@ def _member_companies(user_id) -> dict[str, dict]:
             # answers nothing (``store.payer_for_entity``'s rule).
             if row.payer_user_id and company["payer"] is None:
                 company["payer"] = str(row.payer_user_id)
+        designated = dict(
+            Entity.objects.filter(id__in=list(found)).values_list("id", "subscriber_user_id")
+        )
+        designated = {str(k): (str(v) if v else None) for k, v in designated.items()}
         for entity_id, company in found.items():
-            payer = company["payer"]
-            company["can_manage"] = (payer is None or payer == str(user_id)) and (
-                has_permission(user, Permission.MODULE_MANAGE, entity_id)
+            # The payer wins; before billing is confirmed, whoever the column names.
+            subscriber = company["payer"] or designated.get(entity_id)
+            company["subscriber"] = subscriber
+            company["can_manage"] = subscriber == str(user_id) and has_permission(
+                user, Permission.MODULE_MANAGE, entity_id
             )
         return found
     except Exception:
@@ -534,7 +542,7 @@ def build_payer_subscriptions(
             continue
         by_entity[entity_id] = company["rows"]
         others[entity_id] = company
-    payer_ids = sorted({c["payer"] for c in others.values() if c["payer"]})
+    payer_ids = sorted({c["subscriber"] for c in others.values() if c["subscriber"]})
     other_payers = (
         {str(k): v for k, v in User.objects.in_bulk(payer_ids).items()} if payer_ids else {}
     )
@@ -551,9 +559,9 @@ def build_payer_subscriptions(
         company = others.get(entity_id)
         if company is None:
             return subscriber
-        if company["payer"] is None:
+        if company["subscriber"] is None:
             return None
-        return _person(other_payers.get(company["payer"]), company["payer"])
+        return _person(other_payers.get(company["subscriber"]), company["subscriber"])
     # The account-level figure for the summary block: the earliest date anything on this
     # payer's account is paid through. (F5: the summary used to read the LAST company's
     # per-card ``paid_through`` from the loop below - undefined for a payer with no
@@ -607,7 +615,17 @@ def build_payer_subscriptions(
                 # read-only one, null for a company nobody pays for (an admin's CTA there
                 # is Activate Subscription).
                 "subscriber": row_subscriber,
-                "has_subscriber": row_subscriber is not None,
+                # Billing confirmed (a payer exists). A designated subscriber who has not
+                # confirmed yet is named in ``subscriber`` while this stays false - their row
+                # offers Activate Subscription.
+                "has_subscriber": (
+                    others[str(entity.id)]["payer"] is not None
+                    if str(entity.id) in others
+                    else True
+                ),
+                # Whether anyone holds it at all (owner, 2026-11-13): false = not assigned
+                # yet, view-only for everyone.
+                "subscriber_set": row_subscriber is not None,
                 # Whether the viewer may change it: the subscriber, or an admin while
                 # nobody pays. Every action on a row is offered only when this is true.
                 "can_manage": (
@@ -763,7 +781,9 @@ def build_subscriber_options(user_id, entity_id) -> dict | None:
     if entity is None:
         return None
 
-    payer_id = sub_store.payer_for_entity(entity.id)
+    # The SUBSCRIBER (owner, 2026-11-13): the payer, or before billing is confirmed whoever
+    # entities.subscriber_user_id names - they may hand it over too.
+    payer_id = sub_store.subscriber_for_entity(entity.id)
     if payer_id is None or str(payer_id) != str(user_id):
         return None
 
@@ -936,7 +956,7 @@ def invite_admin_to_entity(user_id, entity_id, email: str, *, send) -> tuple[boo
     if entity is None:
         return False, "That company isn't on your billing account."
 
-    payer_id = sub_store.payer_for_entity(entity.id)
+    payer_id = sub_store.subscriber_for_entity(entity.id)  # the subscriber (2026-11-13)
     if payer_id is None or str(payer_id) != str(user_id):
         # Same answer as an unknown entity. Telling the two apart would confirm an id to
         # someone who should not be asking.

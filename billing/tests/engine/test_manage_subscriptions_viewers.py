@@ -106,20 +106,29 @@ def test_an_unapproved_membership_shows_nothing(shop):
     assert _list(viewer)["entities"] == []
 
 
-def test_with_no_subscriber_an_admin_may_activate_and_an_accountant_only_views(shop):
+def test_with_no_payer_only_the_designated_subscriber_may_activate(shop):
+    """Owner, 2026-11-13: before billing is confirmed the company's subscriber (its creator)
+    alone may activate; an accountant only views, and with nobody assigned nobody may."""
     owner, entity = shop
     _trial(entity)
     accountant = _join(entity, "accountant@test.com", "accountant")
 
     (admin_row,) = _list(owner)["entities"]
+    assert admin_row["can_manage"] is False
+    assert admin_row["subscriber"] is None
+
+    from minty_db.models import Entity
+
+    Entity.objects.filter(id=str(entity.id)).update(subscriber_user_id=owner.id)
+    (admin_row,) = _list(owner)["entities"]
     (accountant_row,) = _list(accountant)["entities"]
 
     assert admin_row["can_manage"] is True
     assert admin_row["has_subscriber"] is False
-    assert admin_row["subscriber"] is None
+    assert admin_row["subscriber"]["id"] == str(owner.id)
     assert accountant_row["can_manage"] is False
     assert accountant_row["has_subscriber"] is False
-    assert accountant_row["subscriber"] is None
+    assert accountant_row["subscriber"]["id"] == str(owner.id)
 
 
 def test_search_and_sort_by_subscriber_survive_a_row_with_no_subscriber(shop):

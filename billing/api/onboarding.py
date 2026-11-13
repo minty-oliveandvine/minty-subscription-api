@@ -246,6 +246,14 @@ def billing_authorize(request):
         return refused.response
     uid = user_id(request)
 
+    # Only the company's SUBSCRIBER confirms its billing (owner, 2026-11-13) - its creator, who
+    # onboarding-api names in entities.subscriber_user_id. Checked before anything is written,
+    # card or no card: a consent from anyone else would make them the payer at finalize.
+    from billing.services import store as sub_store
+
+    if not sub_store.may_manage_subscription(str(entity.id), uid):
+        return error("Only this company's subscriber can confirm its billing.", 403)
+
     pm_id = str(payload.get("payment_method") or "").strip()
     try:
         if pm_id:

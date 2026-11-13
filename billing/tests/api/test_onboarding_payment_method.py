@@ -252,6 +252,36 @@ def test_opening_an_account_proves_ownership_first(client, user, monkeypatch):
 # --- Consent: /billing/authorize --------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _creator_is_subscriber(request):
+    """The wizard's company is its creator's: onboarding-api writes entities.subscriber_user_id
+    at creation (owner, 2026-11-13). The shared ``entity`` fixture's admin is that creator."""
+    if "entity" not in request.fixturenames:
+        return
+    from minty_db.models import Entity
+
+    entity = request.getfixturevalue("entity")
+    user = request.getfixturevalue("user")
+    Entity.objects.filter(id=entity.id).update(subscriber_user_id=user.id)
+
+
+def test_only_the_companys_subscriber_may_authorize_its_billing(client, user, other_user, entity):
+    """Owner, 2026-11-13: another member of the company in the wizard is refused, and nothing
+    is recorded - only the subscriber (its creator) confirms billing."""
+    from minty_db.models import UserEntity
+
+    from billing.services import store
+
+    UserEntity.objects.create(user_id=other_user.id, entity_id=entity.id, role="admin", approved=True)
+    store.nominate_card_for_entity(str(entity.id), str(other_user.id), "pm_theirs", "chosen")
+
+    res = post_json(client, "/api/onboarding/billing/authorize", {"entity_id": str(entity.id)}, **bearer(other_user))
+
+    assert res.status_code == 403
+    assert res.json() == {"error": "Only this company's subscriber can confirm its billing."}
+    assert store.has_billing_consent(str(entity.id), str(other_user.id)) is False
+
+
 @pytest.fixture
 def on_account(user, entity):
     """The company already on one of the payer's billing accounts - what the sheet's card

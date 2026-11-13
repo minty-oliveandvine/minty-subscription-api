@@ -40,8 +40,9 @@ Inside the door the module page applies Flask's two permissions from `core/polic
 verbatim copy of minty-onboarding-api's port of Minty's `services/permission_policy.py`):
 `MODULE_VIEW` (cashier and up) to read the page model, `MODULE_MANAGE` (admin and up) for
 every action — **and** the subscription's own rule, `store.may_manage_subscription` (the
-`@require_subscription_payer` port, step 2): only the payer, or any admin of a company that has
-no payer yet, may act. A role is not enough to touch somebody else's card. Every action carries
+`@require_subscription_payer` port, step 2): only the company's subscriber may act - the payer,
+or before billing is confirmed whoever `entities.subscriber_user_id` names (owner, 2026-11-13); a
+company with none is view-only. A role is not enough to touch somebody else's card. Every action carries
 the payer rule; the one exception, Stripe's return leg `checkout-complete`, was deleted with the
 other hosted-Stripe actions on 2026-10-01.
 

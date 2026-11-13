@@ -58,10 +58,30 @@ relationships (the loser gets 409 `SOMEONE_ELSE_ACTIVATED`, never a silent succe
 **Starting a trial establishes nothing.** It is free and commits nobody, so
 `entity_module_subscription.payer_user_id` is NULL until billing is confirmed (the column was
 made nullable by Minty's `x2a01_ems_payer_nullable`; `payer_for_entity` answers from any row
-that HAS a payer and never from an unordered `.first()`). While it is NULL any admin holding
-`MODULE_MANAGE` may act — `store.may_manage_subscription` already said so — and the trial
-EXPIRES at term end rather than converting, because there is nobody to charge. Existing
-companies are untouched: every stored row already had a payer.
+that HAS a payer and never from an unordered `.first()`). The trial EXPIRES at term end
+rather than converting, because there is nobody to charge.
+
+**Only the subscriber acts (owner, 2026-11-13; minty-db v0.9).** `entities.subscriber_user_id`
+records who holds a company's subscription:
+- onboarding-api writes the company's creator there;
+- a handover moves it;
+- `establish_entity_payer` and `transfer_entity_payer` keep it on the payer once billing is
+  confirmed.
+
+`store.subscriber_for_entity` answers the payer, else that column, else None.
+`store.may_manage_subscription` is true for that person alone (on top of `MODULE_MANAGE`). The
+old "any admin may act while nobody pays" is gone, so a company with no subscriber is view-only
+for everyone until one is assigned.
+
+What follows from that:
+- `payment_methods._payer_of(establish_payer=True)` makes only the subscriber the payer: activate,
+  `billing/accounts/move`, and onboarding's authorize, which also refuses (403) a non-subscriber
+  card or no card.
+- The module page's `payer` names the subscriber (designated or confirmed) when it isn't the
+  viewer, and `subscriber_set` says whether anyone holds it.
+- A handover before billing is confirmed (`transfers._complete_unconfirmed`) moves only the
+  column: no charge, consent, nomination or module change, and no money blockers. The recipient
+  must still be an approved admin.
 
 **One wrinkle, and it is load-bearing: in the wizard the confirm comes FIRST.** The billing
 sheet is step 2 and the module rows are created at step 9, so somebody can have confirmed
@@ -96,7 +116,7 @@ anything is written or attached). Stored rows are not rewritten.
 
 | Method | Path | Flask origin (`routes/portal.py`) | Answers |
 |---|---|---|---|
-| GET | `/subscriptions` | `my_subscriptions_api` | the payer, their billing anchor/paid-through and **`next_billing` / `next_billing_iso`** (2026-09-25: the end of the anchor period now is in — the anchor is the FIRST charge and never moves, and the landing printed it as the next billing date), a page of companies with module status per company; `q`, `sort`, `direction`, `page`, `per_page`. **Since 2026-10-08 it also lists the companies NOBODY pays for yet** that the caller is an approved `MODULE_MANAGE` admin of, with `subscriber` null and `has_subscriber` false, and the row offers Activate Subscription in its OPEN state (the user, 2026-10-08: in Confirm Subscription Change's place, never on the closed row): a trial establishes no payer, so a company you just trialled would otherwise vanish from the one screen that answers "what am I running?". Scoped twice - the caller's own memberships bound the query, then the permission is asked per company - so there is still no entity id to tamper with. Read advisorily: a failure there leaves those rows out rather than taking the page down. **Since 2026-11-12 (owner) every admin and accountant SEES each company they belong to, whoever pays for it**: the second half asks `SUBSCRIPTION_VIEW` (accountant and up) instead of `MODULE_MANAGE`, and every row carries **`can_manage`** - true on the caller's own rows, true for an admin on a company nobody pays for (activating makes them the subscriber), false otherwise. A read-only row's `subscriber` is the REAL payer, so the screen can say who to ask; cashiers and shop managers still see only what they pay for. The routes refuse every write from a non-payer regardless (`modules._gate`, `payment_methods._payer_of`), and `/billing/accounts/move` on a company with no payer now needs `MODULE_MANAGE` too (before, any caller could place one onto their own account). Search and sort by subscriber no longer fail on a row with no subscriber. **Plus `transfer_outcomes`** — how the caller's OWN offers ended (declined / expired / accepted) where they have not been shown yet, the only read of a finished transfer in the engine; `cancelled` is excluded (their own withdrawal, already answered by 07-K). Read advisorily, so a failure leaves it empty rather than taking the page down |
+| GET | `/subscriptions` | `my_subscriptions_api` | the payer, their billing anchor/paid-through and **`next_billing` / `next_billing_iso`** (2026-09-25: the end of the anchor period now is in — the anchor is the FIRST charge and never moves, and the landing printed it as the next billing date), a page of companies with module status per company; `q`, `sort`, `direction`, `page`, `per_page`. **Since 2026-10-08 it also lists the companies NOBODY pays for yet** that the caller is an approved `MODULE_MANAGE` admin of, with `subscriber` null and `has_subscriber` false, and the row offers Activate Subscription in its OPEN state (the user, 2026-10-08: in Confirm Subscription Change's place, never on the closed row): a trial establishes no payer, so a company you just trialled would otherwise vanish from the one screen that answers "what am I running?". Scoped twice - the caller's own memberships bound the query, then the permission is asked per company - so there is still no entity id to tamper with. Read advisorily: a failure there leaves those rows out rather than taking the page down. **Since 2026-11-12 (owner) every admin and accountant SEES each company they belong to, whoever pays for it**: the second half asks `SUBSCRIPTION_VIEW` (accountant and up) instead of `MODULE_MANAGE`, and every row carries **`can_manage`** - since 2026-11-13 true only for the company's SUBSCRIBER (`store.subscriber_for_entity`: the payer, else `entities.subscriber_user_id`), false for everyone else and for every viewer of a company nobody holds. `subscriber` names the subscriber, designated or confirmed; `has_subscriber` still means a payer exists (a designated subscriber's row offers Activate); **`subscriber_set`** is false while nobody is assigned. A read-only row's `subscriber` is the REAL payer, so the screen can say who to ask; cashiers and shop managers still see only what they pay for. The routes refuse every write from a non-payer regardless (`modules._gate`, `payment_methods._payer_of`), and `/billing/accounts/move` on a company with no payer now needs `MODULE_MANAGE` too (before, any caller could place one onto their own account). Search and sort by subscriber no longer fail on a row with no subscriber. **Plus `transfer_outcomes`** — how the caller's OWN offers ended (declined / expired / accepted) where they have not been shown yet, the only read of a finished transfer in the engine; `cancelled` is excluded (their own withdrawal, already answered by 07-K). Read advisorily, so a failure leaves it empty rather than taking the page down |
 | GET | `/subscriptions/subscriber-options` | `my_subscriber_options_api` | who a company's bill could move to (admins), each with a quote and inherited trials; blockers; the pending transfer; and `paid_through`, what the COMPANY is paid up until (the screen's footer needs it whether or not there is a candidate to quote) |
 | POST | `/subscriptions/invite-admin` | `my_invite_admin_api` | **forwarded to Flask** `POST /api/onboarding/invite` (the invitation is Flask's), once the address passes the email rule above (422 otherwise) |
 | POST | `/subscriptions/transfer` | `my_transfer_initiate_api` | offer a company's billing to another admin — **any** admin, with a saved card or without: being asked is not being charged, so the card is required at the accept, not here (the offer-time refusal was dropped 2026-09-24) |
@@ -186,15 +206,15 @@ trialling and another lapsed, and the button on the running trial's card must no
 back the other. The client may ask WHICH, never WHETHER. Other refusals: **409** "There is no
 subscription to activate for this company." and **409** `SOMEONE_ELSE_ACTIVATED` when two admins
 press at once and this one lost (never a silent success — both would otherwise believe they are
-being charged); **422** for codes that cannot be restarted. Open to any admin while the company
-has no subscriber, and to nobody but the payer once it has (the existing `_gate` payer rule,
-unchanged).
+being charged); **422** for codes that cannot be restarted. Open only to the company's subscriber
+(`entities.subscriber_user_id` before billing is confirmed, the payer after; owner, 2026-11-13),
+through the existing `_gate` payer rule.
 
 **Live since step 3 slice B (2026-09-21)** — `billing/api/modules.py`. The gate is one function
 every request runs through (`_gate`): the path's company must be the one the token was checked
 against (`X-Entity-Id`, else the claim; a mismatch is 403 "That token is for a different
 company."), then the permission (403 with Flask's sentence), then for every action the payer
-rule (403 "Only the person who pays for this company can change its subscription."; the one
+rule (403 "Only this company's subscriber can change its subscription."; the one
 exception, Stripe's return leg `checkout-complete`, went with it on 2026-10-01). Flask pinned
 these rules by reading the decorator stack with regexes (`test_subscription_payer_permission`,
 `test_restart_billing_guard`); here every action is called as the wrong person

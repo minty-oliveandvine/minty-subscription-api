@@ -184,6 +184,10 @@ Stripe card.
 - [ ] An accountant, and an admin who does not pay, see the company on Manage Subscriptions
       read-only (`can_manage` false, the subscriber named, no actions); an accountant cannot
       activate a company nobody pays for; a cashier does not see it at all (2026-11-12).
+- [ ] Only the company's subscriber (its creator, or whoever it was handed to) may start a trial
+      or activate it; another admin is refused 403. A company with no subscriber is view-only
+      for every admin. Handing it over before activation moves only the subscriber - nothing
+      is charged - and the recipient can then activate (2026-11-13).
 - [ ] Companies that already had a payer before this shipped are untouched: same payer, same
       list, same conversion at trial end.
 - [ ] **The wizard's happy path**: complete step 2's billing sheet, then finish. After finalize

@@ -110,6 +110,18 @@ def payer_is(monkeypatch):
 
 
 @pytest.fixture
+def designate(entity):
+    """Who holds the company's subscription before billing is confirmed:
+    entities.subscriber_user_id (owner, 2026-11-13 - the creator, or whoever it was handed to)."""
+    from minty_db.models import Entity
+
+    def _set(user_id):
+        Entity.objects.filter(id=entity.id).update(subscriber_user_id=user_id)
+
+    return _set
+
+
+@pytest.fixture
 def services(monkeypatch):
     """Every service an action calls, replaced by a recorder. ``calls`` lists ``(name, args,
     kwargs)`` in order; ``answers`` sets what a name returns (a callable is called, an
@@ -196,7 +208,7 @@ def test_every_money_action_requires_the_payer(client, user, entity, co_admin, p
 
     assert response.status_code == 403, action
     assert response.json() == {
-        "error": "Only the person who pays for this company can change its subscription."
+        "error": "Only this company's subscriber can change its subscription."
     }
     assert services["calls"] == [], action
     assert response["Access-Control-Allow-Origin"] == ORIGIN
@@ -219,22 +231,43 @@ def test_every_action_requires_the_permission_even_for_the_payer(
     assert services["calls"] == [], action
 
 
-def test_an_entity_with_no_payer_is_open_to_any_admin(client, entity, co_admin, payer_is, services):
-    """Nobody is being billed yet, so any admin may start a free trial - it commits nobody.
-    Refusing here would leave an entity that no one could ever subscribe."""
+def test_an_entity_with_no_payer_is_open_to_its_subscriber_only(
+    client, user, entity, co_admin, payer_is, designate, services
+):
+    """Owner, 2026-11-13: before billing is confirmed only the company's SUBSCRIBER (its creator,
+    or whoever it was handed to) may start a trial - another admin is refused, and nothing runs."""
     payer_is(None)
+    designate(co_admin.id)
 
     response = _act(client, co_admin, entity, "start-trial", {"codes": ["PETTY_CASH"]})
-
     assert response.status_code == 200
     assert response.json() == {"modules": {"PETTY_CASH": True}}
 
+    services["calls"].clear()
+    refused = _act(client, user, entity, "start-trial", {"codes": ["PETTY_CASH"]})
+    assert refused.status_code == 403
+    assert services["calls"] == []
 
-def test_any_admin_may_activate_a_company_nobody_pays_for(client, entity, co_admin, payer_is, services):
+
+@pytest.mark.parametrize("action", MONEY_ACTIONS)
+def test_a_company_with_no_subscriber_is_open_to_nobody(client, user, entity, payer_is, services, action):
+    """Not assigned yet: no admin may act - not even its only admin (the any-admin rule is gone)."""
+    payer_is(None)
+
+    response = _act(client, user, entity, action, {"codes": ["PETTY_CASH"], "code": "PETTY_CASH"})
+
+    assert response.status_code == 403, action
+    assert services["calls"] == [], action
+
+
+def test_the_subscriber_activates_a_company_nobody_pays_for(
+    client, entity, co_admin, payer_is, designate, services
+):
     """ACTIVATION is the act that makes the payer (the user, 2026-10-08), so it has to be open
     to the same people starting a trial is. The company is placed on the account named, and
     then billing is confirmed - in this one request, so the two cannot be left disagreeing."""
     payer_is(None)
+    designate(co_admin.id)
 
     response = _act(client, co_admin, entity, "activate-subscription", {"account": "acc_1"})
 
@@ -243,11 +276,12 @@ def test_any_admin_may_activate_a_company_nobody_pays_for(client, entity, co_adm
     assert "activate_entity_billing" in _names(services)
 
 
-def test_activating_without_codes_never_charges(client, entity, co_admin, payer_is, services):
+def test_activating_without_codes_never_charges(client, entity, co_admin, payer_is, designate, services):
     """A company can have one module trialling and another lapsed. Confirming the first must
     not quietly buy back the second, so the charge needs the modules NAMED - and the server
     still decides whether they may be restarted at all."""
     payer_is(None)
+    designate(co_admin.id)
     services["answers"]["lapsed_trial_for_entity"] = {"mode": "takeover", "lapsed": []}
 
     response = _act(client, co_admin, entity, "activate-subscription", {"account": "acc_1"})
@@ -449,14 +483,21 @@ def test_the_page_works_from_the_portal_with_an_unscoped_token_and_the_header(cl
     assert response.json()["entity_id"] == str(entity.id)
 
 
-def test_the_page_over_an_empty_database_is_still_a_page(client, user, entity):
+def test_the_page_over_an_empty_database_is_still_a_page(client, user, entity, designate):
     """No stubs: the real reads over a company with nothing. Whatever the catalog holds, the
-    answer is a 200 the client can render, never a 500."""
+    answer is a 200 the client can render, never a 500. Not assigned: nobody may act; its
+    subscriber may (owner, 2026-11-13)."""
     response = client.get(_page(entity), **_scoped(user, entity))
     assert response.status_code == 200
     page = response.json()
     assert isinstance(page["cards"], list)
-    assert page["can_manage_modules"] is True  # admin, and no payer yet
+    assert page["can_manage_modules"] is False
+    assert page["subscriber_set"] is False
+
+    designate(user.id)
+    page = client.get(_page(entity), **_scoped(user, entity)).json()
+    assert page["can_manage_modules"] is True
+    assert page["subscriber_set"] is True
 
 
 # --- The money routes nominate through the ownership proof -----------------------------------
@@ -642,8 +683,9 @@ def test_the_quote_route_resolves_codes_the_same_way(client, user, entity, payer
 # --- The other actions, answer for answer -----------------------------------------------------
 
 
-def test_start_trial_grants_access_through_the_map_writer(client, user, entity, payer_is, services):
+def test_start_trial_grants_access_through_the_map_writer(client, user, entity, payer_is, designate, services):
     payer_is(None)
+    designate(user.id)
 
     response = _act(client, user, entity, "start-trial", {"codes": ["PETTY_CASH"]})
 
@@ -653,8 +695,9 @@ def test_start_trial_grants_access_through_the_map_writer(client, user, entity, 
     assert written == [((str(entity.id), "PETTY_CASH", True), {"actor": "subscription", "user_id": str(user.id)})]
 
 
-def test_start_trial_with_nothing_started_answers_an_empty_map(client, user, entity, payer_is, services):
+def test_start_trial_with_nothing_started_answers_an_empty_map(client, user, entity, payer_is, designate, services):
     payer_is(None)
+    designate(user.id)
     services["answers"]["start_module_trials"] = []
     response = _act(client, user, entity, "start-trial", {"codes": []})
     assert response.status_code == 200 and response.json() == {"modules": {}}
@@ -756,8 +799,9 @@ def test_retry_payment_speaks_for_the_processor(client, user, entity, payer_is, 
     assert down.json() == {"error": "We couldn't reach the card processor. Try again shortly."}
 
 
-def test_retry_payment_without_a_billing_account_is_a_409(client, entity, co_admin, payer_is, services):
+def test_retry_payment_without_a_billing_account_is_a_409(client, entity, co_admin, payer_is, designate, services):
     payer_is(None)
+    designate(co_admin.id)
     response = _act(client, co_admin, entity, "retry-payment", {})
     assert response.status_code == 409
     assert response.json() == {"error": "This entity has no billing account."}

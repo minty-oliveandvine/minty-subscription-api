@@ -63,7 +63,7 @@ ACTIONS = (
 # Flask's guard sentences, kept: the page shows them.
 NO_VIEW = "You do not have permission to view module settings for this entity."
 NO_MANAGE = "You do not have permission to manage subscriptions for this entity."
-NOT_THE_PAYER = "Only the person who pays for this company can change its subscription."
+NOT_THE_PAYER = "Only this company's subscriber can change its subscription."
 WRONG_COMPANY = "That token is for a different company."
 NO_SUCH_COMPANY = "That company doesn't exist."
 
@@ -154,7 +154,9 @@ def module_page(request, entity_id: str):
     """What Flask's ``entity_settings_module`` handed its template, as JSON: the cards, the
     summary and panel, the date on the card at the top (READ OFF THE PANEL rather than
     computed beside it - the two were once two answers to one question), whether the
-    viewer may act (admin AND payer, or no payer yet), who pays when it is somebody else,
+    viewer may act (admin AND the company's subscriber - owner, 2026-11-13), who the
+    subscriber is when it is somebody else (``payer``), whether anyone holds it at all
+    (``subscriber_set``),
     and the lapsed-trial restart screen when there is one.
 
     Plus ``has_subscriber``: whether the company has a payer AT ALL. A trial establishes
@@ -188,12 +190,14 @@ def module_page(request, entity_id: str):
         and sub_store.may_manage_subscription(eid, str(user.id))
     )
 
-    # Who to name when the actions are hidden. None while the entity has no payer, which is
-    # the case any admin is allowed to act on.
+    # Who to name when the actions are hidden: the SUBSCRIBER (owner, 2026-11-13) - the payer,
+    # or before billing is confirmed whoever entities.subscriber_user_id names. None when it is
+    # the viewer, and None when nobody is assigned (``subscriber_set`` tells those apart).
     payer_id = sub_store.payer_for_entity(eid)
+    subscriber_id = sub_store.subscriber_for_entity(eid)
     payer = None
-    if payer_id and str(payer_id) != str(user.id):
-        payer = _person(_by_pk(User, str(payer_id)), payer_id)
+    if subscriber_id and str(subscriber_id) != str(user.id):
+        payer = _person(_by_pk(User, str(subscriber_id)), subscriber_id)
 
     # The lapsed-trial restart screen. None on an ordinary page. Computed AFTER
     # ``can_manage_modules``, because a co-admin gets the naming fields and none of the
@@ -218,6 +222,9 @@ def module_page(request, entity_id: str):
             # "Manage Subscription", and ``needs_card`` conflates it with "the payer has
             # no card".
             "has_subscriber": payer_id is not None,
+            # Whether anyone holds the subscription at all - false = not assigned yet, so
+            # nobody may change it (owner, 2026-11-13).
+            "subscriber_set": subscriber_id is not None,
             "payer": payer,
             "viewer": _viewer(user),
             "consent_takeover": consent_takeover,

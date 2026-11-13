@@ -38,6 +38,7 @@ from django.db.models.functions import Now
 from minty_db.models import (
     BillingAccountPaymentMethod,
     BillingPlan,
+    Entity,
     EntityBillingConsent,
     EntityBillingGroup,
     EntityModuleSubscription,
@@ -273,29 +274,54 @@ def confirmed_payer_for_entity(entity_id) -> str | None:
     return None
 
 
+def subscriber_for_entity(entity_id) -> str | None:
+    """Who holds this company's subscription: the payer once billing is confirmed, else
+    ``entities.subscriber_user_id`` (its creator, or whoever it was handed to), else None - not
+    assigned yet (owner, 2026-11-13).
+
+    The payer wins because it is the billing truth; the column mirrors it from then on
+    (``establish_entity_payer`` / ``transfer_entity_payer`` write both), so the two only differ
+    on a database that predates the column's backfill.
+    """
+    if not entity_id:
+        return None
+    payer = payer_for_entity(entity_id)
+    if payer:
+        return payer
+    try:
+        key = uuid.UUID(str(entity_id))
+    except ValueError:
+        return None  # not a company id at all, so nobody holds it
+    value = Entity.objects.filter(id=key).values_list("subscriber_user_id", flat=True).first()
+    return str(value) if value else None
+
+
+def _mirror_subscriber(entity_id, user_id) -> None:
+    """Keep ``entities.subscriber_user_id`` on the payer. Called inside the payer writes'
+    transaction, so the two never disagree."""
+    Entity.objects.filter(id=str(entity_id)).update(subscriber_user_id=_id(user_id))
+
+
 def may_manage_subscription(entity_id, user_id) -> bool:
-    """Whether ``user_id`` may change what this entity is billed for.
+    """Whether ``user_id`` may change what this entity is billed for: start a trial, activate,
+    tick modules, cancel, hand it over.
 
-    Only the PAYER. An entity's subscription is one person's financial relationship —
-    their card, their cycle, their invoice — and one-payer-per-entity is already enforced
-    on the write (see ``upsert_module_row``). Without this, any other admin could cancel
-    a module, start a trial that converts, or press Pay now, and the charge would land on
-    a card belonging to someone who never saw the screen. The write invariant kept the
-    BILLING coherent; it did nothing about who was allowed to trigger it.
+    Only the SUBSCRIBER (owner, 2026-11-13): the payer once billing is confirmed, before that the
+    person ``entities.subscriber_user_id`` names - the company's creator, or whoever it was handed
+    to. An entity's subscription is one person's financial relationship - their card, their cycle,
+    their invoice - and without this any other admin could cancel a module or press Pay now and
+    the charge would land on a card belonging to someone who never saw the screen.
 
-    Until a payer exists nobody is being billed, so any admin may start a free trial or
-    ACTIVATE the subscription — and activation is precisely the act that establishes the
-    payer (``establish_entity_payer``, reached through
-    ``checkout.activate_entity_billing`` or onboarding's ``/billing/authorize``).
-    Starting a trial deliberately does NOT: it costs nothing, so it must not make one
-    admin liable for the company or shut the others out. Entity-level permission
-    (``Permission.MODULE_MANAGE``) still applies on top of this: being the payer is
-    necessary, not sufficient.
+    A company with NO subscriber is managed by nobody until one is assigned: the old "any admin
+    may act while nobody pays" is gone. Activating is still what makes the subscriber the payer
+    (``establish_entity_payer``, reached through ``checkout.activate_entity_billing`` or
+    onboarding's ``/billing/authorize``). Entity-level permission (``Permission.MODULE_MANAGE``)
+    still applies on top of this: being the subscriber is necessary, not sufficient.
     """
     if not entity_id or not user_id:
         return False
-    payer = payer_for_entity(entity_id)
-    return payer is None or str(payer) == str(user_id)
+    subscriber = subscriber_for_entity(entity_id)
+    return subscriber is not None and str(subscriber) == str(user_id)
 
 
 # --- Per-entity billing consent ----------------------------------------------
@@ -1560,6 +1586,8 @@ def transfer_entity_payer(entity_id, new_payer_user_id, *, billed_through=None) 
     moved = EntityModuleSubscription.objects.filter(entity_id=str(entity_id)).update(
         payer_user_id=str(new_payer_user_id), updated_at=Now()
     )
+    # The subscriber moves with the payer (entities.subscriber_user_id mirrors it, 2026-11-13).
+    _mirror_subscriber(entity_id, new_payer_user_id)
 
     if billed_through is not None:
         # BILLING-FORWARD ROWS ONLY, and this is a money rule rather than an optimisation.
@@ -1626,6 +1654,9 @@ def establish_entity_payer(entity_id, payer_user_id) -> str:
     ).update(payer_user_id=payer, updated_at=Now())
 
     settled = payer_for_entity(entity_id)
+    if settled:
+        # The column follows whoever the rows now name - the caller, or the race's winner.
+        _mirror_subscriber(entity_id, settled)
     if settled and _id(settled) != payer:
         # Lost the race. Say so loudly: the caller MUST NOT report success, or two
         # people walk away each believing they are the one being charged.

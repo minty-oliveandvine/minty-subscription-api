@@ -373,12 +373,20 @@ def test_a_company_with_no_payer_still_refuses_a_nomination_by_default(app, db_s
 
 
 def test_onboarding_may_establish_the_payer_the_company_has_none_of(app, db_session):
-    """The request IS what makes them the payer, so it cannot require them to be one."""
+    """The request IS what makes them the payer, so it cannot require them to be one - only the
+    company's subscriber (owner, 2026-11-13); anyone else, and everyone while it is not
+    assigned, gets the unknown-company answer."""
     payment_methods = pytest.importorskip("billing.services.payment_methods")  # slice C
+    from minty_db.models import Entity
 
     user = _user(db_session, "first-payer@example.com")
     entity = _entity(db_session, "Fresh Ltd")
 
+    with pytest.raises(payment_methods.PaymentMethodError) as refused:
+        payment_methods._payer_of(user.id, entity.id, establish_payer=True)
+    assert refused.value.status == 404
+
+    Entity.objects.filter(id=entity.id).update(subscriber_user_id=user.id)
     assert payment_methods._payer_of(
         user.id, entity.id, establish_payer=True
     ) == str(user.id)
@@ -415,10 +423,14 @@ def test_a_card_can_be_nominated_before_the_subscription_exists(app, db_session,
     the nomination had already been written.
     """
     payment_methods = pytest.importorskip("billing.services.payment_methods")  # slice C
+    from minty_db.models import Entity
+
     from billing.services import store
 
     user = _user(db_session, "onboarder@example.com")
     entity = _entity(db_session, "Wizard Ltd")
+    # the wizard's creator is the company's subscriber (onboarding-api writes it)
+    Entity.objects.filter(id=entity.id).update(subscriber_user_id=user.id)
 
     monkeypatch.setattr(payment_methods, "_owned", lambda *a, **k: ("cus_x", {}))
     monkeypatch.setattr(

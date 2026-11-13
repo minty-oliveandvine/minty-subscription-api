@@ -111,7 +111,7 @@ def build_subscription_notices(entity_id: str, user_id) -> dict:
     )
 
     payer = None
-    payer_id = sub_store.payer_for_entity(entity_id)
+    payer_id = sub_store.subscriber_for_entity(entity_id)  # the subscriber (2026-11-13)
     if payer_id and str(payer_id) != str(user_id):
         payer_user = sub_store._by_pk(User, payer_id)
         if payer_user:

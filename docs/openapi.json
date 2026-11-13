@@ -29,7 +29,7 @@
   "paths": {
     "/api/entities/{entity_id}/modules": {
       "get": {
-        "description": "What Flask's ``entity_settings_module`` handed its template, as JSON: the cards, the\nsummary and panel, the date on the card at the top (READ OFF THE PANEL rather than\ncomputed beside it - the two were once two answers to one question), whether the\nviewer may act (admin AND payer, or no payer yet), who pays when it is somebody else,\nand the lapsed-trial restart screen when there is one.\n\nPlus ``has_subscriber``: whether the company has a payer AT ALL. A trial establishes\nnone, so a running trial on false offers Activate Subscription where a confirmed one\noffers Manage Subscription - and ``payer`` cannot answer it, being null both when nobody\npays and when the viewer is the one who does.",
+        "description": "What Flask's ``entity_settings_module`` handed its template, as JSON: the cards, the\nsummary and panel, the date on the card at the top (READ OFF THE PANEL rather than\ncomputed beside it - the two were once two answers to one question), whether the\nviewer may act (admin AND the company's subscriber - owner, 2026-11-13), who the\nsubscriber is when it is somebody else (``payer``), whether anyone holds it at all\n(``subscriber_set``),\nand the lapsed-trial restart screen when there is one.\n\nPlus ``has_subscriber``: whether the company has a payer AT ALL. A trial establishes\nnone, so a running trial on false offers Activate Subscription where a confirmed one\noffers Manage Subscription - and ``payer`` cannot answer it, being null both when nobody\npays and when the viewer is the one who does.",
         "operationId": "billing_api_modules_module_page",
         "parameters": [
           {

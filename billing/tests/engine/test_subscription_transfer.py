@@ -185,10 +185,10 @@ def test_only_the_current_payer_may_hand_the_company_over(db_session, monkeypatc
     assert any("Only the person currently being billed" in r for r in reasons)
 
 
-def test_an_entity_nobody_pays_for_has_nothing_to_hand_over(db_session, monkeypatch):
+def test_an_entity_with_no_subscriber_has_nothing_to_hand_over(db_session, monkeypatch):
     transfers, _ = _wire(monkeypatch, db_session, payer=None)
     reasons = transfers.transfer_blockers(ENTITY, from_user_id=OLD, to_user_id=NEW)
-    assert any("Nobody is being billed" in r for r in reasons)
+    assert any("subscriber hasn't been set" in r for r in reasons)
 
 
 def test_a_payer_mid_dunning_cannot_hand_the_debt_off(db_session, monkeypatch):

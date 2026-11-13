@@ -13,7 +13,7 @@ requests>=2.28,<3.0
 minty-shared @ https://github.com/minty-oliveandvine/minty-shared-py/archive/refs/tags/v0.6.tar.gz
 # The schema's models (every table, generated from 01_schema_rebased.sql) and the test-database
 # builder. An immutable tag, pinned by archive like minty-shared.
-minty-db @ https://github.com/minty-oliveandvine/minty-db/archive/refs/tags/v0.7.tar.gz
+minty-db @ https://github.com/minty-oliveandvine/minty-db/archive/refs/tags/v0.9.tar.gz
 Jinja2>=3.1,<4.0
 # The single Stripe writer (billing/services/stripe_client.py). Pinned to what Minty runs
 # (Minty/requirements.txt) so the port behaves identically; bump both together.

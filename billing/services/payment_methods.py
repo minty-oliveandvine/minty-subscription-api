@@ -867,8 +867,9 @@ def _payer_of(user_id, entity_id, *, establish_payer: bool = False) -> str:
     create the relationship.
 
     IT IS NOT A WAY ROUND THE CHECK, and it cannot become one — it only applies when the
-    answer is "nobody". A company that already HAS a payer still 404s for anyone else, flag
-    or no flag. The caller passing it is expected to have proved membership itself: the
+    answer is "nobody", and then only to the company's designated SUBSCRIBER
+    (``store.may_manage_subscription``; owner, 2026-11-13). A company that already HAS a payer
+    still 404s for anyone else, flag or no flag. The caller passing it is expected to have proved membership itself: the
     onboarding route does via ``_entity_for_member``, the module actions via ``_gate``.
 
     It does not itself WRITE the payer, either — it only answers who it will be. The write
@@ -881,6 +882,11 @@ def _payer_of(user_id, entity_id, *, establish_payer: bool = False) -> str:
     payer = sub_store.payer_for_entity(entity_id)
     if payer is None:
         if establish_payer:
+            # Only the company's SUBSCRIBER may become its payer (owner, 2026-11-13):
+            # entities.subscriber_user_id - its creator, or whoever it was handed to. Anyone
+            # else, and everyone while it is not assigned, gets the unknown-company answer.
+            if not sub_store.may_manage_subscription(entity_id, user_id):
+                raise PaymentMethodError("That company couldn't be found.", status=404)
             return str(user_id)
         raise PaymentMethodError(
             "That company has no subscription to bill yet.", status=409

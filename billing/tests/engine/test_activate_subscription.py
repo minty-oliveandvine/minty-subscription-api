@@ -48,6 +48,13 @@ def _db_row(entity, code=MODULE):
     return EntityModuleSubscription.objects.get(entity_id=str(entity.id), function_code=code)
 
 
+def _designate(entity, user):
+    """entities.subscriber_user_id: who holds the subscription before billing is confirmed."""
+    from minty_db.models import Entity
+
+    Entity.objects.filter(id=str(entity.id)).update(subscriber_user_id=user.id if user else None)
+
+
 def _db_user(user_id):
     """The live User row. ``make_user`` answers a snapshot; the services want the model."""
     from minty_db.models import User
@@ -66,9 +73,12 @@ def test_a_trial_row_is_written_with_no_payer(shop):
 
     assert _db_row(entity).payer_user_id is None
     assert store.payer_for_entity(entity.id) is None
-    # And so ANY admin may act, which is the whole point of not establishing one.
+    # Nobody may act until a subscriber is assigned (owner, 2026-11-13: the any-admin rule is
+    # gone); then only they may - test_subscriber_rule.py has the rest.
+    assert store.may_manage_subscription(entity.id, owner.id) is False
+    _designate(entity, owner)
     assert store.may_manage_subscription(entity.id, owner.id) is True
-    assert store.may_manage_subscription(entity.id, make_user("other@test.com").id) is True
+    assert store.may_manage_subscription(entity.id, make_user("other@test.com").id) is False
 
 
 def test_establishing_stamps_every_row_of_the_entity(shop):

@@ -840,9 +840,10 @@ def test_a_company_with_no_subscriber_at_all_is_placed_too(app, wallet):  # noqa
 
     payer, _acme, beta, _moving = _two_accounts(wallet)
     loose = _entity(None, "Nobody's Co")
-    # Placing makes the caller its subscriber, so they have to be its admin (2026-11-12;
-    # ``test_billing_accounts_api`` pins the refusal for everyone else).
+    # Placing makes the caller its payer, so they have to be its admin (2026-11-12) and its
+    # subscriber (2026-11-13; ``test_billing_accounts_api`` pins the refusal for everyone else).
     UserEntity.objects.create(user_id=payer.id, entity_id=loose.id, role="admin", approved=True)
+    type(loose).objects.filter(id=loose.id).update(subscriber_user_id=payer.id)
     store.upsert_module_row(loose.id, "PETTY_CASH", phase="trial")
     assert store.payer_for_entity(loose.id) is None
 
